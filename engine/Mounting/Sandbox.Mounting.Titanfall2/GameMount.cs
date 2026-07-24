@@ -235,6 +235,9 @@ public partial class Titanfall2Mount : BaseGameMount
 					case ".mdl":
 					case ".rmdl":
 						context.Add( ResourceType.Model, entry.Path, new ModelLoader( source ) );
+						var staticInstancePath = ModelLoader.GetStaticInstancePath( entry.Path );
+						if ( registered.Add( staticInstancePath ) )
+							context.Add( ResourceType.Model, staticInstancePath, new ModelLoader( source, staticInstance: true ) );
 						break;
 					case ".wav":
 						context.Add( ResourceType.Sound, entry.Path, new SoundLoader( source ) );

@@ -35,6 +35,7 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 	bool _hasAnchor;
 	bool _initialized;
 	bool _completionLogged;
+	bool _batchesBuilt;
 	int _totalProps;
 	int _activeCells;
 	int _liveProps;
@@ -42,6 +43,8 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 	int _failureLogs;
 	int _skinnedProps;
 	int _plainProps;
+	int _instancedProps;
+	int _batchCount;
 	int _renderingProps;
 	int _shadowCastingProps;
 
@@ -221,10 +224,12 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 	void LogCompletion()
 	{
 		if ( _completionLogged || _totalProps <= 0 || _liveProps + _failedProps < _totalProps ) return;
+		BuildPendingBatches();
 		_completionLogged = true;
 		Log.Info( $"Titanfall 2 prop streaming complete: {_liveProps}/{_totalProps} retained in "
-			+ $"{_activeCells}/{_cells.Count} cells, {_skinnedProps} frozen-skinned, "
-			+ $"{_plainProps} plain, {_renderingProps} rendering, {_shadowCastingProps} casting shadows, "
+			+ $"{_activeCells}/{_cells.Count} cells, {_instancedProps} GPU-instanced in {_batchCount} batches, "
+			+ $"{_skinnedProps} frozen-skinned fallbacks, {_plainProps} individual rigid, "
+			+ $"{_renderingProps} rendering, {_shadowCastingProps} casting shadows, "
 			+ $"{_failedProps} skipped ({MapPath})." );
 	}
 
@@ -232,7 +237,11 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 	{
 		if ( string.IsNullOrWhiteSpace( prop.ModelPath ) || string.IsNullOrWhiteSpace( MountIdent ) ) return false;
 		var resourcePath = $"mount://{MountIdent}/{prop.ModelPath}.vmdl";
-		var model = Model.Load( resourcePath );
+		var staticResourcePath = $"mount://{MountIdent}/{ModelLoader.GetStaticInstancePath( prop.ModelPath )}.vmdl";
+		var staticModel = Model.Load( staticResourcePath );
+		var model = staticModel is not null && staticModel != Model.Error
+			? staticModel
+			: Model.Load( resourcePath );
 		if ( model is null || model == Model.Error )
 		{
 			if ( _failureLogs++ < 16 ) Log.Warning( $"Unable to stream Titanfall 2 static prop model '{resourcePath}'." );
@@ -244,16 +253,29 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 		var castShadows = ShouldCastShadows( prop.Position, radius, _lastAnchor );
 		const bool renderingEnabled = true;
 		var worldTransform = new Transform( prop.Position, prop.Rotation.ToRotation(), scale );
-		SceneObject renderObject;
+		SceneObject renderObject = null;
+		var isBatched = staticModel.IsValid() && staticModel != Model.Error && ModelLoader.CanInstance( staticModel );
 
-		// BSP static props need a SceneModel to skin imported Titanfall meshes, but
-		// SkinnedModelRenderer registers every instance with SceneAnimationSystem.
-		// Large maps can contain 10-20k props, so even PlaybackRate=0 still caused a
-		// full native bone update for every prop on every frame. Own the SceneModel
-		// directly, calculate its bind pose once, and retain that frozen native
-		// object until scene teardown. Dynamic/spawned models keep using the normal
-		// SkinnedModelRenderer path and remain fully animated.
-		if ( model.BoneCount > 0 || model.AnimationCount > 0 )
+		// Opaque/cutout static variants contain bind-pose vertices without a
+		// skeleton, so identical models can share one instanced draw inside their
+		// permanent BSP cell. Special transparent/decal/water models stay as
+		// individual native objects to preserve material pass ordering.
+		if ( isBatched )
+		{
+			if ( !cell.Batches.TryGetValue( staticModel, out var pendingBatch ) )
+			{
+				pendingBatch = new PendingBatch( staticModel );
+				cell.Batches.Add( staticModel, pendingBatch );
+			}
+			pendingBatch.Add( worldTransform, radius, castShadows );
+			_instancedProps++;
+		}
+		else if ( staticModel.IsValid() && staticModel != Model.Error )
+		{
+			renderObject = new SceneObject( Scene.SceneWorld, staticModel, worldTransform );
+			_plainProps++;
+		}
+		else if ( model.BoneCount > 0 || model.AnimationCount > 0 )
 		{
 			var skinned = new SceneModel( Scene.SceneWorld, model, worldTransform )
 			{
@@ -269,9 +291,12 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 			renderObject = new SceneObject( Scene.SceneWorld, model, worldTransform );
 			_plainProps++;
 		}
-		renderObject.Flags.IsStatic = true;
-		renderObject.Flags.CastShadows = castShadows;
-		renderObject.RenderingEnabled = renderingEnabled;
+		if ( renderObject.IsValid() )
+		{
+			renderObject.Flags.IsStatic = true;
+			renderObject.Flags.CastShadows = castShadows;
+			renderObject.RenderingEnabled = renderingEnabled;
+		}
 
 		if ( renderingEnabled ) _renderingProps++;
 		if ( castShadows ) _shadowCastingProps++;
@@ -286,11 +311,12 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 			if ( Titanfall2StreamingSettings.NavMeshStaticProps )
 				collisionObject.Tags.Add( Titanfall2DeferredNavMeshBuilder.NavMeshBodyTag );
 			var collider = collisionObject.AddComponent<ModelCollider>();
-			collider.Model = model;
+			var collisionModel = Model.Load( resourcePath );
+			collider.Model = collisionModel.IsValid() && collisionModel != Model.Error ? collisionModel : model;
 			collider.Static = true;
 		}
 		cell.Instances.Add( new PropInstance(
-			collisionObject, renderObject, prop.Position, radius, renderingEnabled, castShadows ) );
+			collisionObject, renderObject, prop.Position, radius, renderingEnabled, castShadows, isBatched ) );
 		return true;
 	}
 
@@ -298,6 +324,7 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 	{
 		foreach ( var instance in cell.Instances )
 		{
+			if ( instance.IsBatched ) continue;
 			var castShadows = ShouldCastShadows( instance.Position, instance.Radius, anchor );
 			if ( castShadows != instance.CastShadows )
 			{
@@ -305,6 +332,86 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 				if ( instance.RenderObject.IsValid() )
 					instance.RenderObject.Flags.CastShadows = castShadows;
 				_shadowCastingProps += castShadows ? 1 : -1;
+			}
+		}
+
+		foreach ( var pendingBatch in cell.Batches.Values )
+		{
+			var nearCount = 0;
+			for ( var index = 0; index < pendingBatch.Transforms.Count; ++index )
+			{
+				if ( ShouldCastShadows(
+					pendingBatch.Transforms[index].Position,
+					pendingBatch.Radii[index],
+					anchor ) )
+				{
+					nearCount++;
+				}
+			}
+
+			// A batch has one shadow-pass flag. If any instance in this cell/model
+			// group is close enough, the permanent batch casts as a whole.
+			var desiredCount = pendingBatch.RenderBatch.IsValid()
+				? (nearCount > 0 ? pendingBatch.Transforms.Count : 0)
+				: nearCount;
+			if ( pendingBatch.RenderBatch.IsValid() )
+				pendingBatch.RenderBatch.CastShadows = desiredCount > 0;
+			else if ( pendingBatch.FallbackObjects.Count == pendingBatch.Transforms.Count )
+			{
+				for ( var index = 0; index < pendingBatch.FallbackObjects.Count; ++index )
+					pendingBatch.FallbackObjects[index].Flags.CastShadows = ShouldCastShadows(
+						pendingBatch.Transforms[index].Position,
+						pendingBatch.Radii[index],
+						anchor );
+			}
+
+			_shadowCastingProps += desiredCount - pendingBatch.ShadowedInstanceCount;
+			pendingBatch.ShadowedInstanceCount = desiredCount;
+		}
+	}
+
+	void BuildPendingBatches()
+	{
+		if ( _batchesBuilt ) return;
+		_batchesBuilt = true;
+
+		foreach ( var cell in _cells.Values )
+		{
+			foreach ( var pendingBatch in cell.Batches.Values )
+			{
+				if ( pendingBatch.Transforms.Count == 0 ) continue;
+				var castShadows = pendingBatch.ShadowedInstanceCount > 0;
+				try
+				{
+					pendingBatch.RenderBatch = new Titanfall2StaticModelBatch(
+						Scene.SceneWorld,
+						pendingBatch.Model,
+						pendingBatch.Transforms,
+						castShadows );
+					_batchCount++;
+
+					var batchedShadowCount = castShadows ? pendingBatch.Transforms.Count : 0;
+					_shadowCastingProps += batchedShadowCount - pendingBatch.ShadowedInstanceCount;
+					pendingBatch.ShadowedInstanceCount = batchedShadowCount;
+				}
+				catch ( Exception exception )
+				{
+					Log.Warning( exception, $"Unable to instance Titanfall 2 static model '{pendingBatch.Model.Name}'; "
+						+ "retaining permanent individual objects." );
+					for ( var index = 0; index < pendingBatch.Transforms.Count; ++index )
+					{
+						var fallback = new SceneObject(
+							Scene.SceneWorld,
+							pendingBatch.Model,
+							pendingBatch.Transforms[index] );
+						fallback.Flags.IsStatic = true;
+						fallback.Flags.CastShadows = ShouldCastShadows(
+							pendingBatch.Transforms[index].Position,
+							pendingBatch.Radii[index],
+							_lastAnchor );
+						pendingBatch.FallbackObjects.Add( fallback );
+					}
+				}
 			}
 		}
 	}
@@ -318,11 +425,21 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 
 	void DestroyCellInstances( PropCell cell )
 	{
-		if ( !cell.Active && cell.Instances.Count == 0 ) return;
+		if ( !cell.Active && cell.Instances.Count == 0 && cell.Batches.Count == 0 ) return;
+		foreach ( var pendingBatch in cell.Batches.Values )
+		{
+			_shadowCastingProps = Math.Max( 0, _shadowCastingProps - pendingBatch.ShadowedInstanceCount );
+			pendingBatch.RenderBatch?.Delete();
+			foreach ( var fallback in pendingBatch.FallbackObjects )
+				fallback?.Delete();
+		}
+		cell.Batches.Clear();
+
 		foreach ( var instance in cell.Instances )
 		{
 			if ( instance.RenderingEnabled ) _renderingProps = Math.Max( 0, _renderingProps - 1 );
-			if ( instance.CastShadows ) _shadowCastingProps = Math.Max( 0, _shadowCastingProps - 1 );
+			if ( !instance.IsBatched && instance.CastShadows )
+				_shadowCastingProps = Math.Max( 0, _shadowCastingProps - 1 );
 			instance.RenderObject?.Delete();
 			if ( instance.CollisionObject.IsValid() && !instance.CollisionObject.IsDestroyed ) instance.CollisionObject.Destroy();
 		}
@@ -405,7 +522,8 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 		Vector3 position,
 		float radius,
 		bool renderingEnabled,
-		bool castShadows )
+		bool castShadows,
+		bool isBatched )
 	{
 		public GameObject CollisionObject { get; } = collisionObject;
 		public SceneObject RenderObject { get; } = renderObject;
@@ -413,6 +531,24 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 		public float Radius { get; } = radius;
 		public bool RenderingEnabled { get; set; } = renderingEnabled;
 		public bool CastShadows { get; set; } = castShadows;
+		public bool IsBatched { get; } = isBatched;
+	}
+
+	sealed class PendingBatch( Model model )
+	{
+		public Model Model { get; } = model;
+		public List<Transform> Transforms { get; } = new();
+		public List<float> Radii { get; } = new();
+		public List<SceneObject> FallbackObjects { get; } = new();
+		public Titanfall2StaticModelBatch RenderBatch { get; set; }
+		public int ShadowedInstanceCount { get; set; }
+
+		public void Add( Transform transform, float radius, bool castShadows )
+		{
+			Transforms.Add( transform );
+			Radii.Add( radius );
+			if ( castShadows ) ShadowedInstanceCount++;
+		}
 	}
 
 	readonly record struct CellCoordinate( int X, int Y )
@@ -438,6 +574,7 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 		public CellCoordinate Coordinate { get; } = coordinate;
 		public List<StreamedProp> Props { get; } = new();
 		public List<PropInstance> Instances { get; } = new();
+		public Dictionary<Model, PendingBatch> Batches { get; } = new();
 		public int NextProp { get; set; }
 		public float DistanceSquared { get; set; }
 		public bool Active { get; set; }

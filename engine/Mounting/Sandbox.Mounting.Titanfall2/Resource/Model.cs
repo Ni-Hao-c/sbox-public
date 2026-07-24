@@ -1,10 +1,13 @@
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using Titanfall2.Formats;
 
 /// <summary>Loads an embedded Titanfall 2 MDL53/RMDL as a runtime model.</summary>
-class ModelLoader( ITitanfall2AssetSource source ) : ResourceLoader<Titanfall2Mount>
+class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false ) : ResourceLoader<Titanfall2Mount>
 {
+	internal const string StaticInstanceSuffix = ".t2static";
 	const float DecalNormalOffset = 0.05f;
+	static readonly ConcurrentDictionary<Model, bool> StaticInstanceEligibility = new();
 	static long _collisionModelCount;
 	static long _vphyModelCount;
 	static long _hitboxModelCount;
@@ -13,6 +16,7 @@ class ModelLoader( ITitanfall2AssetSource source ) : ResourceLoader<Titanfall2Mo
 	static long _noCollisionModelCount;
 	static long _fallbackTriangleCount;
 	readonly ITitanfall2AssetSource _source = source;
+	readonly bool _staticInstance = staticInstance;
 
 	[StructLayout( LayoutKind.Sequential )]
 	struct TitanfallVertex
@@ -76,13 +80,95 @@ class ModelLoader( ITitanfall2AssetSource source ) : ResourceLoader<Titanfall2Mo
 		{
 			var parsed = Titanfall2Mdl53Reader.Parse( data );
 			var lod = Titanfall2MeshExtractor.ExtractLod( parsed, 0 );
-			return BuildModel( parsed, lod, data );
+			return _staticInstance
+				? BuildStaticInstanceModel( lod )
+				: BuildModel( parsed, lod, data );
 		}
 		catch ( Exception exception )
 		{
 			Log.Warning( $"Failed to convert Titanfall 2 model '{Path}': {exception.Message}" );
 			return null;
 		}
+	}
+
+	internal static string GetStaticInstancePath( string sourceModelPath )
+		=> sourceModelPath + StaticInstanceSuffix;
+
+	internal static bool CanInstance( Model model )
+		=> model.IsValid() && StaticInstanceEligibility.TryGetValue( model, out var eligible ) && eligible;
+
+	Model BuildStaticInstanceModel( Titanfall2MeshExtractor.ExtractedLod lod )
+	{
+		var isVista = IsVistaModelPath( Path );
+		var builder = Model.Builder.WithName( Path );
+		var hasMesh = false;
+		var canInstance = true;
+
+		for ( var meshIndex = 0; meshIndex < lod.Meshes.Length; ++meshIndex )
+		{
+			var sourceMesh = lod.Meshes[meshIndex];
+			if ( sourceMesh.Vertices.Length == 0 || sourceMesh.Indices.Length < 3 || ShouldSkipRenderMaterial( sourceMesh.MaterialName ) )
+				continue;
+
+			var materialName = NormalizeMaterialName( sourceMesh.MaterialName );
+			var metadata = GetMaterialMetadata( materialName );
+			if ( metadata.IsTranslucent
+				|| metadata.IsDecal
+				|| metadata.IsWater
+				|| MaterialLoader.IsGodrayMaterial( materialName ) )
+			{
+				// SceneCustomObject has one pass classification for the entire
+				// batch. Keep mixed/sorted/special materials as individual rigid
+				// SceneObjects so their native material pass selection is retained.
+				canInstance = false;
+			}
+
+			var meshBounds = new BBox { Mins = float.MaxValue, Maxs = float.MinValue };
+			var indices = ReverseWinding( sourceMesh.Indices );
+			var material = LoadMaterial( materialName )
+				?? (isVista
+					? MaterialLoader.CreateVistaMaterial( $"{Path}/fallback_{meshIndex}", materialName, metadata )
+					: metadata.IsDecal
+						? MaterialLoader.CreateDecalMaterial( $"{Path}/decal_fallback_{meshIndex}", metadata )
+						: MaterialLoader.CreateRuntimeMaterial( $"{Path}/fallback_{meshIndex}", metadata ));
+			var mesh = new Mesh( $"{Path}_{meshIndex}", material );
+			var vertices = new TitanfallVertex[sourceMesh.Vertices.Length];
+
+			for ( var vertexIndex = 0; vertexIndex < sourceMesh.Vertices.Length; ++vertexIndex )
+			{
+				var sourceVertex = sourceMesh.Vertices[vertexIndex];
+				var normal = ToSandbox( sourceVertex.Normal ).Normal;
+				var position = ToSandbox( sourceVertex.Position );
+				if ( metadata.IsDecal ) position += normal * DecalNormalOffset;
+				vertices[vertexIndex] = new TitanfallVertex
+				{
+					Position = position,
+					Normal = normal,
+					TexCoord = ToSandbox( sourceVertex.TexCoord ),
+					Color = GetVertexColor( sourceVertex )
+				};
+				meshBounds = meshBounds.AddPoint( position );
+			}
+
+			mesh.CreateVertexBuffer( vertices.Length, vertices );
+			mesh.CreateIndexBuffer( indices.Length, indices );
+			mesh.Bounds = meshBounds;
+			builder.AddMesh( mesh );
+			hasMesh = true;
+		}
+
+		if ( !hasMesh )
+		{
+			Log.Warning( $"Titanfall 2 static instance model contains no LOD0 geometry: {Path}" );
+			return null;
+		}
+
+		var model = builder.Create();
+		StaticInstanceEligibility[model] = canInstance;
+		Log.Trace( $"Titanfall 2 static instance model loaded: {Path} "
+			+ $"({lod.Meshes.Length} meshes, {lod.VertexCount} vertices, "
+			+ $"{lod.TriangleCount} triangles, GPU instancing {(canInstance ? "enabled" : "disabled for special materials")})" );
+		return model;
 	}
 
 	Model BuildModel( Titanfall2Mdl53Reader.ParsedModel parsed, Titanfall2MeshExtractor.ExtractedLod lod, byte[] data )
