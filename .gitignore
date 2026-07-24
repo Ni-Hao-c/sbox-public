@@ -12,6 +12,9 @@
 !*.csproj
 !*.cs
 !*.razor
+!engine/Mounting/Sandbox.Mounting.Titanfall2/Native/
+!engine/Mounting/Sandbox.Mounting.Titanfall2/Native/**/*.cpp
+!engine/Mounting/Sandbox.Mounting.Titanfall2/Native/**/*.ps1
 
 
 # Sandbox source files

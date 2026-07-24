@@ -88,6 +88,8 @@ public static partial class EditorUtility
 	/// </summary>
 	public static void OpenFolder( string path )
 	{
+		if ( Sandbox.Mounting.MountUtility.IsMountPath( path ) ) return;
+
 		System.Diagnostics.Process.Start( new System.Diagnostics.ProcessStartInfo()
 		{
 			FileName = path,
@@ -101,6 +103,8 @@ public static partial class EditorUtility
 	/// </summary>
 	public static void OpenFile( string path )
 	{
+		if ( Sandbox.Mounting.MountUtility.IsMountPath( path ) ) return;
+
 		try
 		{
 			System.Diagnostics.Process.Start( new System.Diagnostics.ProcessStartInfo()
@@ -128,6 +132,8 @@ public static partial class EditorUtility
 	/// </summary>
 	public static void OpenFileFolder( string filepath )
 	{
+		if ( Sandbox.Mounting.MountUtility.IsMountPath( filepath ) ) return;
+
 		filepath = System.IO.Path.GetFullPath( filepath );
 		System.Diagnostics.Process.Start( "explorer.exe", string.Format( "/select,\"{0}\"", filepath ) );
 	}

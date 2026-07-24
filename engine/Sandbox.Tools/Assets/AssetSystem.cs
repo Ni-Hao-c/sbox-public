@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.ComponentModel;
+using System.Threading;
 
 namespace Editor;
 
@@ -16,6 +17,7 @@ public static partial class AssetSystem
 	static Dictionary<ulong, Asset> allAssets = new();
 
 	[SkipHotload] static ConcurrentDictionary<string, Asset> assetsByPath = new( StringComparer.OrdinalIgnoreCase );
+	static readonly Lock MountedAssetLock = new();
 
 	/// <summary>
 	/// All the assets that are being tracked by the asset system. Does not include deleted assets.
@@ -204,6 +206,16 @@ public static partial class AssetSystem
 		if ( assetsByPath.TryGetValue( path, out var asset ) && !asset.IsDeleted )
 		{
 			return asset;
+		}
+
+		// Mounted resources are virtual and can be mounted after the asset system's
+		// initial scan. Resolve them lazily so every editor consumer (drag/drop,
+		// inspectors, MCP and property controls) sees the same Asset instance.
+		if ( Sandbox.Mounting.MountUtility.TryParse( path, out var ident ) &&
+			Sandbox.Mounting.Directory.Get( ident ) is { } mount &&
+			mount.GetByPath( path ) is { } loader )
+		{
+			return GetOrCreateMountAsset( loader, mount );
 		}
 
 		return null;
@@ -464,28 +476,31 @@ public static partial class AssetSystem
 
 	static ulong _freeIndex = uint.MaxValue;
 
+	private static Asset GetOrCreateMountAsset( Sandbox.Mounting.ResourceLoader file, Sandbox.Mounting.BaseGameMount source )
+	{
+		lock ( MountedAssetLock )
+		{
+			if ( assetsByPath.TryGetValue( file.Path, out var existing ) && !existing.IsDeleted )
+				return existing;
+
+			// Mounts only expose engine resource types. Skip unrecognized resource paths
+			// instead of creating an Asset with no AssetType for editor UI to render.
+			if ( AssetType.ResolveFromPath( file.Path ) is null )
+				return null;
+
+			var asset = new MountAsset( _freeIndex++, file, source );
+			allAssets[asset.AssetId] = asset;
+			UpdateAsset( asset, compileImmediately: false );
+			return asset;
+		}
+	}
+
 	internal static void AddAssetsFromMount( Sandbox.Mounting.BaseGameMount source )
 	{
 		foreach ( var file in source.Resources )
 		{
-			var index = _freeIndex++;
-
-			var assetType = AssetType.ResolveFromPath( file.Path );
-
-			if ( assetType == null )
-			{
-				//Log.Warning( $"assetType was null for {file.Path}" );
-				continue;
-			}
-
-			var asset = new MountAsset( index, file, source );
-
-			allAssets[asset.AssetId] = asset;
-			UpdateQueue.Add( asset );
-			HasChanges = true;
+			GetOrCreateMountAsset( file, source );
 		}
-
-		Tick();
 	}
 
 	/// <summary>

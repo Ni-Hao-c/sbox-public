@@ -2,7 +2,7 @@
 
 namespace Editor;
 
-[DropObject( "sound", "sound", "sound_c" )]
+[DropObject( "sound", "sound", "sound_c", "vsnd" )]
 partial class SoundDropObject : BaseDropObject
 {
 	SoundEvent sound;
@@ -18,7 +18,29 @@ partial class SoundDropObject : BaseDropObject
 			return;
 
 		PackageStatus = "Loading Sound";
-		sound = asset.LoadResource<SoundEvent>();
+		// Mounted games expose decoded audio as SoundFile resources behind .vsnd.
+		// A SoundPoint serializes a SoundEvent, so wrap the mounted SoundFile in an
+		// embedded event instead of trying to load it as a local .sound asset.
+		if ( Sandbox.Mounting.MountUtility.IsMountPath( asset.Path ) && asset.Path.EndsWith( ".vsnd", StringComparison.OrdinalIgnoreCase ) )
+		{
+			var soundFile = SoundFile.Load( asset.Path );
+			if ( soundFile is not null )
+			{
+				sound = new SoundEvent
+				{
+					Sounds = [soundFile],
+					DistanceAttenuation = true,
+					Distance = 1024.0f,
+					OcclusionEnabled = false,
+					ReverbEnabled = false,
+					EmbeddedResource = new Sandbox.Resources.EmbeddedResource { ResourceCompiler = "embed" }
+				};
+			}
+		}
+		else
+		{
+			sound = asset.LoadResource<SoundEvent>();
+		}
 		PackageStatus = null;
 	}
 

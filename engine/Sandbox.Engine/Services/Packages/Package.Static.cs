@@ -138,6 +138,12 @@ public partial class Package
 	/// </summary>
 	public static async Task<Package> FetchAsync( string identString, bool partial, bool useCache )
 	{
+		// Runtime-mounted game resources are local asset URIs, not package idents.
+		// UI such as the scoreboard may ask for map package metadata regardless of
+		// where the scene came from; returning no package is the expected result.
+		if ( identString?.StartsWith( "mount://", StringComparison.OrdinalIgnoreCase ) == true )
+			return null;
+
 		// split ident into parts
 		if ( !TryParseIdent( identString, out var ident ) && !ident.local )
 		{
