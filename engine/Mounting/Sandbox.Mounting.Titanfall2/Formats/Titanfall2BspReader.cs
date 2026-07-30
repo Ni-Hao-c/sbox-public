@@ -28,6 +28,11 @@ public static partial class Titanfall2BspReader
 	private const int MeshIndicesLumpId = 0x004F;
 	private const int MeshesLumpId = 0x0050;
 	private const int MaterialSortsLumpId = 0x0052;
+	private const int LightmapHeadersLumpId = 0x0053;
+	private const int LightmapDataSkyLumpId = 0x0062;
+	private const int LightProbesLumpId = 0x0065;
+	private const int StaticPropLightProbeIndicesLumpId = 0x0066;
+	private const int LightmapDataRealTimeLightsLumpId = 0x0069;
 	private const int CellBspNodesLumpId = 0x006A;
 	private const int CellsLumpId = 0x006B;
 	private const int PortalsLumpId = 0x006C;
@@ -65,6 +70,25 @@ public static partial class Titanfall2BspReader
 		public BspVisibility Visibility { get; init; } = new();
 		public IReadOnlyList<BspCubemap> Cubemaps { get; init; } = Array.Empty<BspCubemap>();
 		public byte[] EmbeddedCubemapVtf { get; init; } = Array.Empty<byte>();
+		public BspLightmaps Lightmaps { get; init; } = new();
+	}
+
+	public sealed class BspLightmaps
+	{
+		public IReadOnlyList<BspLightmapPage> Pages { get; init; } = Array.Empty<BspLightmapPage>();
+		public bool IsValid => Pages.Count > 0;
+	}
+
+	public sealed class BspLightmapPage
+	{
+		public int Type { get; init; }
+		public int Width { get; init; }
+		public int Height { get; init; }
+		public byte[] SkyA { get; init; } = Array.Empty<byte>();
+		public byte[] SkyB { get; init; } = Array.Empty<byte>();
+		public byte[] RealTimeA { get; init; } = Array.Empty<byte>();
+		public byte[] RealTimeB { get; init; } = Array.Empty<byte>();
+		public byte[] RealTimeC { get; init; } = Array.Empty<byte>();
 	}
 
 	public sealed class BspWorld
@@ -80,6 +104,7 @@ public static partial class Titanfall2BspReader
 		public string MaterialName { get; init; }
 		public int VisibilityObjectIndex { get; init; } = -1;
 		public int Cubemap { get; init; } = -1;
+		public int LightmapPage { get; init; } = -1;
 		public WorldVertex[] Vertices { get; init; } = Array.Empty<WorldVertex>();
 		public int[] Indices { get; init; } = Array.Empty<int>();
 	}
@@ -90,6 +115,7 @@ public static partial class Titanfall2BspReader
 		NumericsVector3 Position,
 		NumericsVector3 Normal,
 		NumericsVector2 TexCoord,
+		NumericsVector2 LightmapTexCoord,
 		WorldVertexColor Color );
 
 	public readonly record struct WorldVertexColor( byte R, byte G, byte B, byte A );
@@ -158,6 +184,7 @@ public static partial class Titanfall2BspReader
 		public byte DiffuseModulationA { get; init; }
 		public uint CollisionFlagsAdd { get; init; }
 		public uint CollisionFlagsRemove { get; init; }
+		public NumericsVector3 LightProbeColor { get; set; } = NumericsVector3.One;
 		// R2 can leave the legacy solid byte at zero and express the effective
 		// collision contents through the add/remove masks that follow the prop.
 		public bool IsCollidable => SolidType != 0 || CollisionFlagsAdd != 0;
@@ -166,7 +193,7 @@ public static partial class Titanfall2BspReader
 	private readonly record struct LumpHeader( int Offset, int Length, int Version, int FourCc );
 	private readonly record struct ModelEntry( NumericsVector3 Mins, NumericsVector3 Maxs, int FirstMesh, int NumMeshes );
 	private readonly record struct MeshEntry( int FirstMeshIndex, int NumTriangles, int MaterialSort, int Cubemap, uint Flags );
-	private readonly record struct MaterialSortEntry( int TextureData, int VertexOffset );
+	private readonly record struct MaterialSortEntry( int TextureData, int LightmapPage, int VertexOffset );
 	private readonly record struct TextureDataEntry( int NameIndex );
 	private readonly record struct VisibilityCellEntry( int NumPortals, int FirstPortal, int Flags );
 	private readonly record struct VisibilityPortalEntry( int Type, int NumEdges, int FirstReference, int Cell );
@@ -175,6 +202,7 @@ public static partial class Titanfall2BspReader
 		int PositionIndex,
 		int NormalIndex,
 		NumericsVector2 AlbedoUv,
+		NumericsVector2 LightmapUv,
 		WorldVertexColor Color );
 	private readonly record struct GameLumpChildHeader( string Name, int Version, int Offset, int Length );
 
@@ -294,6 +322,14 @@ public static partial class Titanfall2BspReader
 			? ParseWorldCollision( stream, headers, overrideLumps )
 			: new BspWorldCollision();
 		var staticProps = ParseStaticProps( stream, headers, overrideLumps );
+		ApplyStaticPropLightProbes(
+			staticProps,
+			ReadLumpBytes( stream, headers, overrideLumps, LightProbesLumpId ),
+			ReadLumpBytes( stream, headers, overrideLumps, StaticPropLightProbeIndicesLumpId ) );
+		var lightmaps = ReadLightmaps(
+			ReadLumpBytes( stream, headers, overrideLumps, LightmapHeadersLumpId ),
+			ReadLumpBytes( stream, headers, overrideLumps, LightmapDataSkyLumpId ),
+			ReadLumpBytes( stream, headers, overrideLumps, LightmapDataRealTimeLightsLumpId ) );
 		var cubemaps = ReadCubemaps( ReadLumpBytes( stream, headers, overrideLumps, CubemapsLumpId ) );
 		var embeddedCubemapVtf = ReadEmbeddedCubemapVtf(
 			ReadLumpBytes( stream, headers, overrideLumps, PakFileLumpId ), mapName );
@@ -307,7 +343,8 @@ public static partial class Titanfall2BspReader
 			WorldCollision = worldCollision,
 			StaticProps = staticProps,
 			Cubemaps = cubemaps,
-			EmbeddedCubemapVtf = embeddedCubemapVtf
+			EmbeddedCubemapVtf = embeddedCubemapVtf,
+			Lightmaps = lightmaps
 		};
 
 		return true;
@@ -329,10 +366,10 @@ public static partial class Titanfall2BspReader
 			ReadLumpBytes( stream, headers, overrideLumps, TextureDataStringTableLumpId ),
 			ReadLumpBytes( stream, headers, overrideLumps, TextureDataStringDataLumpId ) );
 
-		var vertexUnlit = ReadVertexRefs( ReadLumpBytes( stream, headers, overrideLumps, VertexUnlitLumpId ), 20 );
-		var vertexLitFlat = ReadVertexRefs( ReadLumpBytes( stream, headers, overrideLumps, VertexLitFlatLumpId ), 36 );
-		var vertexLitBump = ReadVertexRefs( ReadLumpBytes( stream, headers, overrideLumps, VertexLitBumpLumpId ), 44 );
-		var vertexUnlitTs = ReadVertexRefs( ReadLumpBytes( stream, headers, overrideLumps, VertexUnlitTsLumpId ), 28 );
+		var vertexUnlit = ReadVertexRefs( ReadLumpBytes( stream, headers, overrideLumps, VertexUnlitLumpId ), 20, false );
+		var vertexLitFlat = ReadVertexRefs( ReadLumpBytes( stream, headers, overrideLumps, VertexLitFlatLumpId ), 36, true );
+		var vertexLitBump = ReadVertexRefs( ReadLumpBytes( stream, headers, overrideLumps, VertexLitBumpLumpId ), 44, true );
+		var vertexUnlitTs = ReadVertexRefs( ReadLumpBytes( stream, headers, overrideLumps, VertexUnlitTsLumpId ), 28, false );
 
 		var worldModel = models[0];
 		var worldMeshes = new List<WorldMesh>();
@@ -626,6 +663,7 @@ public static partial class Titanfall2BspReader
 			MaterialName = materialName,
 			VisibilityObjectIndex = visibilityObjectIndex,
 			Cubemap = mesh.Cubemap,
+			LightmapPage = materialSort.LightmapPage,
 			Vertices = vertices.ToArray(),
 			Indices = indices.ToArray()
 		};
@@ -696,7 +734,7 @@ public static partial class Titanfall2BspReader
 			? normals[vertexRef.NormalIndex]
 			: new NumericsVector3( 0f, 0f, 1f );
 
-		worldVertex = new WorldVertex( position, normal, vertexRef.AlbedoUv, vertexRef.Color );
+		worldVertex = new WorldVertex( position, normal, vertexRef.AlbedoUv, vertexRef.LightmapUv, vertexRef.Color );
 		return true;
 	}
 
@@ -969,11 +1007,11 @@ public static partial class Titanfall2BspReader
 		for ( int i = 0; i < materialSorts.Length; i++ )
 		{
 			int textureData = reader.ReadInt16();
-			reader.ReadInt16();
+			int lightmapPage = reader.ReadInt16();
 			reader.ReadInt16();
 			reader.ReadInt16();
 			int vertexOffset = reader.ReadInt32();
-			materialSorts[i] = new MaterialSortEntry( textureData, vertexOffset );
+			materialSorts[i] = new MaterialSortEntry( textureData, lightmapPage, vertexOffset );
 		}
 
 		return materialSorts;
@@ -1005,7 +1043,7 @@ public static partial class Titanfall2BspReader
 		return textureData;
 	}
 
-	private static VertexRef[] ReadVertexRefs( byte[] bytes, int stride )
+	private static VertexRef[] ReadVertexRefs( byte[] bytes, int stride, bool hasLightmapUv )
 	{
 		if ( bytes.Length < stride || stride < 20 )
 			return Array.Empty<VertexRef>();
@@ -1024,13 +1062,123 @@ public static partial class Titanfall2BspReader
 				reader.ReadByte(),
 				reader.ReadByte(),
 				reader.ReadByte() );
-			if ( stride > 20 )
+			var lightmapUv = default( NumericsVector2 );
+			if ( hasLightmapUv && stride >= 28 )
+			{
+				float lightmapU = reader.ReadSingle();
+				float lightmapV = reader.ReadSingle();
+				// R2's embedded lightmap pages are uploaded directly in their
+				// original top-left layout. Unlike decoded material textures,
+				// this UV set must not be vertically inverted.
+				lightmapUv = new NumericsVector2( lightmapU, lightmapV );
+				if ( stride > 28 )
+					reader.ReadBytes( stride - 28 );
+			}
+			else if ( stride > 20 )
+			{
 				reader.ReadBytes( stride - 20 );
+			}
 
-			vertexRefs[i] = new VertexRef( positionIndex, normalIndex, new NumericsVector2( u, 1f - v ), color );
+			vertexRefs[i] = new VertexRef(
+				positionIndex,
+				normalIndex,
+				new NumericsVector2( u, 1f - v ),
+				lightmapUv,
+				color );
 		}
 
 		return vertexRefs;
+	}
+
+	private static void ApplyStaticPropLightProbes(
+		IReadOnlyList<StaticPropInstance> props,
+		byte[] probeBytes,
+		byte[] indexBytes )
+	{
+		const int probeStride = 48;
+		if ( props.Count == 0 || probeBytes.Length < probeStride || indexBytes.Length < 4 )
+			return;
+
+		var probeCount = probeBytes.Length / probeStride;
+		var indexCount = Math.Min( props.Count, indexBytes.Length / 4 );
+		using var indexStream = new MemoryStream( indexBytes, writable: false );
+		using var indexReader = new BinaryReader( indexStream, Encoding.ASCII, leaveOpen: true );
+		for ( var propIndex = 0; propIndex < indexCount; propIndex++ )
+		{
+			var probeIndex = indexReader.ReadUInt32();
+			if ( probeIndex >= probeCount ) continue;
+			var offset = checked((int)probeIndex * probeStride);
+			var sum = NumericsVector3.Zero;
+			for ( var face = 0; face < 6; face++ )
+			{
+				var faceOffset = offset + face * 4;
+				var exponent = unchecked((sbyte)probeBytes[faceOffset + 3]);
+				var scale = MathF.Pow( 2f, exponent ) / 255f;
+				sum += new NumericsVector3(
+					probeBytes[faceOffset] * scale,
+					probeBytes[faceOffset + 1] * scale,
+					probeBytes[faceOffset + 2] * scale );
+			}
+
+			var average = sum / 6f;
+			props[propIndex].LightProbeColor = new NumericsVector3(
+				Math.Clamp( average.X, 0.04f, 4f ),
+				Math.Clamp( average.Y, 0.04f, 4f ),
+				Math.Clamp( average.Z, 0.04f, 4f ) );
+		}
+	}
+
+	private static BspLightmaps ReadLightmaps( byte[] headerBytes, byte[] skyBytes, byte[] realTimeBytes )
+	{
+		const int headerStride = 8;
+		if ( headerBytes.Length < headerStride )
+			return new BspLightmaps();
+
+		var pages = new List<BspLightmapPage>( headerBytes.Length / headerStride );
+		using var headerStream = new MemoryStream( headerBytes, writable: false );
+		using var headerReader = new BinaryReader( headerStream, Encoding.ASCII, leaveOpen: true );
+		var skyOffset = 0;
+		var realTimeOffset = 0;
+		while ( headerStream.Position + headerStride <= headerStream.Length )
+		{
+			var type = headerReader.ReadInt32();
+			var width = headerReader.ReadUInt16();
+			var height = headerReader.ReadUInt16();
+			if ( width == 0 || height == 0 )
+				continue;
+
+			var pixelCount = checked((int)width * height);
+			var fullImageBytes = checked(pixelCount * 4);
+			var halfImageBytes = checked(Math.Max( 1, width / 2 ) * Math.Max( 1, height / 2 ) * 4);
+			var skyA = ReadImage( skyBytes, ref skyOffset, fullImageBytes );
+			var skyB = ReadImage( skyBytes, ref skyOffset, fullImageBytes );
+			var realTimeA = ReadImage( realTimeBytes, ref realTimeOffset, fullImageBytes );
+			var realTimeB = ReadImage( realTimeBytes, ref realTimeOffset, fullImageBytes );
+			var realTimeC = ReadImage( realTimeBytes, ref realTimeOffset, halfImageBytes );
+			pages.Add( new BspLightmapPage
+			{
+				Type = type,
+				Width = width,
+				Height = height,
+				SkyA = skyA,
+				SkyB = skyB,
+				RealTimeA = realTimeA,
+				RealTimeB = realTimeB,
+				RealTimeC = realTimeC
+			} );
+		}
+
+		return new BspLightmaps { Pages = pages };
+
+		static byte[] ReadImage( byte[] source, ref int offset, int length )
+		{
+			if ( length <= 0 || offset < 0 || offset + length > source.Length )
+				return Array.Empty<byte>();
+			var image = new byte[length];
+			Buffer.BlockCopy( source, offset, image, 0, length );
+			offset += length;
+			return image;
+		}
 	}
 
 	private static NumericsVector3[] ReadVector3Array( byte[] bytes )

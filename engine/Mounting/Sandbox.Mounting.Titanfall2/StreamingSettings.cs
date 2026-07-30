@@ -22,6 +22,15 @@ static class Titanfall2StreamingSettings
 	// so the loading screen and platform event loop remain responsive.
 	public static int PropPreloadPerYield { get; } = GetInt( "SBOX_TITANFALL2_PROP_PRELOAD_PER_YIELD", 128, 1, 2048 );
 	public static float PropPreloadBudgetMilliseconds { get; } = GetFloat( "SBOX_TITANFALL2_PROP_PRELOAD_BUDGET_MS", 12f, 1f, 50f );
+	// Titanfall maps ship baked lightmap/light-probe data. Until that data is
+	// decoded into the mounted world shader, prefer stable frame time over
+	// resubmitting the entire imported map and its props to directional CSM.
+	// Set SBOX_TITANFALL2_MAP_SHADOWS=1 to restore the previous dynamic shadows.
+	public static bool MapShadows { get; } = GetBool( "SBOX_TITANFALL2_MAP_SHADOWS", false );
+	// Keep nearby prop silhouettes/contact shadows even while the much more
+	// expensive BSP world chunks stay out of CSM. This is the useful visual
+	// middle ground while Respawn's direct-light lightmap term is unresolved.
+	public static bool PropShadows { get; } = GetBool( "SBOX_TITANFALL2_PROP_SHADOWS", true );
 	// Static BSP props stay resident, but distant/small props do not need to be
 	// submitted into every directional-light cascade. Large props receive a
 	// radius allowance so buildings keep useful silhouettes beyond this range.

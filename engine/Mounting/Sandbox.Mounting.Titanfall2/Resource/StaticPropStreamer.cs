@@ -11,7 +11,7 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 {
 	static readonly Sandbox.Diagnostics.Logger Log = new( "Titanfall2Props" );
 	const int DataMagic = 0x32505354; // TSP2
-	const int DataVersion = 1;
+	const int DataVersion = 2;
 	const int MaximumModelCount = 65536;
 	const int MaximumPropCount = 1_000_000;
 
@@ -275,7 +275,7 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 				pendingBatch = new PendingBatch( staticModel );
 				cell.Batches.Add( staticModel, pendingBatch );
 			}
-			pendingBatch.Add( worldTransform, radius, castShadows );
+			pendingBatch.Add( worldTransform, radius, castShadows, prop.ProbeColor );
 			_instancedProps++;
 		}
 		else if ( staticModel.IsValid() && staticModel != Model.Error )
@@ -303,6 +303,7 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 		{
 			renderObject.Flags.IsStatic = true;
 			renderObject.Flags.CastShadows = castShadows;
+			renderObject.ColorTint = new Color( prop.ProbeColor.x, prop.ProbeColor.y, prop.ProbeColor.z, 1f );
 			renderObject.RenderingEnabled = renderingEnabled;
 		}
 
@@ -411,7 +412,8 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 						Scene.SceneWorld,
 						pendingBatch.Model,
 						pendingBatch.Transforms,
-						castShadows );
+						castShadows,
+						pendingBatch.AverageProbeColor );
 					_batchCount++;
 
 					var batchedShadowCount = castShadows ? pendingBatch.Transforms.Count : 0;
@@ -429,6 +431,8 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 							pendingBatch.Model,
 							pendingBatch.Transforms[index] );
 						fallback.Flags.IsStatic = true;
+						var probeColor = pendingBatch.ProbeColors[index];
+						fallback.ColorTint = new Color( probeColor.x, probeColor.y, probeColor.z, 1f );
 						fallback.Flags.CastShadows = ShouldCastShadows(
 							pendingBatch.Transforms[index].Position,
 							pendingBatch.Radii[index],
@@ -442,6 +446,7 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 
 	static bool ShouldCastShadows( Vector3 position, float radius, Vector3 anchor )
 	{
+		if ( !Titanfall2StreamingSettings.PropShadows ) return false;
 		if ( radius < Titanfall2StreamingSettings.PropShadowMinimumRadius ) return false;
 		var distance = Titanfall2StreamingSettings.PropShadowDistance + radius;
 		return position.DistanceSquared( anchor ) <= distance * distance;
@@ -502,6 +507,11 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 				writer.Write( prop.Angles.Z );
 				writer.Write( prop.Scale );
 				writer.Write( prop.IsCollidable );
+				// LIGHTPROBE_INDICES is not a confirmed one-index-per-prop table
+				// in R2. Do not turn unverified records into per-instance RGB tint.
+				writer.Write( 1f );
+				writer.Write( 1f );
+				writer.Write( 1f );
 			}
 		}
 		return Convert.ToBase64String( stream.GetBuffer(), 0, checked((int)stream.Length) );
@@ -528,7 +538,8 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 			var rotation = new Angles( reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle() );
 			var scale = reader.ReadSingle();
 			var collidable = reader.ReadBoolean();
-			yield return new StreamedProp( models[modelIndex], position, rotation, scale, collidable );
+			var probeColor = new Vector3( reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle() );
+			yield return new StreamedProp( models[modelIndex], position, rotation, scale, collidable, probeColor );
 		}
 	}
 
@@ -538,7 +549,13 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 		return normalized.EndsWith( ".vmdl", StringComparison.OrdinalIgnoreCase ) ? normalized[..^5] : normalized;
 	}
 
-	readonly record struct StreamedProp( string ModelPath, Vector3 Position, Angles Rotation, float Scale, bool Collidable );
+	readonly record struct StreamedProp(
+		string ModelPath,
+		Vector3 Position,
+		Angles Rotation,
+		float Scale,
+		bool Collidable,
+		Vector3 ProbeColor );
 
 	sealed class PropInstance(
 		GameObject collisionObject,
@@ -563,14 +580,20 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 		public Model Model { get; } = model;
 		public List<Transform> Transforms { get; } = new();
 		public List<float> Radii { get; } = new();
+		public List<Vector3> ProbeColors { get; } = new();
 		public List<SceneObject> FallbackObjects { get; } = new();
 		public Titanfall2StaticModelBatch RenderBatch { get; set; }
 		public int ShadowedInstanceCount { get; set; }
 
-		public void Add( Transform transform, float radius, bool castShadows )
+		public Vector3 AverageProbeColor => ProbeColors.Count == 0
+			? Vector3.One
+			: ProbeColors.Aggregate( Vector3.Zero, static ( sum, color ) => sum + color ) / ProbeColors.Count;
+
+		public void Add( Transform transform, float radius, bool castShadows, Vector3 probeColor )
 		{
 			Transforms.Add( transform );
 			Radii.Add( radius );
+			ProbeColors.Add( probeColor );
 			if ( castShadows ) ShadowedInstanceCount++;
 		}
 	}

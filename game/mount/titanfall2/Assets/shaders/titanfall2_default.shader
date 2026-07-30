@@ -41,6 +41,7 @@ struct PixelInput
 	float3 vPositionOs : TEXCOORD14;
 	float3 vNormalOs : TEXCOORD15;
 	float4 vTangentUOs_flTangentVSign : TANGENT	< Semantic( TangentU_SignV ); >;
+	float4 vProbeTint : COLOR1;
 };
 
 VS
@@ -51,6 +52,7 @@ VS
 	{
 		PixelInput i = ProcessVertex( v );
 		i.vPositionOs = v.vPositionOs.xyz;
+		i.vProbeTint = GetExtraPerInstanceShaderData( v.nInstanceTransformID ).vTint;
 
 		VS_DecodeObjectSpaceNormalAndTangent( v, i.vNormalOs, i.vTangentUOs_flTangentVSign );
 
@@ -139,12 +141,12 @@ PS
 		float opacity = Tex2DS( g_tOpacity, g_sAniso, uv ).r;
 		float4 emissive = Tex2DS( g_tEmissive, g_sAniso, uv );
 
-		m.Albedo = T2ApplyDetail( albedo.xyz, uv ) * g_vT2AlbedoTint.rgb;
+		m.Albedo = T2ApplyDetail( albedo.xyz, uv ) * g_vT2AlbedoTint.rgb * i.vProbeTint.rgb;
 		m.Roughness = T2Roughness( gloss );
 		m.Metalness = T2Metalness( specular );
 		m.AmbientOcclusion = ao;
 		m.Opacity = albedo.a * opacity * g_flT2MaterialOpacity;
-		m.Emission = emissive.xyz * g_vT2EmissiveTint.rgb * g_flT2EmissiveStrength;
+		m.Emission = emissive.xyz * g_vT2EmissiveTint.rgb * g_flT2EmissiveStrength * i.vProbeTint.rgb;
 		m.Emission += T2Environment( i.vPositionWithOffsetWs + g_vHighPrecisionLightingOffsetWs.xyz, m.Normal, m.Roughness );
 
 		// Titanfall's packed tangent stream is not reconstructed by ModelLoader yet.

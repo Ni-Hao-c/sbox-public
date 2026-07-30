@@ -21,7 +21,8 @@ sealed class Titanfall2StaticModelBatch : SceneCustomObject
 		SceneWorld world,
 		Model model,
 		IReadOnlyList<Transform> transforms,
-		bool castShadows )
+		bool castShadows,
+		Vector3 probeColor )
 		: base( world )
 	{
 		_model = model;
@@ -46,6 +47,7 @@ sealed class Titanfall2StaticModelBatch : SceneCustomObject
 		Flags.NeedsLightProbe = true;
 		Flags.NeedsEnvironmentMap = true;
 		Flags.IncludeInCubemap = true;
+		ColorTint = new Color( probeColor.x, probeColor.y, probeColor.z, 1f );
 	}
 
 	public override void RenderSceneObject()

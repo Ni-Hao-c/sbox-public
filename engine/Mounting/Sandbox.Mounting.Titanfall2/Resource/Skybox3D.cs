@@ -1,4 +1,5 @@
 using System.Reflection;
+using Sandbox.Rendering;
 
 /// <summary>
 /// Hosts Titanfall 2 vista models in the engine's native 3D skybox world. The
@@ -32,6 +33,21 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 	public float SkyScale { get; set; } = 1000f;
 
 	[Property, Hide]
+	public bool FogEnabled { get; set; }
+
+	[Property, Hide]
+	public Color FogColor { get; set; } = new( 0.74f, 0.85f, 1f );
+
+	[Property, Hide]
+	public float FogStartDistance { get; set; } = 500f;
+
+	[Property, Hide]
+	public float FogEndDistance { get; set; } = 5000f;
+
+	[Property, Hide]
+	public float FogMaximumOpacity { get; set; } = 0.3f;
+
+	[Property, Hide]
 	public string EncodedModels { get; set; }
 
 	readonly List<SceneModel> _sceneModels = new();
@@ -47,6 +63,7 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 		Vector3 cameraOrigin,
 		Angles cameraAngles,
 		float skyScale,
+		Titanfall2SkyboxFog fog,
 		IReadOnlyList<Titanfall2SkyboxModel> models )
 	{
 		MountIdent = mountIdent;
@@ -55,6 +72,11 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 		CameraOrigin = cameraOrigin;
 		CameraAngles = cameraAngles;
 		SkyScale = Math.Clamp( skyScale, 1f, 100000f );
+		FogEnabled = fog.Enabled;
+		FogColor = fog.Color;
+		FogStartDistance = MathF.Max( 0f, fog.StartDistance );
+		FogEndDistance = MathF.Max( FogStartDistance + 1f, fog.EndDistance );
+		FogMaximumOpacity = Math.Clamp( fog.MaximumOpacity, 0f, 0.85f );
 		EncodedModels = Encode( models );
 	}
 
@@ -97,6 +119,24 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 				// the generic Titanfall material from rendering the isolated world black.
 				AmbientLightColor = new Color( 0.85f, 0.9f, 1.0f )
 			};
+			if ( FogEnabled )
+			{
+				// sky_camera fog belongs to the isolated 3D-skybox world. Applying it
+				// here restores Titanfall's aerial perspective without re-enabling fog
+				// cards or adding fog to the playable BSP world.
+				_skyboxWorld.GradientFog = new GradientFogSetup
+				{
+					Enabled = true,
+					StartDistance = FogStartDistance,
+					EndDistance = FogEndDistance,
+					StartHeight = -100000f,
+					EndHeight = 100000f,
+					MaximumOpacity = FogMaximumOpacity,
+					Color = FogColor.WithAlpha( 1f ),
+					DistanceFalloffExponent = 1.15f,
+					VerticalFalloffExponent = 0.01f
+				};
+			}
 			_skyboxBridge = constructor.Invoke( [parentWorld, _skyboxWorld] );
 			SetBridgeProperty( "CameraOrigin", CameraOrigin );
 			SetBridgeProperty( "Origin", CameraOrigin );
@@ -134,7 +174,9 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 			}
 
 			Log.Info( $"Titanfall 2 3D skybox ready: {_sceneModels.Count}/{models.Length} vista models, "
-				+ $"camera '{CameraName}', origin {CameraOrigin}, scale {SkyScale:0.##}, {failures} failures ({MapPath})." );
+				+ $"camera '{CameraName}', origin {CameraOrigin}, scale {SkyScale:0.##}, "
+				+ $"{(FogEnabled ? $"fog {FogStartDistance:0.#}-{FogEndDistance:0.#} @ {FogMaximumOpacity:0.##}" : "fog disabled")}, "
+				+ $"{failures} failures ({MapPath})." );
 		}
 		catch ( Exception exception )
 		{
@@ -235,3 +277,13 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 }
 
 readonly record struct Titanfall2SkyboxModel( string ModelPath, Vector3 Position, Angles Rotation, float Scale );
+
+readonly record struct Titanfall2SkyboxFog(
+	bool Enabled,
+	Color Color,
+	float StartDistance,
+	float EndDistance,
+	float MaximumOpacity )
+{
+	public static Titanfall2SkyboxFog Disabled => new( false, Color.White, 0f, 1f, 0f );
+}

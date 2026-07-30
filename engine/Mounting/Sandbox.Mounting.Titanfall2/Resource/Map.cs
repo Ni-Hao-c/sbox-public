@@ -16,15 +16,6 @@ class MapLoader(
 	readonly ITitanfall2AssetSource _particleEntitySource = particleEntitySource;
 	readonly ITitanfall2AssetSource _scriptEntitySource = scriptEntitySource;
 
-	[StructLayout( LayoutKind.Sequential )]
-	struct TitanfallMapVertex
-	{
-		[VertexLayout.Position] public Vector3 Position;
-		[VertexLayout.Normal] public Vector3 Normal;
-		[VertexLayout.TexCoord] public Vector2 TexCoord;
-		[VertexLayout.Color] public Color32 Color;
-	}
-
 	protected override void BuildScene()
 	{
 		// The game instance replaces Game.TypeLibrary after mount discovery. Register
@@ -82,14 +73,19 @@ class MapLoader(
 		var world = new GameObject( true, "worldspawn" );
 		world.IsStatic = true;
 		world.AddComponent<Titanfall2MaterialAnimator>();
-		world.AddComponent<Titanfall2SceneResourceOwner>().Configure( Host.Ident );
+		world.AddComponent<Titanfall2SceneResourceOwner>().Configure( Host.Ident, worldBuild.OwnedResources );
 		foreach ( var chunk in worldBuild.WorldChunks )
 		{
 			var chunkObject = new GameObject( world, true, $"world_{chunk.Cell}" );
 			chunkObject.IsStatic = true;
-			chunkObject.AddComponent<ModelRenderer>().Model = chunk.Model;
+			var renderer = chunkObject.AddComponent<ModelRenderer>();
+			renderer.Model = chunk.Model;
+			renderer.RenderType = Titanfall2StreamingSettings.MapShadows
+				? ModelRenderer.ShadowRenderType.On
+				: ModelRenderer.ShadowRenderType.Off;
 		}
-		world.AddComponent<Titanfall2WorldShadowController>();
+		if ( Titanfall2StreamingSettings.MapShadows )
+			world.AddComponent<Titanfall2WorldShadowController>();
 		foreach ( var chunk in worldBuild.DecalChunks )
 		{
 			var decals = new GameObject( world, true, $"decals_{chunk.Cell}" );
@@ -160,9 +156,10 @@ class MapLoader(
 		var indexCount = parsed.World.Meshes.Sum( static mesh => mesh?.Indices.Length ?? 0 );
 		if ( vertexCount == 0 || indexCount == 0 ) return null;
 
-		var groups = new Dictionary<WorldRenderCell, Dictionary<string, MapMeshGroup>>();
-		var decalGroups = new Dictionary<WorldRenderCell, Dictionary<string, MapMeshGroup>>();
-		var godrayGroups = new Dictionary<WorldRenderCell, Dictionary<string, MapMeshGroup>>();
+		var groups = new Dictionary<WorldRenderCell, Dictionary<WorldMaterialKey, MapMeshGroup>>();
+		var decalGroups = new Dictionary<WorldRenderCell, Dictionary<WorldMaterialKey, MapMeshGroup>>();
+		var godrayGroups = new Dictionary<WorldRenderCell, Dictionary<WorldMaterialKey, MapMeshGroup>>();
+		var lightmaps = CreateLightmapTextures( parsed.Lightmaps );
 		var worldMaterials = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
 		var decalMaterials = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
 		var godrayMaterials = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
@@ -213,7 +210,8 @@ class MapLoader(
 				var cell = WorldRenderCell.FromTriangle(
 					vertex0.Position, vertex1.Position, vertex2.Position,
 					Titanfall2StreamingSettings.WorldRenderCellSize );
-				var group = GetRenderGroup( targetGroups, cell, materialName );
+				var lightmapPage = !isGodray && !isDecal ? sourceMesh.LightmapPage : -1;
+				var group = GetRenderGroup( targetGroups, cell, new WorldMaterialKey( materialName, lightmapPage ) );
 				var baseVertex = group.Vertices.Count;
 				group.Vertices.Add( vertex0 );
 				group.Vertices.Add( vertex1 );
@@ -256,18 +254,20 @@ class MapLoader(
 		var renderTimer = System.Diagnostics.Stopwatch.StartNew();
 		var worldChunks = BuildRenderChunks(
 			groups, parsed.MapName, "world",
-			(materialName, meshIndex) => LoadWorldMaterial( materialName )
-				?? MaterialLoader.CreateRuntimeMaterial( $"{Path}/world_fallback_{meshIndex}", GetMaterialMetadata( materialName ) ),
+			(materialKey, meshIndex) => CreateWorldLightmappedMaterial(
+				materialKey,
+				meshIndex,
+				lightmaps ),
 			out var worldRenderMeshCount );
 		var decalChunks = BuildRenderChunks(
 			decalGroups, parsed.MapName, "decals",
-			(materialName, meshIndex) => LoadWorldMaterial( materialName )
-				?? MaterialLoader.CreateDecalMaterial( $"{Path}/decal_fallback_{meshIndex}", GetMaterialMetadata( materialName ) ),
+			(materialKey, meshIndex) => LoadWorldMaterial( materialKey.MaterialName )
+				?? MaterialLoader.CreateDecalMaterial( $"{Path}/decal_fallback_{meshIndex}", GetMaterialMetadata( materialKey.MaterialName ) ),
 			out var decalRenderMeshCount );
 		var godrayChunks = BuildRenderChunks(
 			godrayGroups, parsed.MapName, "godrays",
-			(materialName, meshIndex) => LoadWorldMaterial( materialName )
-				?? MaterialLoader.CreateGodrayMaterial( $"{Path}/godray_fallback_{meshIndex}", materialName ),
+			(materialKey, meshIndex) => LoadWorldMaterial( materialKey.MaterialName )
+				?? MaterialLoader.CreateGodrayMaterial( $"{Path}/godray_fallback_{meshIndex}", materialKey.MaterialName ),
 			out var godrayRenderMeshCount );
 		if ( worldChunks.Count == 0 ) return null;
 		Log.Info( $"Titanfall 2 spatial render models created: {Path} "
@@ -285,7 +285,7 @@ class MapLoader(
 			collisionModel = collisionBuilder.Create();
 			Log.Info( $"Titanfall 2 fallback render collision submitted: {Path} ({collisionIndices.Count / 3} triangles)" );
 		}
-		return new WorldBuildResult( worldChunks, decalChunks, godrayChunks, collisionModel );
+		return new WorldBuildResult( worldChunks, decalChunks, godrayChunks, collisionModel, lightmaps?.OwnedResources ?? Array.Empty<IDisposable>() );
 	}
 
 	static TitanfallMapVertex CreateWorldVertex( Titanfall2BspReader.WorldVertex sourceVertex, bool isDecal )
@@ -298,31 +298,32 @@ class MapLoader(
 			Position = position,
 			Normal = normal,
 			TexCoord = ToSandbox( sourceVertex.TexCoord ),
+			LightmapTexCoord = ToSandbox( sourceVertex.LightmapTexCoord ),
 			Color = new Color32( sourceVertex.Color.R, sourceVertex.Color.G, sourceVertex.Color.B, sourceVertex.Color.A )
 		};
 	}
 
 	static MapMeshGroup GetRenderGroup(
-		Dictionary<WorldRenderCell, Dictionary<string, MapMeshGroup>> chunks,
+		Dictionary<WorldRenderCell, Dictionary<WorldMaterialKey, MapMeshGroup>> chunks,
 		WorldRenderCell cell,
-		string materialName )
+		WorldMaterialKey materialKey )
 	{
 		if ( !chunks.TryGetValue( cell, out var materials ) )
 		{
-			materials = new Dictionary<string, MapMeshGroup>( StringComparer.OrdinalIgnoreCase );
+			materials = new Dictionary<WorldMaterialKey, MapMeshGroup>();
 			chunks.Add( cell, materials );
 		}
-		if ( materials.TryGetValue( materialName, out var group ) ) return group;
+		if ( materials.TryGetValue( materialKey, out var group ) ) return group;
 		group = new MapMeshGroup();
-		materials.Add( materialName, group );
+		materials.Add( materialKey, group );
 		return group;
 	}
 
 	List<WorldRenderChunk> BuildRenderChunks(
-		Dictionary<WorldRenderCell, Dictionary<string, MapMeshGroup>> chunks,
+		Dictionary<WorldRenderCell, Dictionary<WorldMaterialKey, MapMeshGroup>> chunks,
 		string mapName,
 		string category,
-		Func<string, int, Material> materialFactory,
+		Func<WorldMaterialKey, int, Material> materialFactory,
 		out int totalMeshCount )
 	{
 		var result = new List<WorldRenderChunk>( chunks.Count );
@@ -334,10 +335,12 @@ class MapLoader(
 		{
 			var builder = Model.Builder.WithName( $"titanfall2/map/{mapName}_{category}_{cell}" );
 			var chunkMeshCount = 0;
-			foreach ( var (materialName, group) in materials.OrderBy( static pair => pair.Key, StringComparer.OrdinalIgnoreCase ) )
+			foreach ( var (materialKey, group) in materials
+				.OrderBy( static pair => pair.Key.MaterialName, StringComparer.OrdinalIgnoreCase )
+				.ThenBy( static pair => pair.Key.LightmapPage ) )
 			{
 				if ( group.Vertices.Count == 0 || group.Indices.Count == 0 ) continue;
-				var material = materialFactory( materialName, totalMeshCount );
+				var material = materialFactory( materialKey, totalMeshCount );
 				var mesh = new Mesh( $"{Path}_{category}_{cell}_{totalMeshCount}", material );
 				mesh.CreateVertexBuffer( group.Vertices.Count, group.Vertices );
 				mesh.CreateIndexBuffer( group.Indices.Count, group.Indices );
@@ -349,6 +352,87 @@ class MapLoader(
 			if ( chunkMeshCount > 0 ) result.Add( new WorldRenderChunk( cell, builder.Create() ) );
 		}
 		return result;
+	}
+
+	Material CreateWorldLightmappedMaterial( WorldMaterialKey key, int meshIndex, RuntimeLightmaps lightmaps )
+	{
+		var sourceMaterial = LoadWorldMaterial( key.MaterialName )
+			?? MaterialLoader.CreateRuntimeMaterial( $"{Path}/world_fallback_{meshIndex}", GetMaterialMetadata( key.MaterialName ) );
+		var metadata = GetMaterialMetadata( key.MaterialName );
+		if ( lightmaps is null || key.LightmapPage < 0 || key.LightmapPage >= lightmaps.Pages.Count
+			|| metadata.Mode != Titanfall2MaterialMode.Opaque || metadata.IsUnlit || metadata.IsWater )
+			return sourceMaterial;
+
+		var page = lightmaps.Pages[key.LightmapPage];
+		if ( page.SkyA is null || !page.SkyA.IsValid )
+			return sourceMaterial;
+
+		var material = Material.Create(
+			$"{Path}/world_lightmapped_{meshIndex}_{key.LightmapPage}",
+			"shaders/titanfall2_world_lightmapped.shader" );
+		CopyWorldMaterialParameters( sourceMaterial, material );
+		material.Set( "g_tLightmapSkyA", page.SkyA );
+		if ( page.SkyB is not null ) material.Set( "g_tLightmapSkyB", page.SkyB );
+		if ( page.RealTimeA is not null ) material.Set( "g_tLightmapRealTimeA", page.RealTimeA );
+		if ( page.RealTimeB is not null ) material.Set( "g_tLightmapRealTimeB", page.RealTimeB );
+		if ( page.RealTimeC is not null ) material.Set( "g_tLightmapRealTimeC", page.RealTimeC );
+		material.Set( "g_flT2LightmapIntensity", 1.35f );
+		material.Set( "g_flT2RealTimeLightContribution", 0f );
+		return material;
+	}
+
+	static void CopyWorldMaterialParameters( Material source, Material target )
+	{
+		string[] textureNames =
+		[
+			"g_tAlbedo", "g_tNormal", "g_tGloss", "g_tSpecular", "g_tAO", "g_tOpacity",
+			"g_tEmissive", "g_tDetail", "g_tDistortion", "g_tEnvironment"
+		];
+		foreach ( var name in textureNames )
+		{
+			var texture = source?.GetTexture( name );
+			if ( texture is not null && texture.IsValid )
+				target.Set( name, texture );
+		}
+
+		string[] vectorNames =
+		[
+			"g_flT2GlossScale", "g_vT2SpecularTint", "g_flT2EmissiveStrength",
+			"g_flT2DetailBlend", "g_vT2UvDistortion", "g_flT2HasEnvironment",
+			"g_flT2EnvironmentIntensity", "g_flT2FresnelStrength", "g_vT2Uv1RotScale",
+			"g_vT2Uv1Translate", "g_vT2AlbedoTint", "g_vT2EmissiveTint",
+			"g_flT2MaterialOpacity", "g_flT2AlphaTestReference"
+		];
+		foreach ( var name in vectorNames )
+			target.Set( name, source?.GetVector4( name ) ?? default );
+	}
+
+	static RuntimeLightmaps CreateLightmapTextures( Titanfall2BspReader.BspLightmaps source )
+	{
+		if ( source is null || !source.IsValid ) return null;
+		var pages = new List<RuntimeLightmapPage>( source.Pages.Count );
+		foreach ( var page in source.Pages )
+		{
+			Texture Create( byte[] data, int width, int height )
+			{
+				if ( data is null || data.Length != width * height * 4 ) return null;
+				// Respawn's atlas contains tightly packed lightmap charts. Generic
+				// mip generation blends unrelated charts and unused black texels
+				// together, producing large soft rectangular blotches at grazing
+				// camera angles. Keep the authored base page only.
+				return Texture.Create( width, height, ImageFormat.RGBA8888 )
+					.WithData( data )
+					.Finish();
+			}
+
+			pages.Add( new RuntimeLightmapPage(
+				Create( page.SkyA, page.Width, page.Height ),
+				Create( page.SkyB, page.Width, page.Height ),
+				Create( page.RealTimeA, page.Width, page.Height ),
+				Create( page.RealTimeB, page.Width, page.Height ),
+				Create( page.RealTimeC, Math.Max( 1, page.Width / 2 ), Math.Max( 1, page.Height / 2 ) ) ) );
+		}
+		return new RuntimeLightmaps( pages );
 	}
 
 	Material LoadWorldMaterial( string materialName )
@@ -483,8 +567,9 @@ class MapLoader(
 		var vistaProps = staticProps.Where( static prop => IsVistaModelPath( prop.ModelPath ) ).ToArray();
 		if ( vistaProps.Length == 0 ) return 0;
 
+		var environmentEntities = ReadEntities( _environmentEntitySource );
 		var candidates = new List<SkyboxCandidate>();
-		foreach ( var values in ReadEntities( _environmentEntitySource ) )
+		foreach ( var values in environmentEntities )
 		{
 			if ( !values.TryGetValue( "classname", out var className )
 				|| !className.Equals( "sky_camera", StringComparison.OrdinalIgnoreCase )
@@ -508,6 +593,7 @@ class MapLoader(
 				origin,
 				rotation,
 				Math.Clamp( skyScale, 1f, 100000f ),
+				ResolveSkyboxFog( values, environmentEntities ),
 				matchingProps ) );
 		}
 
@@ -536,6 +622,7 @@ class MapLoader(
 				ToSandbox( models[0].Origin ),
 				Angles.Zero,
 				1000f,
+				Titanfall2SkyboxFog.Disabled,
 				models );
 		}
 
@@ -552,6 +639,7 @@ class MapLoader(
 			selected.Origin,
 			selected.Rotation,
 			selected.Scale,
+			selected.Fog,
 			skyboxModels );
 
 		Log.Info( $"Titanfall 2 3D skybox selected: {Path} ({selected.Name}, origin {selected.Origin}, "
@@ -650,6 +738,7 @@ class MapLoader(
 		var failed = 0;
 		var animated = 0;
 		var colliders = 0;
+		var propsByGuid = new Dictionary<string, GameObject>( StringComparer.OrdinalIgnoreCase );
 		foreach ( var values in entities )
 		{
 			if ( !values.TryGetValue( "classname", out var className )
@@ -683,7 +772,8 @@ class MapLoader(
 			if ( values.TryGetValue( "scale", out var scaleText ) && TryParseFloat( scaleText, out var scale ) )
 				gameObject.WorldScale = Vector3.One * Math.Clamp( scale, 0.001f, 1000f );
 
-			var disableShadows = IsEntityTrue( values.GetValueOrDefault( "disableshadows" ) );
+			var disableShadows = !Titanfall2StreamingSettings.PropShadows
+				|| IsEntityTrue( values.GetValueOrDefault( "disableshadows" ) );
 			if ( model.BoneCount > 0 || model.AnimationCount > 0 )
 			{
 				var renderer = gameObject.AddComponent<SkinnedModelRenderer>();
@@ -692,10 +782,10 @@ class MapLoader(
 				renderer.RenderType = disableShadows
 					? ModelRenderer.ShadowRenderType.Off
 					: ModelRenderer.ShadowRenderType.On;
-				if ( values.TryGetValue( "DefaultAnim", out var defaultAnimation )
-					&& !string.IsNullOrWhiteSpace( defaultAnimation ) )
+				var animation = ResolveDynamicAnimation( values, model );
+				if ( !string.IsNullOrWhiteSpace( animation ) )
 				{
-					renderer.Sequence.Name = defaultAnimation.Trim();
+					renderer.Sequence.Name = animation;
 					renderer.Sequence.Looping = !IsEntityTrue( values.GetValueOrDefault( "HoldAnimation" ) );
 					renderer.PlaybackRate = 1f;
 				}
@@ -722,6 +812,8 @@ class MapLoader(
 				collider.Static = true;
 				colliders++;
 			}
+			if ( values.TryGetValue( "link_guid", out var linkGuid ) && !string.IsNullOrWhiteSpace( linkGuid ) )
+				propsByGuid.TryAdd( linkGuid.Trim(), gameObject );
 			created++;
 		}
 
@@ -731,8 +823,89 @@ class MapLoader(
 			return 0;
 		}
 
+		var rotators = CreateRotatingMovers( root, entities, propsByGuid );
 		Log.Info( $"Titanfall 2 scripted dynamic props created: {created} models, "
-			+ $"{animated} animated, {colliders} colliders, {failed} failures ({Path})." );
+			+ $"{animated} skinned, {rotators} rotating movers, {colliders} colliders, "
+			+ $"{failed} failures ({Path})." );
+		return created;
+	}
+
+	static string ResolveDynamicAnimation(
+		IReadOnlyDictionary<string, string> values,
+		Model model )
+	{
+		foreach ( var key in new[] { "DefaultAnim", "animation", "sequence" } )
+		{
+			if ( values.TryGetValue( key, out var explicitAnimation )
+				&& !string.IsNullOrWhiteSpace( explicitAnimation ) )
+				return explicitAnimation.Trim();
+		}
+
+		if ( model is null || model.AnimationCount <= 0 ) return null;
+		var names = model.AnimationNames
+			.Where( static name => !string.IsNullOrWhiteSpace( name )
+				&& !name.Equals( "bindpose", StringComparison.OrdinalIgnoreCase ) )
+			.ToArray();
+		return names.FirstOrDefault( static name =>
+				name.Contains( "idle", StringComparison.OrdinalIgnoreCase )
+				|| name.Contains( "spin", StringComparison.OrdinalIgnoreCase )
+				|| name.Contains( "loop", StringComparison.OrdinalIgnoreCase ) )
+			?? names.FirstOrDefault();
+	}
+
+	static int CreateRotatingMovers(
+		GameObject root,
+		IReadOnlyList<Dictionary<string, string>> entities,
+		IReadOnlyDictionary<string, GameObject> propsByGuid )
+	{
+		var created = 0;
+		foreach ( var values in entities )
+		{
+			if ( !values.TryGetValue( "rotate_forever_speed", out var speedText )
+				|| !TryParseFloat( speedText, out var speed )
+				|| MathF.Abs( speed ) <= 0.001f )
+				continue;
+
+			var isRotator = values.TryGetValue( "editorclass", out var editorClass )
+				&& editorClass.Equals( "script_rotator", StringComparison.OrdinalIgnoreCase );
+			isRotator |= values.TryGetValue( "classname", out var className )
+				&& className.Equals( "script_mover_lightweight", StringComparison.OrdinalIgnoreCase )
+				&& values.ContainsKey( "rotation_axis" );
+			if ( !isRotator ) continue;
+
+			if ( !values.TryGetValue( "origin", out var originText )
+				|| !TryParseVector3( originText, out var pivot ) )
+				continue;
+
+			var moverRotation = Rotation.Identity;
+			if ( values.TryGetValue( "angles", out var anglesText )
+				&& TryParseVector3( anglesText, out var angles ) )
+				moverRotation = new Angles( angles.x, angles.y, angles.z ).ToRotation();
+
+			var axisName = values.GetValueOrDefault( "rotation_axis", "yaw" );
+			var delay = GetEntityFloat( values, "start_delay", 0f );
+			foreach ( var link in values.Where( static pair =>
+				pair.Key.StartsWith( "link_to_guid_", StringComparison.OrdinalIgnoreCase ) ) )
+			{
+				if ( string.IsNullOrWhiteSpace( link.Value )
+					|| !propsByGuid.TryGetValue( link.Value.Trim(), out var target )
+					|| !target.IsValid() )
+					continue;
+
+				var basis = IsEntityTrue( values.GetValueOrDefault( "use_local_rotation" ) )
+					? target.WorldRotation
+					: moverRotation;
+				var axis = axisName.ToLowerInvariant() switch
+				{
+					"pitch" => basis.Right,
+					"roll" => basis.Forward,
+					_ => basis.Up
+				};
+				target.AddComponent<Titanfall2RotatingMover>()
+					.Configure( pivot, axis, speed, delay );
+				created++;
+			}
+		}
 		return created;
 	}
 
@@ -838,7 +1011,7 @@ class MapLoader(
 			out var lightColor ) ? lightColor : new Color( 0.78f, 0.74f, 0.68f );
 		light.SkyColor = TryParseSourceLightColor( lightValues?.GetValueOrDefault( "_ambient" ), 0.30f,
 			out var skyColor ) ? skyColor : new Color( 0.22f, 0.28f, 0.36f );
-		light.ShadowCascadeCount = 2;
+		light.ShadowCascadeCount = Titanfall2StreamingSettings.MapShadows ? 2 : 1;
 		light.ContactShadows = false;
 
 		var fogValues = Titanfall2StreamingSettings.MapFog
@@ -891,6 +1064,39 @@ class MapLoader(
 
 	static float GetEntityFloat( IReadOnlyDictionary<string, string> values, string key, float fallback )
 		=> values.TryGetValue( key, out var text ) && TryParseFloat( text, out var value ) ? value : fallback;
+
+	static Titanfall2SkyboxFog ResolveSkyboxFog(
+		IReadOnlyDictionary<string, string> cameraValues,
+		IReadOnlyList<Dictionary<string, string>> environmentEntities )
+	{
+		IReadOnlyDictionary<string, string> fogValues = cameraValues;
+		if ( cameraValues.TryGetValue( "useworldfog", out var useWorldFog ) && IsEntityTrue( useWorldFog ) )
+		{
+			fogValues = environmentEntities.FirstOrDefault( static values =>
+				values.TryGetValue( "classname", out var className )
+				&& className.Equals( "env_fog_controller", StringComparison.OrdinalIgnoreCase )
+				&& (!values.TryGetValue( "fogenable", out var enabled ) || !IsEntityFalse( enabled )) )
+				?? cameraValues;
+		}
+
+		if ( fogValues.TryGetValue( "fogenable", out var fogEnabled ) && IsEntityFalse( fogEnabled ) )
+			return Titanfall2SkyboxFog.Disabled;
+
+		var start = MathF.Max( 0f, GetEntityFloat( fogValues, "fogdistoffset",
+			GetEntityFloat( fogValues, "fogstart", 80f ) ) );
+		var end = GetEntityFloat( fogValues, "foghalfdistbottom",
+			GetEntityFloat( fogValues, "fogend", 6000f ) );
+		if ( end <= start ) end = start + 4096f;
+
+		var opacity = Math.Clamp( GetEntityFloat( fogValues, "fogdensity",
+			GetEntityFloat( fogValues, "fogmaxdensity", 0.25f ) ), 0f, 0.65f );
+		if ( opacity <= 0.001f ) return Titanfall2SkyboxFog.Disabled;
+
+		var color = TryParseRgbColor( fogValues.GetValueOrDefault( "fogcolor" ), 1f, out var parsedColor )
+			? parsedColor.WithAlpha( 1f )
+			: new Color( 0.74f, 0.85f, 1f );
+		return new Titanfall2SkyboxFog( true, color, start, end, opacity );
+	}
 
 	static bool TryParseSourceLightColor( string value, float maximumIntensity, out Color result )
 	{
@@ -954,67 +1160,4 @@ class MapLoader(
 	static Vector3 ToSandbox( System.Numerics.Vector3 value ) => new( value.X, value.Y, value.Z );
 	static Vector2 ToSandbox( System.Numerics.Vector2 value ) => new( value.X, value.Y );
 
-	sealed class MapMeshGroup
-	{
-		public List<TitanfallMapVertex> Vertices { get; } = new();
-		public List<int> Indices { get; } = new();
-		public BBox Bounds = new() { Mins = float.MaxValue, Maxs = float.MinValue };
-	}
-
-	readonly record struct WorldRenderCell( int X, int Y, int Z )
-	{
-		public static WorldRenderCell FromTriangle( Vector3 first, Vector3 second, Vector3 third, float size )
-		{
-			var center = (first + second + third) / 3f;
-			return new WorldRenderCell(
-				(int)MathF.Floor( center.x / size ),
-				(int)MathF.Floor( center.y / size ),
-				(int)MathF.Floor( center.z / size ) );
-		}
-
-		public override string ToString() => $"{X}_{Y}_{Z}";
-	}
-
-	sealed record WorldRenderChunk( WorldRenderCell Cell, Model Model );
-
-	readonly record struct CollisionCell( int X, int Y );
-
-	sealed class CollisionChunk
-	{
-		readonly Dictionary<int, int> _sourceToLocal = new();
-		public List<Vector3> Vertices { get; } = new();
-		public List<int> Indices { get; } = new();
-
-		public int RemapVertex( int sourceIndex, IReadOnlyList<System.Numerics.Vector3> sourceVertices )
-		{
-			if ( _sourceToLocal.TryGetValue( sourceIndex, out var localIndex ) ) return localIndex;
-			localIndex = Vertices.Count;
-			_sourceToLocal.Add( sourceIndex, localIndex );
-			Vertices.Add( ToSandbox( sourceVertices[sourceIndex] ) );
-			return localIndex;
-		}
-	}
-
-	sealed record SkyboxCandidate(
-		string Name,
-		Vector3 Origin,
-		Angles Rotation,
-		float Scale,
-		Titanfall2BspReader.StaticPropInstance[] Models );
-
-	readonly record struct VistaOriginKey( int X, int Y, int Z )
-	{
-		const float Quantization = 8f;
-
-		public static VistaOriginKey FromPosition( System.Numerics.Vector3 position ) => new(
-			(int)MathF.Round( position.X / Quantization ),
-			(int)MathF.Round( position.Y / Quantization ),
-			(int)MathF.Round( position.Z / Quantization ) );
-	}
-
-	sealed record WorldBuildResult(
-		IReadOnlyList<WorldRenderChunk> WorldChunks,
-		IReadOnlyList<WorldRenderChunk> DecalChunks,
-		IReadOnlyList<WorldRenderChunk> GodrayChunks,
-		Model CollisionModel );
 }

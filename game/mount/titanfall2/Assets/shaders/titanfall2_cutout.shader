@@ -35,6 +35,7 @@ struct VertexInput
 struct PixelInput
 {
 	#include "common/pixelinput.hlsl"
+	float4 vProbeTint : COLOR1;
 };
 
 VS
@@ -45,6 +46,7 @@ VS
 	{
 		PixelInput i = ProcessVertex( v );
 		i.vVertexColor *= float4( SrgbGammaToLinear( v.vColor.rgb ), v.vColor.a );
+		i.vProbeTint = GetExtraPerInstanceShaderData( v.nInstanceTransformID ).vTint;
 		return FinalizeVertex( i );
 	}
 }
@@ -126,14 +128,14 @@ PS
 		opacity = albedo.a * opacityMap * vertexAlpha * g_flT2MaterialOpacity;
 
 		Material m = Material::Init();
-		m.Albedo = T2ApplyDetail( albedo.rgb, uv ) * g_vT2AlbedoTint.rgb * vertexTint;
+		m.Albedo = T2ApplyDetail( albedo.rgb, uv ) * g_vT2AlbedoTint.rgb * vertexTint * i.vProbeTint.rgb;
 		m.Normal = normalize( i.vNormalWs );
 		m.Roughness = T2Roughness( gloss );
 		m.Metalness = T2Metalness( specular );
 		m.AmbientOcclusion = ao;
 		m.TintMask = 1.0;
 		m.Opacity = opacity;
-		m.Emission = emissive * g_vT2EmissiveTint.rgb * vertexTint * g_flT2EmissiveStrength;
+		m.Emission = emissive * g_vT2EmissiveTint.rgb * vertexTint * g_flT2EmissiveStrength * i.vProbeTint.rgb;
 		m.Emission += T2Environment( i.vPositionWithOffsetWs + g_vHighPrecisionLightingOffsetWs.xyz, m.Normal, m.Roughness );
 		m.Transmission = 0.0;
 		m.TextureCoords = uv;

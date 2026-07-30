@@ -169,6 +169,7 @@ public partial class Titanfall2Mount : BaseGameMount
 			archives.Add( archive );
 		}
 		var vpkResolver = new VpkPathResolver( archives );
+		var hiddenDepotEntries = 0;
 
 		var spawnEntitySources = new Dictionary<string, ITitanfall2AssetSource>( StringComparer.OrdinalIgnoreCase );
 		var environmentEntitySources = new Dictionary<string, ITitanfall2AssetSource>( StringComparer.OrdinalIgnoreCase );
@@ -178,6 +179,7 @@ public partial class Titanfall2Mount : BaseGameMount
 		{
 			foreach ( var entry in archive.Entries )
 			{
+				if ( IsDepotVpkPath( entry.Path ) ) continue;
 				if ( TryGetEntityMapName( entry.Path, "_spawn", out var spawnMapName ) )
 					spawnEntitySources.TryAdd( spawnMapName, new VpkAssetSource( archive, entry, vpkResolver ) );
 				else if ( TryGetEntityMapName( entry.Path, "_env", out var environmentMapName ) )
@@ -195,6 +197,15 @@ public partial class Titanfall2Mount : BaseGameMount
 		{
 			foreach ( var entry in archive.Entries )
 			{
+				if ( IsDepotVpkPath( entry.Path ) )
+				{
+					// Depot mirrors contain duplicate maps and supporting assets. Keep
+					// them in VpkPathResolver for explicit dependency reads, but do not
+					// expose the mirrored directory through mount://titanfall2.
+					hiddenDepotEntries++;
+					continue;
+				}
+
 				var extension = Path.GetExtension( entry.Path ).ToLowerInvariant();
 				if ( extension == ".vmt" && Titanfall2LegacyPath.TryGetMaterialName( entry.Path, out var materialName ) )
 				{
@@ -265,7 +276,15 @@ public partial class Titanfall2Mount : BaseGameMount
 		Log.Info( $"Titanfall 2 VPK mounted: {archives.Count} archives, {legacyMaterials} fallback VMT materials, "
 			+ $"{legacyTextures} fallback VTF textures and {ParticleFileCount} PCF particle libraries "
 			+ $"({particleEntitySources.Count} map FX and {scriptEntitySources.Count} script partitions; "
-			+ "RPAK names retained at higher priority)." );
+			+ $"{hiddenDepotEntries} depot mirror entries hidden; RPAK names retained at higher priority)." );
+	}
+
+	static bool IsDepotVpkPath( string path )
+	{
+		if ( string.IsNullOrWhiteSpace( path ) ) return false;
+		var normalized = path.Replace( '\\', '/' ).Trim().TrimStart( '/' );
+		return normalized.Equals( "depot", StringComparison.OrdinalIgnoreCase )
+			|| normalized.StartsWith( "depot/", StringComparison.OrdinalIgnoreCase );
 	}
 
 	static bool TryGetEntityMapName( string path, string suffix, out string mapName )

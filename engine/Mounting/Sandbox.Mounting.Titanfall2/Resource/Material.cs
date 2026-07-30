@@ -517,7 +517,12 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 		if ( fileName.Contains( "water", StringComparison.OrdinalIgnoreCase )
 			|| fileName.Contains( "cloud", StringComparison.OrdinalIgnoreCase )
 			|| fileName.Contains( "smoke", StringComparison.OrdinalIgnoreCase )
-			|| fileName.Contains( "mist", StringComparison.OrdinalIgnoreCase ) )
+			|| fileName.Contains( "mist", StringComparison.OrdinalIgnoreCase )
+			// Crash Site and several other Titanfall maps place distant mountain
+			// silhouettes on alpha-faded vista cards. Treating these materials as
+			// opaque exposes the rectangular card/cylinder geometry around the map.
+			|| fileName.Contains( "_mtn", StringComparison.OrdinalIgnoreCase )
+			|| fileName.Contains( "mountain", StringComparison.OrdinalIgnoreCase ) )
 			return VistaMaterialMode.Translucent;
 
 		return VistaMaterialMode.Opaque;
