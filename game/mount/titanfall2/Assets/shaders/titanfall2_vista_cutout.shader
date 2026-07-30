@@ -29,6 +29,7 @@ COMMON
 struct VertexInput
 {
 	#include "common/vertexinput.hlsl"
+	float4 vColor : COLOR0 < Semantic( Color ); >;
 };
 
 struct PixelInput
@@ -43,6 +44,7 @@ VS
 	PixelInput MainVs( VertexInput v )
 	{
 		PixelInput i = ProcessVertex( v );
+		i.vVertexColor *= float4( SrgbGammaToLinear( v.vColor.rgb ), v.vColor.a );
 		return FinalizeVertex( i );
 	}
 }
@@ -70,17 +72,21 @@ PS
 	float g_flAlbedoIsSrgb < Attribute( "g_flAlbedoIsSrgb" ); Default( 1.0 ); >;
 	float g_flT2VistaIntensity < Attribute( "g_flT2VistaIntensity" ); Default( 1.0 ); >;
 	float g_flT2VistaHdrLimit < Attribute( "g_flT2VistaHdrLimit" ); Default( 65504.0 ); >;
+	float g_flUseVertexColor < Attribute( "g_flUseVertexColor" ); Default( 0.0 ); >;
+	float g_flUseVertexAlpha < Attribute( "g_flUseVertexAlpha" ); Default( 0.0 ); >;
 
 	float4 MainPs( PixelInput i ) : SV_Target0
 	{
 		float2 uv = T2Uv1( i.vTextureCoords.xy );
 		float4 albedo = Tex2DS( g_tAlbedo, g_sAniso, uv );
 		float opacityMap = Tex2DS( g_tOpacity, g_sAniso, uv ).r;
-		float opacity = albedo.a * opacityMap * g_flT2MaterialOpacity;
+		float vertexAlpha = lerp( 1.0, i.vVertexColor.a, saturate( g_flUseVertexAlpha ) );
+		float opacity = albedo.a * opacityMap * vertexAlpha * g_flT2MaterialOpacity;
 		clip( opacity - g_flT2AlphaTestReference );
 		float3 srgbColor = SrgbGammaToLinear( albedo.rgb );
+		float3 vertexTint = lerp( float3( 1.0, 1.0, 1.0 ), i.vVertexColor.rgb, saturate( g_flUseVertexColor ) );
 		float3 color = lerp( albedo.rgb, srgbColor, saturate( g_flAlbedoIsSrgb ) )
-			* g_vT2AlbedoTint.rgb * g_flT2VistaIntensity;
+			* g_vT2AlbedoTint.rgb * vertexTint * g_flT2VistaIntensity;
 		float peak = max( color.r, max( color.g, color.b ) );
 		color *= min( 1.0, max( 0.001, g_flT2VistaHdrLimit ) / max( 0.001, peak ) );
 		return float4( color, 1.0 );

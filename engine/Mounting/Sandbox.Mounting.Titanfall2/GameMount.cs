@@ -64,17 +64,9 @@ public partial class Titanfall2Mount : BaseGameMount
 
 	protected override void Shutdown()
 	{
-		lock ( _legacyParticleSpriteLock )
-		{
-			foreach ( var frames in _legacyParticleTextureFrames.Values )
-				foreach ( var texture in frames ) texture?.Dispose();
-			_legacyParticleTextureFrames.Clear();
-			_legacyParticleSheetFrameRates.Clear();
-			_legacyParticleSprites.Clear();
-		}
+		ReleaseSceneResources();
 		ResetParticleCatalog();
 		MaterialLoader.ShutdownSharedResources();
-		RpakArchive.ClearStrongBufferCache();
 		StarPakIndex.Clear();
 		lock ( _materialDescriptorLock )
 		{
@@ -82,6 +74,26 @@ public partial class Titanfall2Mount : BaseGameMount
 			_textureGuidDependencies.Clear();
 			_texturePathDependencies.Clear();
 		}
+	}
+
+	internal void ReleaseSceneResources()
+	{
+		var particleSheets = 0;
+		var particleTextures = 0;
+		lock ( _legacyParticleSpriteLock )
+		{
+			particleSheets = _legacyParticleTextureFrames.Count;
+			particleTextures = _legacyParticleTextureFrames.Values.Sum( static frames => frames?.Length ?? 0 );
+			foreach ( var frames in _legacyParticleTextureFrames.Values )
+				foreach ( var texture in frames ) texture?.Dispose();
+			_legacyParticleTextureFrames.Clear();
+			_legacyParticleSheetFrameRates.Clear();
+			_legacyParticleSprites.Clear();
+		}
+		var rpakCache = RpakArchive.GetCacheStatistics();
+		RpakArchive.ClearStrongBufferCache();
+		Log.Info( $"Titanfall 2 scene caches released: {particleSheets} particle sheets/{particleTextures} textures, "
+			+ $"{rpakCache.StrongBuffers} RPAK buffers/{rpakCache.StrongBufferBytes / (1024.0 * 1024.0):0.0} MB." );
 	}
 
 	internal void EnsureRuntimeTypesRegistered()
@@ -161,6 +173,7 @@ public partial class Titanfall2Mount : BaseGameMount
 		var spawnEntitySources = new Dictionary<string, ITitanfall2AssetSource>( StringComparer.OrdinalIgnoreCase );
 		var environmentEntitySources = new Dictionary<string, ITitanfall2AssetSource>( StringComparer.OrdinalIgnoreCase );
 		var particleEntitySources = new Dictionary<string, ITitanfall2AssetSource>( StringComparer.OrdinalIgnoreCase );
+		var scriptEntitySources = new Dictionary<string, ITitanfall2AssetSource>( StringComparer.OrdinalIgnoreCase );
 		foreach ( var archive in archives )
 		{
 			foreach ( var entry in archive.Entries )
@@ -171,6 +184,8 @@ public partial class Titanfall2Mount : BaseGameMount
 					environmentEntitySources.TryAdd( environmentMapName, new VpkAssetSource( archive, entry, vpkResolver ) );
 				else if ( TryGetEntityMapName( entry.Path, "_fx", out var particleMapName ) )
 					particleEntitySources.TryAdd( particleMapName, new VpkAssetSource( archive, entry, vpkResolver ) );
+				else if ( TryGetEntityMapName( entry.Path, "_script", out var scriptMapName ) )
+					scriptEntitySources.TryAdd( scriptMapName, new VpkAssetSource( archive, entry, vpkResolver ) );
 			}
 		}
 
@@ -226,11 +241,13 @@ public partial class Titanfall2Mount : BaseGameMount
 						spawnEntitySources.TryGetValue( mapName, out var spawnEntitySource );
 						environmentEntitySources.TryGetValue( mapName, out var environmentEntitySource );
 						particleEntitySources.TryGetValue( mapName, out var particleEntitySource );
+						scriptEntitySources.TryGetValue( mapName, out var scriptEntitySource );
 						context.Add( ResourceType.Scene, entry.Path, new MapLoader(
 							source,
 							spawnEntitySource,
 							environmentEntitySource,
-							particleEntitySource ) );
+							particleEntitySource,
+							scriptEntitySource ) );
 						break;
 					case ".mdl":
 					case ".rmdl":
@@ -247,7 +264,8 @@ public partial class Titanfall2Mount : BaseGameMount
 		}
 		Log.Info( $"Titanfall 2 VPK mounted: {archives.Count} archives, {legacyMaterials} fallback VMT materials, "
 			+ $"{legacyTextures} fallback VTF textures and {ParticleFileCount} PCF particle libraries "
-			+ $"({particleEntitySources.Count} map FX partitions; RPAK names retained at higher priority)." );
+			+ $"({particleEntitySources.Count} map FX and {scriptEntitySources.Count} script partitions; "
+			+ "RPAK names retained at higher priority)." );
 	}
 
 	static bool TryGetEntityMapName( string path, string suffix, out string mapName )

@@ -136,6 +136,22 @@ sealed class Titanfall2MaterialDescriptor
 		return descriptor;
 	}
 
+	internal void ApplyLegacyRuntimeBehavior( Titanfall2VmtDefinition definition )
+	{
+		if ( definition is null ) return;
+		if ( definition.TryGetTextureScroll( false, out var scroll ) )
+		{
+			Constants.RemoveAll( static constant =>
+				constant.Name.Equals( "g_vT2Uv1Translate", StringComparison.Ordinal ) );
+			Constants.Add( new Titanfall2MaterialConstant(
+				"g_vT2Uv1Translate",
+				new Vector4( scroll.x, scroll.y, 1f, 0f ),
+				4 ) );
+		}
+
+		RuntimeExpressions.AddRange( definition.GetRuntimeExpressions() );
+	}
+
 	public Material CreateMaterial( Titanfall2Mount mount, string resourcePath, Action<string> warn )
 	{
 		var material = IsGodray

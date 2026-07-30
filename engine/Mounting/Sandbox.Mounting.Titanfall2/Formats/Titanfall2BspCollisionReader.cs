@@ -11,10 +11,21 @@ public static partial class Titanfall2BspReader
 	const int CollisionGridLumpId = 0x0055;
 	const int CollisionGeoSetsLumpId = 0x0057;
 	const int CollisionPrimitivesLumpId = 0x0059;
+	const int CollisionUniqueContentsLumpId = 0x005B;
 	const int CollisionBrushesLumpId = 0x005C;
 	const int CollisionBrushSidePlaneOffsetsLumpId = 0x005D;
 	const byte BrushPrimitiveType = 0x00;
 	const byte TricollPrimitiveType = 0x40;
+	const uint ContentsSolid = 0x00000001;
+	const uint ContentsWindow = 0x00000002;
+	const uint ContentsGrate = 0x00000008;
+	const uint ContentsSlime = 0x00000010;
+	const uint ContentsWater = 0x00000020;
+	const uint ContentsMoveable = 0x00004000;
+	const uint ContentsPlayerClip = 0x00010000;
+	const uint ContentsMonster = 0x02000000;
+	const uint PlayerSolidMask = ContentsMonster | ContentsPlayerClip | ContentsMoveable
+		| ContentsGrate | ContentsWindow | ContentsSolid;
 
 	public static IReadOnlyList<int> RequiredCollisionLumpIds { get; } =
 	[
@@ -25,6 +36,7 @@ public static partial class Titanfall2BspReader
 		CollisionGridLumpId,
 		CollisionGeoSetsLumpId,
 		CollisionPrimitivesLumpId,
+		CollisionUniqueContentsLumpId,
 		CollisionBrushesLumpId,
 		CollisionBrushSidePlaneOffsetsLumpId
 	];
@@ -37,12 +49,16 @@ public static partial class Titanfall2BspReader
 		public int TricollCount { get; init; }
 		public int BrushTriangleCount { get; init; }
 		public int TricollTriangleCount { get; init; }
+		public int SourcePrimitiveCount { get; init; }
+		public int NonBlockingPrimitiveCount { get; init; }
+		public int WaterPrimitiveCount { get; init; }
+		public int BlockingWaterPrimitiveCount { get; init; }
 		public int PrimitiveCount => BrushCount + TricollCount;
 		public int TriangleCount => Indices.Length / 3;
 		public bool IsEmpty => Vertices.Length == 0 || Indices.Length < 3;
 	}
 
-	readonly record struct CollisionPrimitive( byte Type, int Index );
+	readonly record struct CollisionPrimitive( byte Type, int Index, uint Contents, bool HasKnownContents );
 	readonly record struct CollisionPlane( NumericsVector3 Normal, float Distance );
 
 	static BspWorldCollision ParseWorldCollision( Stream stream, IReadOnlyList<LumpHeader> headers,
@@ -55,6 +71,7 @@ public static partial class Titanfall2BspReader
 		var collisionGrid = ReadLumpBytes( stream, headers, overrideLumps, CollisionGridLumpId );
 		var geoSets = ReadLumpBytes( stream, headers, overrideLumps, CollisionGeoSetsLumpId );
 		var primitives = ReadLumpBytes( stream, headers, overrideLumps, CollisionPrimitivesLumpId );
+		var uniqueContents = ReadLumpBytes( stream, headers, overrideLumps, CollisionUniqueContentsLumpId );
 		var brushes = ReadLumpBytes( stream, headers, overrideLumps, CollisionBrushesLumpId );
 		var brushPlaneOffsets = ReadLumpBytes( stream, headers, overrideLumps, CollisionBrushSidePlaneOffsetsLumpId );
 		if ( geoSets.Length < 8 ) return new BspWorldCollision();
@@ -65,10 +82,24 @@ public static partial class Titanfall2BspReader
 		var tricollCount = 0;
 		var brushTriangleCount = 0;
 		var tricollTriangleCount = 0;
+		var sourcePrimitiveCount = 0;
+		var nonBlockingPrimitiveCount = 0;
+		var waterPrimitiveCount = 0;
+		var blockingWaterPrimitiveCount = 0;
 		var firstBrushPlane = collisionGrid.Length >= 0x1C ? ReadInt32( collisionGrid, 0x18 ) : 0;
 
-		foreach ( var primitive in EnumerateWorldPrimitives( geoSets, primitives ) )
+		foreach ( var primitive in EnumerateWorldPrimitives( geoSets, primitives, uniqueContents ) )
 		{
+			sourcePrimitiveCount++;
+			var isWater = primitive.HasKnownContents && IsWaterContents( primitive.Contents );
+			if ( isWater ) waterPrimitiveCount++;
+			if ( primitive.HasKnownContents && !BlocksPlayer( primitive.Contents ) )
+			{
+				nonBlockingPrimitiveCount++;
+				continue;
+			}
+			if ( isWater ) blockingWaterPrimitiveCount++;
+
 			if ( primitive.Type == BrushPrimitiveType )
 			{
 				var firstIndex = outputIndices.Count;
@@ -98,11 +129,18 @@ public static partial class Titanfall2BspReader
 			BrushCount = brushCount,
 			TricollCount = tricollCount,
 			BrushTriangleCount = brushTriangleCount,
-			TricollTriangleCount = tricollTriangleCount
+			TricollTriangleCount = tricollTriangleCount,
+			SourcePrimitiveCount = sourcePrimitiveCount,
+			NonBlockingPrimitiveCount = nonBlockingPrimitiveCount,
+			WaterPrimitiveCount = waterPrimitiveCount,
+			BlockingWaterPrimitiveCount = blockingWaterPrimitiveCount
 		};
 	}
 
-	static IEnumerable<CollisionPrimitive> EnumerateWorldPrimitives( byte[] geoSets, byte[] primitives )
+	static IEnumerable<CollisionPrimitive> EnumerateWorldPrimitives(
+		byte[] geoSets,
+		byte[] primitives,
+		byte[] uniqueContents )
 	{
 		var seen = new HashSet<int>();
 		var primitiveCount = primitives.Length / 4;
@@ -112,7 +150,7 @@ public static partial class Titanfall2BspReader
 			var raw = ReadUInt32( geoSets, offset + 4 );
 			if ( count == 1 )
 			{
-				if ( TryDecodeWorldPrimitive( raw, seen, out var primitive ) ) yield return primitive;
+				if ( TryDecodeWorldPrimitive( raw, seen, uniqueContents, out var primitive ) ) yield return primitive;
 				continue;
 			}
 
@@ -122,19 +160,29 @@ public static partial class Titanfall2BspReader
 			for ( var primitiveIndex = first; primitiveIndex < end; primitiveIndex++ )
 			{
 				var childRaw = ReadUInt32( primitives, primitiveIndex * 4 );
-				if ( TryDecodeWorldPrimitive( childRaw, seen, out var primitive ) ) yield return primitive;
+				if ( TryDecodeWorldPrimitive( childRaw, seen, uniqueContents, out var primitive ) ) yield return primitive;
 			}
 		}
 	}
 
-	static bool TryDecodeWorldPrimitive( uint raw, HashSet<int> seen, out CollisionPrimitive primitive )
+	static bool TryDecodeWorldPrimitive(
+		uint raw,
+		HashSet<int> seen,
+		byte[] uniqueContents,
+		out CollisionPrimitive primitive )
 	{
 		var type = (byte)(raw >> 24);
 		var index = (int)((raw >> 8) & 0xFFFF);
-		primitive = new CollisionPrimitive( type, index );
+		var contentsIndex = (int)(raw & 0xFF);
+		var hasKnownContents = contentsIndex >= 0 && contentsIndex < uniqueContents.Length / sizeof(uint);
+		var contents = hasKnownContents ? ReadUInt32( uniqueContents, contentsIndex * sizeof(uint) ) : 0u;
+		primitive = new CollisionPrimitive( type, index, contents, hasKnownContents );
 		if ( type is not (BrushPrimitiveType or TricollPrimitiveType) ) return false;
 		return seen.Add( (type << 16) | index );
 	}
+
+	static bool BlocksPlayer( uint contents ) => (contents & PlayerSolidMask) != 0;
+	static bool IsWaterContents( uint contents ) => (contents & (ContentsWater | ContentsSlime)) != 0;
 
 	static bool AppendTricoll( int index, byte[] vertices, byte[] headers, byte[] triangles,
 		List<NumericsVector3> outputVertices, List<int> outputIndices )

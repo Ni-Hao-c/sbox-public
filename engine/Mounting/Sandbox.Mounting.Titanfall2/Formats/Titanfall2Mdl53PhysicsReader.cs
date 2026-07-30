@@ -224,6 +224,7 @@ public static class Titanfall2Mdl53PhysicsReader
 	{
 		const int compactSurfaceHeaderSize = 32;
 		const int legacySurfaceHeaderSize = 48;
+		const int compactLedgeNodeSize = 28;
 		const int compactLedgeHeaderSize = 16;
 		const int compactTriangleSize = 16;
 		const int compactPointSize = 16;
@@ -236,62 +237,110 @@ public static class Titanfall2Mdl53PhysicsReader
 		if ( legacyByteSize < legacySurfaceHeaderSize || rootNodeOffset < legacySurfaceHeaderSize ) return;
 
 		var legacyEnd = Math.Min( checked(legacyOffset + legacyByteSize), surfaceEnd );
-		var ledgeEnd = Math.Min( checked(legacyOffset + rootNodeOffset), legacyEnd );
-		var ledgeOffset = checked(legacyOffset + legacySurfaceHeaderSize);
+		var rootNode = checked(legacyOffset + rootNodeOffset);
+		if ( rootNode < legacyOffset + legacySurfaceHeaderSize
+			|| rootNode > legacyEnd - compactLedgeNodeSize ) return;
 
-		for ( var ledgeIndex = 0; ledgeIndex < 65536 && ledgeOffset + compactLedgeHeaderSize <= ledgeEnd; ++ledgeIndex )
+		// Ledges are not stored as a flat contiguous array. Their point arrays are
+		// shared and interleaved with ledge data, while the compact tree at the end
+		// of the surface owns the authoritative leaf references. Walking by
+		// ledgeByteSize therefore only imported the first convex piece of compound
+		// props (for example, Angel City's lion statue only retained its base).
+		var pendingNodes = new Stack<int>();
+		var visitedNodes = new HashSet<int>();
+		var visitedLedges = new HashSet<int>();
+		pendingNodes.Push( rootNode );
+		while ( pendingNodes.Count > 0 && visitedNodes.Count < 65536 )
 		{
-			var pointOffset = ReadInt32( data, ledgeOffset );
-			var clientData = ReadInt32( data, ledgeOffset + 4 );
-			var flags = ReadUInt32( data, ledgeOffset + 8 );
-			var ledgeByteSize = checked((int)(flags >> 8) * 16);
-			var triangleCount = ReadInt16( data, ledgeOffset + 12 );
-			if ( ledgeByteSize < compactLedgeHeaderSize || ledgeOffset + ledgeByteSize > legacyEnd ) break;
+			var nodeOffset = pendingNodes.Pop();
+			if ( !visitedNodes.Add( nodeOffset ) ) continue;
+			EnsureRangeWithin( data, nodeOffset, compactLedgeNodeSize, legacyEnd );
 
-			var hasChildren = (flags & 0x3) != 0;
-			var compact = ((flags >> 2) & 0x3) != 0;
-			if ( !hasChildren && compact && triangleCount > 0 && triangleCount <= 8192 )
+			var rightNodeOffset = ReadInt32( data, nodeOffset );
+			var compactLedgeOffset = ReadInt32( data, nodeOffset + 4 );
+			if ( rightNodeOffset != 0 )
 			{
-				var triangleBytes = checked(triangleCount * compactTriangleSize);
-				if ( compactLedgeHeaderSize + triangleBytes <= ledgeByteSize )
-				{
-					var pointIndices = new Dictionary<ushort, int>();
-					var points = new List<NumericsVector3>();
-					var indices = new List<int>( triangleCount * 3 );
-					for ( var triangleIndex = 0; triangleIndex < triangleCount; ++triangleIndex )
-					{
-						var triangleOffset = checked(ledgeOffset + compactLedgeHeaderSize + triangleIndex * compactTriangleSize);
-						for ( var edgeIndex = 0; edgeIndex < 3; ++edgeIndex )
-						{
-							var sourcePointIndex = ReadUInt16( data, triangleOffset + 4 + edgeIndex * sizeof(uint) );
-							if ( !pointIndices.TryGetValue( sourcePointIndex, out var targetPointIndex ) )
-							{
-								var sourcePointOffset = checked(ledgeOffset + pointOffset + sourcePointIndex * compactPointSize);
-								EnsureRangeWithin( data, sourcePointOffset, 12, legacyEnd );
-								targetPointIndex = points.Count;
-								pointIndices.Add( sourcePointIndex, targetPointIndex );
-								points.Add( ConvertIvpsPosition( ReadVector3( data, sourcePointOffset ) ) );
-							}
-							indices.Add( targetPointIndex );
-						}
-					}
-
-					if ( points.Count >= 4 && indices.Count >= 12 )
-					{
-						var boneIndex = clientData > 0 && clientData <= boneCount ? clientData - 1 : -1;
-						hulls.Add( new PhysicsHull
-						{
-							SolidIndex = solidIndex,
-							BoneIndex = boneIndex,
-							Points = points.ToArray(),
-							Indices = indices.ToArray()
-						} );
-					}
-				}
+				var leftNode = checked(nodeOffset + compactLedgeNodeSize);
+				var rightNode = checked(nodeOffset + rightNodeOffset);
+				if ( leftNode < rootNode || leftNode > legacyEnd - compactLedgeNodeSize
+					|| rightNode < rootNode || rightNode > legacyEnd - compactLedgeNodeSize )
+					throw new InvalidDataException( "Embedded VPHY compact ledge tree has an invalid child offset." );
+				pendingNodes.Push( rightNode );
+				pendingNodes.Push( leftNode );
+				continue;
 			}
 
-			ledgeOffset = checked(ledgeOffset + ledgeByteSize);
+			if ( compactLedgeOffset == 0 ) continue;
+			var ledgeOffset = checked(nodeOffset + compactLedgeOffset);
+			if ( !visitedLedges.Add( ledgeOffset ) ) continue;
+			ParseCompactLedge(
+				data, ledgeOffset, legacyOffset, legacyEnd, solidIndex, boneCount,
+				compactLedgeHeaderSize, compactTriangleSize, compactPointSize, hulls );
 		}
+	}
+
+	static void ParseCompactLedge(
+		ReadOnlySpan<byte> data,
+		int ledgeOffset,
+		int legacyOffset,
+		int legacyEnd,
+		int solidIndex,
+		int boneCount,
+		int compactLedgeHeaderSize,
+		int compactTriangleSize,
+		int compactPointSize,
+		List<PhysicsHull> hulls )
+	{
+		EnsureRangeWithin( data, ledgeOffset, compactLedgeHeaderSize, legacyEnd );
+		if ( ledgeOffset < legacyOffset ) throw new InvalidDataException( "Embedded VPHY ledge precedes its surface." );
+
+		var pointOffset = ReadInt32( data, ledgeOffset );
+		var clientData = ReadInt32( data, ledgeOffset + 4 );
+		var flags = ReadUInt32( data, ledgeOffset + 8 );
+		var ledgeByteSize = checked((int)(flags >> 8) * 16);
+		var triangleCount = ReadInt16( data, ledgeOffset + 12 );
+		var hasChildren = (flags & 0x3) != 0;
+		var compact = ((flags >> 2) & 0x3) != 0;
+		if ( hasChildren || !compact || triangleCount <= 0 || triangleCount > 8192 ) return;
+		if ( ledgeByteSize < compactLedgeHeaderSize || ledgeOffset > legacyEnd - ledgeByteSize )
+			throw new InvalidDataException( "Embedded VPHY compact ledge has an invalid size." );
+
+		var triangleBytes = checked(triangleCount * compactTriangleSize);
+		if ( compactLedgeHeaderSize + triangleBytes > ledgeByteSize )
+			throw new InvalidDataException( "Embedded VPHY compact ledge has truncated triangles." );
+
+		var pointIndices = new Dictionary<ushort, int>();
+		var points = new List<NumericsVector3>();
+		var indices = new List<int>( triangleCount * 3 );
+		for ( var triangleIndex = 0; triangleIndex < triangleCount; ++triangleIndex )
+		{
+			var triangleOffset = checked(ledgeOffset + compactLedgeHeaderSize + triangleIndex * compactTriangleSize);
+			for ( var edgeIndex = 0; edgeIndex < 3; ++edgeIndex )
+			{
+				var sourcePointIndex = ReadUInt16( data, triangleOffset + 4 + edgeIndex * sizeof(uint) );
+				if ( !pointIndices.TryGetValue( sourcePointIndex, out var targetPointIndex ) )
+				{
+					var sourcePointOffset = checked(ledgeOffset + pointOffset + sourcePointIndex * compactPointSize);
+					EnsureRangeWithin( data, sourcePointOffset, 12, legacyEnd );
+					if ( sourcePointOffset < legacyOffset )
+						throw new InvalidDataException( "Embedded VPHY compact point precedes its surface." );
+					targetPointIndex = points.Count;
+					pointIndices.Add( sourcePointIndex, targetPointIndex );
+					points.Add( ConvertIvpsPosition( ReadVector3( data, sourcePointOffset ) ) );
+				}
+				indices.Add( targetPointIndex );
+			}
+		}
+
+		if ( points.Count < 4 || indices.Count < 12 ) return;
+		var boneIndex = clientData > 0 && clientData <= boneCount ? clientData - 1 : -1;
+		hulls.Add( new PhysicsHull
+		{
+			SolidIndex = solidIndex,
+			BoneIndex = boneIndex,
+			Points = points.ToArray(),
+			Indices = indices.ToArray()
+		} );
 	}
 
 	static NumericsVector3 ConvertIvpsPosition( NumericsVector3 position )

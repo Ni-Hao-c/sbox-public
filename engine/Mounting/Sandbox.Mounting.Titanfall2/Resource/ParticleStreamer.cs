@@ -7,7 +7,7 @@ using Titanfall2;
 /// suspended instead of destroyed so moving through a map does not reveal gaps.
 /// </summary>
 [Library]
-public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecuteOnServer
+public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecuteOnServer, Sandbox.Internal.IUpdateSubscriber
 {
 	static readonly Sandbox.Diagnostics.Logger Log = new( "Titanfall2Particles" );
 	const int DataMagic = 0x58465054; // TPFX
@@ -91,10 +91,12 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 
 	protected override void OnDestroy()
 	{
+		var released = _spawned.Count;
 		foreach ( var entity in _spawned )
 			if ( entity.GameObject.IsValid() && !entity.GameObject.IsDestroyed ) entity.GameObject.Destroy();
 		_spawned.Clear();
 		_pending.Clear();
+		Log.Info( $"Titanfall 2 particle scene resources released: {released} systems ({MapPath})." );
 	}
 
 	void InitializeEntities()
@@ -298,11 +300,18 @@ static class Titanfall2ParticleFactory
 		effect.MaxParticles = Math.Clamp( definition.MaxParticles, 1, Titanfall2StreamingSettings.ParticleMaxParticlesPerSystem );
 		effect.Lifetime = Range( definition.LifetimeMinimum, definition.LifetimeMaximum );
 		effect.LocalSpace = definition.LocalPosition || definition.LocalVelocity ? 1f : 0f;
+		var maximumVelocity = Titanfall2StreamingSettings.ParticleMaximumVelocity;
 		effect.InitialVelocity = new ParticleVector3
 		{
-			X = Range( definition.VelocityMinimum.x, definition.VelocityMaximum.x ),
-			Y = Range( definition.VelocityMinimum.y, definition.VelocityMaximum.y ),
-			Z = Range( definition.VelocityMinimum.z, definition.VelocityMaximum.z )
+			X = Range(
+				Math.Clamp( definition.VelocityMinimum.x, -maximumVelocity, maximumVelocity ),
+				Math.Clamp( definition.VelocityMaximum.x, -maximumVelocity, maximumVelocity ) ),
+			Y = Range(
+				Math.Clamp( definition.VelocityMinimum.y, -maximumVelocity, maximumVelocity ),
+				Math.Clamp( definition.VelocityMaximum.y, -maximumVelocity, maximumVelocity ) ),
+			Z = Range(
+				Math.Clamp( definition.VelocityMinimum.z, -maximumVelocity, maximumVelocity ),
+				Math.Clamp( definition.VelocityMaximum.z, -maximumVelocity, maximumVelocity ) )
 		};
 		effect.Damping = MathF.Max( 0f, definition.Damping );
 
@@ -314,7 +323,10 @@ static class Titanfall2ParticleFactory
 		effect.Alpha = CreateAlpha( definition );
 		effect.ApplyShape = true;
 		effect.Scale = CreateScale( definition );
-		if ( (definition.Renderer & Titanfall2ParticleRenderer.Trail) != 0 ) effect.Stretch = CreateStretch( definition );
+		// Source's sprite_trail renderer describes history samples and endpoints;
+		// s&box's Stretch/LeadingTrail fields are not a direct equivalent. Applying
+		// them produced map-spanning white/green lines, so retain the sprite itself
+		// and defer the trail until its operators are converted explicitly.
 
 		if ( MathF.Abs( definition.RotationMinimum ) > float.Epsilon
 			|| MathF.Abs( definition.RotationMaximum ) > float.Epsilon
@@ -357,8 +369,9 @@ static class Titanfall2ParticleFactory
 	static void ConfigureEmitter( GameObject effectObject, Titanfall2ParticleDefinition definition )
 	{
 		var emitterObject = new GameObject( effectObject, true, "emitter" );
-		var minimum = definition.PositionMinimum;
-		var maximum = definition.PositionMaximum;
+		var maximumExtent = Titanfall2StreamingSettings.ParticleMaximumEmitterExtent;
+		var minimum = ClampVector( definition.PositionMinimum, maximumExtent );
+		var maximum = ClampVector( definition.PositionMaximum, maximumExtent );
 		var center = (minimum + maximum) * 0.5f;
 		emitterObject.LocalPosition = ToSandbox( center );
 
@@ -366,14 +379,14 @@ static class Titanfall2ParticleFactory
 		if ( definition.Shape == Titanfall2ParticleShape.Ring )
 		{
 			var ring = emitterObject.AddComponent<ParticleRingEmitter>();
-			ring.Radius = definition.ShapeMaximum;
-			ring.Thickness = definition.ShapeThickness;
+			ring.Radius = Math.Clamp( definition.ShapeMaximum, 0f, maximumExtent );
+			ring.Thickness = Math.Clamp( definition.ShapeThickness, 0f, maximumExtent );
 			emitter = ring;
 		}
 		else if ( definition.Shape == Titanfall2ParticleShape.Sphere )
 		{
 			var sphere = emitterObject.AddComponent<ParticleSphereEmitter>();
-			sphere.Radius = definition.ShapeMaximum;
+			sphere.Radius = Math.Clamp( definition.ShapeMaximum, 0f, maximumExtent );
 			sphere.OnEdge = definition.ShapeMinimum > 0f && MathF.Abs( definition.ShapeMinimum - definition.ShapeMaximum ) < 0.01f;
 			sphere.Velocity = 0f;
 			emitter = sphere;
@@ -404,7 +417,7 @@ static class Titanfall2ParticleFactory
 	static bool ConfigureRenderer( GameObject gameObject, Titanfall2Mount mount, Titanfall2ParticleDefinition definition )
 	{
 		var created = false;
-		if ( (definition.Renderer & (Titanfall2ParticleRenderer.Sprite | Titanfall2ParticleRenderer.Trail)) != 0
+		if ( (definition.Renderer & Titanfall2ParticleRenderer.Sprite) != 0
 			&& !string.IsNullOrWhiteSpace( definition.MaterialName )
 			&& mount.TryGetOrCreateLegacyMaterialDescriptor( definition.MaterialName, out var materialDescriptor, out _ )
 			&& mount.TryGetLegacyMaterialDefinition( definition.MaterialName, out var materialDefinition, out _ ) )
@@ -421,7 +434,7 @@ static class Titanfall2ParticleFactory
 				var renderer = gameObject.AddComponent<ParticleSpriteRenderer>();
 				renderer.Sprite = sprite;
 				renderer.PlaybackSpeed = 1f;
-				renderer.Scale = 2f;
+				renderer.Scale = 1f;
 				renderer.Additive = metadata.Mode == Titanfall2MaterialMode.Additive;
 				renderer.Lighting = !metadata.IsUnlit;
 				renderer.Opaque = false;
@@ -435,17 +448,10 @@ static class Titanfall2ParticleFactory
 					3 => ParticleSpriteRenderer.BillboardAlignment.Particle,
 					_ => ParticleSpriteRenderer.BillboardAlignment.LookAtCamera
 				};
-				renderer.DepthFeather = definition.DepthFeather > 0f ? definition.DepthFeather : 4f;
+				renderer.DepthFeather = definition.DepthFeather > 0f
+					? Math.Clamp( definition.DepthFeather, 0f, 64f )
+					: 4f;
 				renderer.FogStrength = 1f;
-				if ( (definition.Renderer & Titanfall2ParticleRenderer.Trail) != 0 )
-				{
-					renderer.FaceVelocity = true;
-					renderer.MotionBlur = true;
-					renderer.LeadingTrail = true;
-					renderer.BlurAmount = 1f;
-					renderer.BlurSpacing = 0.15f;
-					renderer.BlurOpacity = 0.65f;
-				}
 				created = true;
 			}
 		}
@@ -526,17 +532,20 @@ static class Titanfall2ParticleFactory
 	static ParticleFloat CreateScale( Titanfall2ParticleDefinition definition )
 	{
 		var graphs = definition.ScalarGraphs.Where( static graph => graph.OutputField == 3 ).ToArray();
-		var minimum = definition.RadiusMinimum * definition.RadiusMultiplierMinimum;
-		var maximum = definition.RadiusMaximum * definition.RadiusMultiplierMaximum;
+		var radiusLimit = Titanfall2StreamingSettings.ParticleMaximumRadius;
+		var minimum = Math.Clamp( definition.RadiusMinimum * definition.RadiusMultiplierMinimum, 0.01f, radiusLimit );
+		var maximum = Math.Clamp( definition.RadiusMaximum * definition.RadiusMultiplierMaximum, minimum, radiusLimit );
 		if ( definition.RadiusScale is null && graphs.Length == 0 ) return Range( minimum, maximum );
 		return new ParticleFloat
 		{
 			Type = ParticleFloat.ValueType.CurveRange,
 			Evaluation = ParticleFloat.EvaluationType.Life,
 			CurveA = CreateComposedCurve( definition.LifetimeMinimum, graphs,
-				time => minimum * EvaluateScale( definition.RadiusScale, time ), GetScaleTimes( definition.RadiusScale ) ),
+				time => minimum * EvaluateScale( definition.RadiusScale, time ),
+				GetScaleTimes( definition.RadiusScale ), 0.01f, radiusLimit ),
 			CurveB = CreateComposedCurve( definition.LifetimeMaximum, graphs,
-				time => maximum * EvaluateScale( definition.RadiusScale, time ), GetScaleTimes( definition.RadiusScale ) )
+				time => maximum * EvaluateScale( definition.RadiusScale, time ),
+				GetScaleTimes( definition.RadiusScale ), 0.01f, radiusLimit )
 		};
 	}
 
@@ -585,7 +594,8 @@ static class Titanfall2ParticleFactory
 	}
 
 	static Curve CreateComposedCurve( float lifetime, IReadOnlyList<ParticleScalarGraphDefinition> graphs,
-		Func<float, float> baseValue, IEnumerable<float> extraTimes = null )
+		Func<float, float> baseValue, IEnumerable<float> extraTimes = null,
+		float minimumValue = float.MinValue, float maximumValue = float.MaxValue )
 	{
 		lifetime = MathF.Max( lifetime, 0.01f );
 		var times = new SortedSet<float> { 0f, 1f };
@@ -604,6 +614,7 @@ static class Titanfall2ParticleFactory
 				var graphValue = EvaluateGraph( graph, time, lifetime );
 				value = graph.OutputOperation == 1 ? value * graphValue : graphValue;
 			}
+			value = Math.Clamp( value, minimumValue, maximumValue );
 			frames.Add( new Curve.Frame( time, value ) { Mode = Curve.HandleMode.Linear } );
 		}
 		return new Curve( frames );
@@ -698,6 +709,11 @@ static class Titanfall2ParticleFactory
 
 	static ParticleFloat Range( float minimum, float maximum ) =>
 		MathF.Abs( maximum - minimum ) < 0.0001f ? minimum : new ParticleFloat( minimum, maximum );
+
+	static Vector3 ClampVector( Vector3 value, float extent ) => new(
+		Math.Clamp( value.x, -extent, extent ),
+		Math.Clamp( value.y, -extent, extent ),
+		Math.Clamp( value.z, -extent, extent ) );
 
 	static Color ToColor( RgbaColor value ) => new( value.R / 255f, value.G / 255f, value.B / 255f, value.A / 255f );
 	static Vector3 ToSandbox( Vector3 value ) => value;

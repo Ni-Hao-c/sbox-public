@@ -158,7 +158,9 @@ public static partial class Titanfall2BspReader
 		public byte DiffuseModulationA { get; init; }
 		public uint CollisionFlagsAdd { get; init; }
 		public uint CollisionFlagsRemove { get; init; }
-		public bool IsCollidable => SolidType != 0;
+		// R2 can leave the legacy solid byte at zero and express the effective
+		// collision contents through the add/remove masks that follow the prop.
+		public bool IsCollidable => SolidType != 0 || CollisionFlagsAdd != 0;
 	}
 
 	private readonly record struct LumpHeader( int Offset, int Length, int Version, int FourCc );

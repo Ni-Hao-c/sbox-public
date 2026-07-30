@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Titanfall2.Formats;
 
@@ -7,7 +7,15 @@ class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false ) 
 {
 	internal const string StaticInstanceSuffix = ".t2static";
 	const float DecalNormalOffset = 0.05f;
-	static readonly ConcurrentDictionary<Model, bool> StaticInstanceEligibility = new();
+	sealed class StaticInstanceEligibilityValue( bool eligible )
+	{
+		internal bool Eligible { get; } = eligible;
+	}
+
+	// Runtime Model resources are owned by the engine resource system. A regular
+	// dictionary here kept every generated .t2static model alive after its scene
+	// was destroyed, so returning to the menu could not reclaim their GPU data.
+	static readonly ConditionalWeakTable<Model, StaticInstanceEligibilityValue> StaticInstanceEligibility = new();
 	static long _collisionModelCount;
 	static long _vphyModelCount;
 	static long _hitboxModelCount;
@@ -95,7 +103,9 @@ class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false ) 
 		=> sourceModelPath + StaticInstanceSuffix;
 
 	internal static bool CanInstance( Model model )
-		=> model.IsValid() && StaticInstanceEligibility.TryGetValue( model, out var eligible ) && eligible;
+		=> model.IsValid()
+			&& StaticInstanceEligibility.TryGetValue( model, out var eligibility )
+			&& eligibility.Eligible;
 
 	Model BuildStaticInstanceModel( Titanfall2MeshExtractor.ExtractedLod lod )
 	{
@@ -164,7 +174,7 @@ class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false ) 
 		}
 
 		var model = builder.Create();
-		StaticInstanceEligibility[model] = canInstance;
+		StaticInstanceEligibility.Add( model, new StaticInstanceEligibilityValue( canInstance ) );
 		Log.Trace( $"Titanfall 2 static instance model loaded: {Path} "
 			+ $"({lod.Meshes.Length} meshes, {lod.VertexCount} vertices, "
 			+ $"{lod.TriangleCount} triangles, GPU instancing {(canInstance ? "enabled" : "disabled for special materials")})" );
@@ -202,7 +212,8 @@ class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false ) 
 
 			var materialName = NormalizeMaterialName( sourceMesh.MaterialName );
 			var metadata = GetMaterialMetadata( materialName );
-			var includeCollision = !isVista && !metadata.IsDecal;
+			var includeCollision = !isVista
+				&& Titanfall2CollisionFilter.ShouldIncludeMaterial( materialName, metadata );
 			if ( metadata.IsDecal ) decalMeshCount++;
 
 			var meshBounds = new BBox { Mins = float.MaxValue, Maxs = float.MinValue };
@@ -1040,7 +1051,9 @@ class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false ) 
 		var normalized = name.Replace( '\\', '/' );
 		return normalized.Contains( "toolsnodraw", StringComparison.OrdinalIgnoreCase )
 			|| normalized.Contains( "toolsinvisible", StringComparison.OrdinalIgnoreCase )
-			|| normalized.Contains( "toolsskybox", StringComparison.OrdinalIgnoreCase );
+			|| normalized.Contains( "toolsskybox", StringComparison.OrdinalIgnoreCase )
+			|| (!Titanfall2StreamingSettings.AtmosphericCardEffects
+				&& Titanfall2CollisionFilter.IsAtmosphericCardName( normalized ));
 	}
 
 	static int[] ReverseWinding( IReadOnlyList<int> source )

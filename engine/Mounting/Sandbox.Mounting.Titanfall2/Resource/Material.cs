@@ -87,8 +87,8 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 		// supplied by RPAK. Preserve the RPAK/TXTR resource priority, but use the VMT's
 		// two-layer blend, animation and proxy parameters when the generic MATL path
 		// cannot represent them.
-		if ( Host.TryGetLegacyMaterialDefinition( asset.Name, out var legacyDefinition, out _ )
-			&& legacyDefinition.IsUnlitTwoTexture )
+		Host.TryGetLegacyMaterialDefinition( asset.Name, out var legacyDefinition, out _ );
+		if ( legacyDefinition is not null && legacyDefinition.IsUnlitTwoTexture )
 		{
 			var legacyMetadata = legacyDefinition.GetMetadata( asset.Name );
 			Host.RegisterMaterialDescriptor( Titanfall2MaterialDescriptor.FromVmt( asset.Name, legacyDefinition ) );
@@ -120,6 +120,13 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 			IsRefract = ContainsShaderFeature( shaderSetName, "Refract" ) || ContainsShaderFeature( shaderSetName, "Distort" ),
 			IsHologram = ContainsShaderFeature( shaderSetName, "Hologram" ) || ContainsShaderFeature( shaderSetName, "Holo" )
 		};
+		// Titanfall resolves the RPAK MATL/TXTR first, but legacy VMT proxies still
+		// provide runtime behaviour for a number of map materials. In particular,
+		// Basic materials such as wargame_grid_pulse retain TextureScroll in VMT.
+		// Merge only that behaviour here so native textures and render state remain
+		// authoritative.
+		if ( legacyDefinition is not null )
+			descriptor.ApplyLegacyRuntimeBehavior( legacyDefinition );
 		if ( isGodray && TryReadGodrayFade( archive, asset, out var fadeScale, out var fadeBias ) )
 		{
 			descriptor.GodrayFadeScale = fadeScale;
@@ -153,6 +160,17 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 			var reflected = reflection is not null && reflection.TryGetTexture( index, out resource );
 			var resourceName = reflected ? resource.Name : null;
 			var semantic = Titanfall2MaterialDescriptor.InferTextureSemantic( resourceName, texturePath, first );
+			if ( semantic == Titanfall2TextureSemantic.Unknown
+				&& index > 0
+				&& descriptor.IsVista
+				&& IsVistaOpacityMaterial( descriptor.Name ) )
+			{
+				// Vista smoke/cloud cards commonly store colour and opacity in
+				// separate anonymous texture handles. Older shader reflection does
+				// not name that second slot, so leaving it unknown turns the entire
+				// low-poly card into an opaque grey/orange polygon.
+				semantic = Titanfall2TextureSemantic.Opacity;
+			}
 			descriptor.TextureBindings.Add( new Titanfall2TextureBinding(
 				texturePath, guid, index, reflected ? resource.BindPoint : index, resourceName, semantic, reflected ) );
 			first = false;
@@ -227,7 +245,19 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 		material.Set( "g_flHasNormalMap", 0f );
 		material.Set( "g_flUseVertexColor", metadata.UsesVertexColor ? 1f : 0f );
 		material.Set( "g_flUseVertexAlpha", metadata.UsesVertexAlpha ? 1f : 0f );
-		material.Set( "g_flWaterOpacity", metadata.IsTranslucent ? 1f : 0.78f );
+		// Titanfall water uses scene refraction and fog to retain body even when
+		// its source alpha is low. The runtime shader cannot sample that original
+		// buffer, so keep a conservative opacity floor instead.
+		material.Set( "g_flWaterOpacity", metadata.IsTranslucent ? 0.84f : 0.90f );
+		var normalized = name?.Replace( '\\', '/' ) ?? string.Empty;
+		var flow = normalized.Contains( "waterfall", StringComparison.OrdinalIgnoreCase )
+			? new Vector4( 0.018f, -0.18f, -0.012f, -0.09f )
+			: normalized.Contains( "whtwsh", StringComparison.OrdinalIgnoreCase )
+				? new Vector4( 0.035f, -0.055f, -0.022f, -0.032f )
+				: normalized.Contains( "homestead_water", StringComparison.OrdinalIgnoreCase )
+					? new Vector4( 0.025f, 0.012f, -0.014f, 0.019f )
+					: new Vector4( 0.010f, 0.004f, -0.006f, 0.008f );
+		material.Set( "g_vT2WaterFlow", flow );
 		return material;
 	}
 
@@ -445,6 +475,11 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 		material.Set( "g_tAlbedo", Texture.White );
 		material.Set( "g_tOpacity", Texture.White );
 		material.Set( "g_flAlbedoIsSrgb", 1f );
+		material.Set( "g_flUseVertexColor", metadata.UsesVertexColor ? 1f : 0f );
+		// Smoke/cloud vista cards are authored with vertex-alpha edge fades even
+		// when an older shader-set name does not advertise the Vcola feature.
+		material.Set( "g_flUseVertexAlpha",
+			metadata.UsesVertexAlpha || IsVistaOpacityMaterial( sourceMaterialName ) ? 1f : 0f );
 		if ( IsPlanetSunMaterial( sourceMaterialName ) )
 		{
 			// The source is BC6H HDR and Titanfall tone-maps it before bloom. Without
@@ -456,6 +491,12 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 	}
 
 	internal static bool IsVistaMaterial( string name ) => GetVistaMaterialMode( name ) != VistaMaterialMode.None;
+
+	internal static bool IsVistaOpacityMaterial( string name )
+	{
+		var mode = GetVistaMaterialMode( name );
+		return mode is VistaMaterialMode.Translucent or VistaMaterialMode.Additive;
+	}
 
 	static VistaMaterialMode GetVistaMaterialMode( string name )
 	{

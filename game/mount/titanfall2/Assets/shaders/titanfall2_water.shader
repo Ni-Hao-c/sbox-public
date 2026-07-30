@@ -75,7 +75,8 @@ PS
 	float g_flHasNormalMap < Attribute( "g_flHasNormalMap" ); Default( 0.0 ); >;
 	float g_flUseVertexColor < Attribute( "g_flUseVertexColor" ); Default( 0.0 ); >;
 	float g_flUseVertexAlpha < Attribute( "g_flUseVertexAlpha" ); Default( 0.0 ); >;
-	float g_flWaterOpacity < Attribute( "g_flWaterOpacity" ); Default( 0.78 ); >;
+	float g_flWaterOpacity < Attribute( "g_flWaterOpacity" ); Default( 0.86 ); >;
+	float4 g_vT2WaterFlow < Attribute( "g_vT2WaterFlow" ); Default4( 0.010, 0.004, -0.006, 0.008 ); >;
 	float4 g_vT2Uv1RotScale < Attribute( "g_vT2Uv1RotScale" ); Default4( 1.0, 0.0, 0.0, 1.0 ); >;
 	float4 g_vT2Uv2RotScale < Attribute( "g_vT2Uv2RotScale" ); Default4( 1.0, 0.0, 0.0, 1.0 ); >;
 	float4 g_vT2Uv3RotScale < Attribute( "g_vT2Uv3RotScale" ); Default4( 1.0, 0.0, 0.0, 1.0 ); >;
@@ -102,8 +103,10 @@ PS
 		float3 surfaceNormal = normalize( i.vNormalWs );
 		if ( g_flHasNormalMap < 0.5 ) return surfaceNormal;
 
-		float2 uvA = T2TransformUv( i.vTextureCoords.xy, g_vT2Uv2RotScale, g_vT2Uv2Translate );
-		float2 uvB = T2TransformUv( i.vTextureCoords.xy, g_vT2Uv3RotScale, g_vT2Uv3Translate );
+		float2 uvA = T2TransformUv( i.vTextureCoords.xy, g_vT2Uv2RotScale, g_vT2Uv2Translate )
+			+ g_vT2WaterFlow.xy * g_flTime;
+		float2 uvB = T2TransformUv( i.vTextureCoords.xy, g_vT2Uv3RotScale, g_vT2Uv3Translate )
+			+ g_vT2WaterFlow.zw * g_flTime;
 		float3 normalA = Tex2DS( g_tNormal, g_sAniso, uvA ).xyz * 2.0 - 1.0;
 		float3 normalB = Tex2DS( g_tNormal, g_sAniso, uvB ).xyz * 2.0 - 1.0;
 		distortion = normalA.xy * g_vT2UvDistortion.xy + normalB.xy * g_vT2UvDistortion.zw;
@@ -140,7 +143,8 @@ PS
 	{
 		float2 distortion;
 		float3 waterNormal = DecodeWaterNormal( i, distortion );
-		float2 uv = T2TransformUv( i.vTextureCoords.xy, g_vT2Uv1RotScale, g_vT2Uv1Translate ) + distortion;
+		float2 uv = T2TransformUv( i.vTextureCoords.xy, g_vT2Uv1RotScale, g_vT2Uv1Translate )
+			+ g_vT2WaterFlow.xy * (g_flTime * 0.35) + distortion;
 		float4 albedo = Tex2DS( g_tAlbedo, g_sAniso, uv );
 		float gloss = Tex2DS( g_tGloss, g_sAniso, uv ).r;
 		float3 specular = Tex2DS( g_tSpecular, g_sAniso, uv ).rgb * g_vT2SpecularTint.rgb;
@@ -150,7 +154,8 @@ PS
 		float3 emissive = Tex2DS( g_tEmissive, g_sAniso, uv ).rgb;
 		float3 vertexTint = lerp( float3( 1, 1, 1 ), i.vVertexColor.rgb, saturate( g_flUseVertexColor ) );
 		float vertexAlpha = lerp( 1.0, i.vVertexColor.a, saturate( g_flUseVertexAlpha ) );
-		float opacity = saturate( albedo.a * opacityMap * vertexAlpha * g_flWaterOpacity * g_flT2MaterialOpacity );
+		float opacity = saturate( max( albedo.a * opacityMap, g_flWaterOpacity )
+			* vertexAlpha * g_flT2MaterialOpacity );
 		clip( opacity - 0.0001 );
 
 		Material m = Material::Init();

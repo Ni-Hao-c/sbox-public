@@ -6,13 +6,15 @@ class MapLoader(
 	ITitanfall2AssetSource source,
 	ITitanfall2AssetSource spawnEntitySource = null,
 	ITitanfall2AssetSource environmentEntitySource = null,
-	ITitanfall2AssetSource particleEntitySource = null ) : SceneLoader<Titanfall2Mount>
+	ITitanfall2AssetSource particleEntitySource = null,
+	ITitanfall2AssetSource scriptEntitySource = null ) : SceneLoader<Titanfall2Mount>
 {
 	const float DecalNormalOffset = 0.25f;
 	readonly ITitanfall2AssetSource _source = source;
 	readonly ITitanfall2AssetSource _spawnEntitySource = spawnEntitySource;
 	readonly ITitanfall2AssetSource _environmentEntitySource = environmentEntitySource;
 	readonly ITitanfall2AssetSource _particleEntitySource = particleEntitySource;
+	readonly ITitanfall2AssetSource _scriptEntitySource = scriptEntitySource;
 
 	[StructLayout( LayoutKind.Sequential )]
 	struct TitanfallMapVertex
@@ -45,22 +47,32 @@ class MapLoader(
 			return;
 		}
 
-		var collisionLumps = Titanfall2StreamingSettings.DeferredNavMesh
+		// The imported brush/tricoll path is retained for future NavMesh work, but
+		// it is not yet reliable enough to replace gameplay collision on every R2
+		// map. Keep the previously stable filtered render-geometry collision while
+		// navigation is disabled.
+		var parseOriginalWorldCollision = Titanfall2StreamingSettings.DeferredNavMesh;
+		var collisionLumps = parseOriginalWorldCollision
 			? ReadCollisionLumpOverrides()
 			: new Dictionary<int, byte[]>();
 		if ( !Titanfall2BspReader.TryRead( bytes, System.IO.Path.GetFileNameWithoutExtension( _source.Description ), collisionLumps,
-			Titanfall2StreamingSettings.DeferredNavMesh, out var parsed, out var parseError ) )
+			parseWorldCollision: parseOriginalWorldCollision, out var parsed, out var parseError ) )
 		{
 			Log.Warning( $"Failed to parse Titanfall 2 BSP '{Path}': {parseError}" );
 			return;
 		}
-		var collisionSummary = Titanfall2StreamingSettings.DeferredNavMesh
-			? $"{parsed.WorldCollision.BrushCount} brushes, {parsed.WorldCollision.TricollCount} tricolls, {parsed.WorldCollision.TriangleCount} collision triangles"
-			: "NavMesh collision skipped";
+		var collisionSummary = parsed.WorldCollision.SourcePrimitiveCount > 0
+			? $"{parsed.WorldCollision.PrimitiveCount}/{parsed.WorldCollision.SourcePrimitiveCount} player-solid primitives, "
+				+ $"{parsed.WorldCollision.WaterPrimitiveCount} water "
+				+ $"({parsed.WorldCollision.BlockingWaterPrimitiveCount} player-blocking), "
+				+ $"{parsed.WorldCollision.TriangleCount} collision triangles"
+			: "original collision lumps unavailable";
 		Log.Info( $"Titanfall 2 map parsed: {Path} ({parsed.World.Meshes.Count} world meshes, {collisionSummary}, "
 			+ $"{parsed.StaticProps.Count} static props, {timer.Elapsed.TotalSeconds:0.00}s)" );
 
-		var worldBuild = BuildWorldModel( parsed );
+		var hasOriginalWorldCollision = parseOriginalWorldCollision
+			&& parsed.WorldCollision is { IsEmpty: false };
+		var worldBuild = BuildWorldModel( parsed, createFallbackCollision: !hasOriginalWorldCollision );
 		if ( worldBuild is null )
 		{
 			Log.Warning( $"Titanfall 2 BSP contains no usable world geometry: {Path}" );
@@ -70,12 +82,14 @@ class MapLoader(
 		var world = new GameObject( true, "worldspawn" );
 		world.IsStatic = true;
 		world.AddComponent<Titanfall2MaterialAnimator>();
+		world.AddComponent<Titanfall2SceneResourceOwner>().Configure( Host.Ident );
 		foreach ( var chunk in worldBuild.WorldChunks )
 		{
 			var chunkObject = new GameObject( world, true, $"world_{chunk.Cell}" );
 			chunkObject.IsStatic = true;
 			chunkObject.AddComponent<ModelRenderer>().Model = chunk.Model;
 		}
+		world.AddComponent<Titanfall2WorldShadowController>();
 		foreach ( var chunk in worldBuild.DecalChunks )
 		{
 			var decals = new GameObject( world, true, $"decals_{chunk.Cell}" );
@@ -92,35 +106,43 @@ class MapLoader(
 			godrayRenderer.Model = chunk.Model;
 			godrayRenderer.RenderType = ModelRenderer.ShadowRenderType.Off;
 		}
-		if ( worldBuild.CollisionModel is not null )
+		var originalCollisionModel = hasOriginalWorldCollision
+			? BuildWorldCollisionModel( parsed )
+			: null;
+		if ( originalCollisionModel is not null )
+		{
+			var collisionObject = new GameObject( world, true, "titanfall2_world_collision" );
+			collisionObject.IsStatic = true;
+			if ( Titanfall2StreamingSettings.DeferredNavMesh )
+				collisionObject.Tags.Add( Titanfall2DeferredNavMeshBuilder.NavMeshBodyTag );
+			var worldCollider = collisionObject.AddComponent<ModelCollider>();
+			worldCollider.Model = originalCollisionModel;
+			worldCollider.Static = true;
+		}
+		else if ( worldBuild.CollisionModel is not null )
 		{
 			var fallbackWorldCollider = world.AddComponent<ModelCollider>();
 			fallbackWorldCollider.Model = worldBuild.CollisionModel;
 			fallbackWorldCollider.Static = true;
+			Log.Warning( $"Titanfall 2 BSP is using render-geometry collision because authoritative "
+				+ $"rBSP collision was unavailable: {Path}." );
 		}
 
-		if ( Titanfall2StreamingSettings.DeferredNavMesh && BuildWorldCollisionModel( parsed ) is { } collisionModel )
-		{
-			var collisionObject = new GameObject( true, "titanfall2_world_collision" );
-			collisionObject.Tags.Add( Titanfall2DeferredNavMeshBuilder.NavMeshBodyTag );
-			var worldCollider = collisionObject.AddComponent<ModelCollider>();
-			worldCollider.Model = collisionModel;
-			worldCollider.Static = true;
-		}
-		else if ( Titanfall2StreamingSettings.DeferredNavMesh )
+		if ( Titanfall2StreamingSettings.DeferredNavMesh && originalCollisionModel is null )
 		{
 			Log.Warning( $"Titanfall 2 BSP has no usable brush/tricoll world collision: {Path}. "
 				+ "Render geometry will not be submitted to physics or NavMesh as a fallback." );
 		}
 		world.AddComponent<Titanfall2DeferredNavMeshBuilder>()
 			.Configure( Titanfall2StreamingSettings.DeferredNavMesh, Titanfall2StreamingSettings.NavMeshStartDelaySeconds );
-		CreateDefaultLighting();
+		CreateEnvironment( parsed );
 		var cubemapProbeCount = CreateCubemapProbes( parsed );
 		var skyboxModelCount = CreateSkybox( parsed.StaticProps );
 		Log.Info( $"Titanfall 2 map world created: {Path} ({timer.Elapsed.TotalSeconds:0.00}s)" );
 
 		var spawnCount = CreateSpawnPoints( parsed, out var streamingAnchor );
 		var particleCount = CreateParticleSystems( streamingAnchor );
+		var dynamicPropCount = CreateDynamicProps( world );
 		var worldProps = parsed.StaticProps.Where( static prop => !IsVistaModelPath( prop.ModelPath ) ).ToArray();
 		var streamerObject = new GameObject( true, "titanfall2_static_prop_streamer" );
 		streamerObject.AddComponent<Titanfall2StaticPropStreamer>()
@@ -128,11 +150,11 @@ class MapLoader(
 		Log.Info( $"Titanfall 2 map loaded: {Path} ({parsed.World.Meshes.Count} world meshes, "
 			+ $"{worldProps.Length} world props registered for loading-stage preload, "
 			+ $"{skyboxModelCount} vista models moved to the 3D skybox, {cubemapProbeCount} environment probes, "
-			+ $"{particleCount} particle systems queued)" );
+			+ $"{dynamicPropCount} dynamic props, {particleCount} particle systems queued)" );
 		Log.Info( $"Titanfall 2 map spawn points created: {Path} ({spawnCount})" );
 	}
 
-	WorldBuildResult BuildWorldModel( Titanfall2BspReader.ParsedBsp parsed )
+	WorldBuildResult BuildWorldModel( Titanfall2BspReader.ParsedBsp parsed, bool createFallbackCollision )
 	{
 		var vertexCount = parsed.World.Meshes.Sum( static mesh => mesh?.Vertices.Length ?? 0 );
 		var indexCount = parsed.World.Meshes.Sum( static mesh => mesh?.Indices.Length ?? 0 );
@@ -152,6 +174,7 @@ class MapLoader(
 		var skippedToolMeshes = 0;
 		var decalMeshCount = 0;
 		var godrayMeshCount = 0;
+		var visualEffectCollisionMeshCount = 0;
 		foreach ( var sourceMesh in parsed.World.Meshes )
 		{
 			if ( sourceMesh is null || sourceMesh.Vertices.Length == 0 || sourceMesh.Indices.Length < 3 ) continue;
@@ -164,6 +187,8 @@ class MapLoader(
 			var isGodray = MaterialLoader.IsGodrayMaterial( materialName );
 			var materialMetadata = GetMaterialMetadata( materialName );
 			var isDecal = !isGodray && materialMetadata.IsDecal;
+			var allowsFallbackCollision = Titanfall2CollisionFilter.ShouldIncludeMaterial( materialName, materialMetadata );
+			var includeCollision = createFallbackCollision && allowsFallbackCollision;
 			if ( !isDecal && materialMetadata.Mode == Titanfall2MaterialMode.Cutout ) cutoutMaterials.Add( materialName );
 			if ( !isDecal && materialMetadata.IsTranslucent ) translucentMaterials.Add( materialName );
 			if ( !isDecal && materialMetadata.IsWater ) waterMaterials.Add( materialName );
@@ -199,7 +224,7 @@ class MapLoader(
 				group.Bounds = group.Bounds.AddPoint( vertex0.Position );
 				group.Bounds = group.Bounds.AddPoint( vertex1.Position );
 				group.Bounds = group.Bounds.AddPoint( vertex2.Position );
-				if ( !isGodray && !isDecal )
+				if ( includeCollision )
 				{
 					var collisionBase = collisionPositions.Count;
 					collisionPositions.Add( vertex0.Position );
@@ -210,6 +235,8 @@ class MapLoader(
 					collisionIndices.Add( collisionBase + 1 );
 				}
 			}
+			if ( createFallbackCollision && !allowsFallbackCollision && !isGodray && !isDecal )
+				visualEffectCollisionMeshCount++;
 		}
 
 		if ( groups.Count == 0 ) return null;
@@ -222,7 +249,10 @@ class MapLoader(
 			+ $"{decalMaterials.Count} decal materials across {decalGroups.Count} cells/{decalGroupCount} local meshes, "
 			+ $"{godrayMaterials.Count} Godray materials across {godrayGroups.Count} cells/{godrayGroupCount} local meshes, "
 			+ $"{vertexCount} source vertices, {indexCount / 3} source triangles, {skippedToolMeshes} invisible tool meshes skipped, "
-			+ $"{decalMeshCount} decal and {godrayMeshCount} Godray meshes excluded from collision)" );
+			+ $"{decalMeshCount} decal, {godrayMeshCount} Godray and {visualEffectCollisionMeshCount} "
+			+ (createFallbackCollision
+				? "visual FX meshes excluded from fallback collision)"
+				: "render collision disabled; authoritative rBSP contents used)") );
 		var renderTimer = System.Diagnostics.Stopwatch.StartNew();
 		var worldChunks = BuildRenderChunks(
 			groups, parsed.MapName, "world",
@@ -355,6 +385,9 @@ class MapLoader(
 		Log.Info( $"Titanfall 2 real world collision built: {Path} ({collision.PrimitiveCount} primitives: "
 			+ $"{collision.BrushCount} brushes/{collision.BrushTriangleCount} triangles + "
 			+ $"{collision.TricollCount} tricolls/{collision.TricollTriangleCount} triangles; "
+			+ $"{collision.NonBlockingPrimitiveCount} non-player-solid primitives skipped, "
+			+ $"{collision.WaterPrimitiveCount} water primitives "
+			+ $"({collision.BlockingWaterPrimitiveCount} player-blocking); "
 			+ $"{chunks.Count} spatial chunks at {Titanfall2StreamingSettings.CollisionCellSize:0} units, "
 			+ $"{submittedVertices} submitted vertices, {submittedTriangles} triangles)" );
 		return model;
@@ -554,6 +587,7 @@ class MapLoader(
 	{
 		var entities = new List<Titanfall2ParticleMapEntity>();
 		var skyboxEffects = 0;
+		var atmosphericEffects = 0;
 		foreach ( var values in ReadEntities( _particleEntitySource ) )
 		{
 			if ( !values.TryGetValue( "classname", out var className )
@@ -563,6 +597,12 @@ class MapLoader(
 					|| startActive.Equals( "false", StringComparison.OrdinalIgnoreCase )) ) continue;
 			if ( !values.TryGetValue( "effect_name", out var effectName ) || string.IsNullOrWhiteSpace( effectName ) ) continue;
 			if ( !values.TryGetValue( "origin", out var originText ) || !TryParseVector3( originText, out var origin ) ) continue;
+			if ( !Titanfall2StreamingSettings.AtmosphericCardEffects
+				&& Titanfall2CollisionFilter.IsAtmosphericCardName( effectName ) )
+			{
+				atmosphericEffects++;
+				continue;
+			}
 			// 3D-skybox particles must be submitted to the isolated skybox SceneWorld.
 			// A regular scene component would render them at their authored sky-camera
 			// coordinates in the main world, so defer these few systems until the
@@ -589,11 +629,111 @@ class MapLoader(
 
 		if ( skyboxEffects > 0 )
 			Log.Info( $"Titanfall 2 map FX deferred {skyboxEffects} 3D-skybox particle systems: {Path}." );
+		if ( atmosphericEffects > 0 )
+			Log.Info( $"Titanfall 2 map FX temporarily omitted {atmosphericEffects} billboarded "
+				+ $"steam/mist/smoke systems: {Path}." );
 		if ( entities.Count == 0 ) return 0;
 		var streamerObject = new GameObject( true, "titanfall2_particle_streamer" );
 		streamerObject.AddComponent<Titanfall2ParticleStreamer>()
 			.Configure( Host.Ident, Path, streamingAnchor, entities );
 		return entities.Count;
+	}
+
+	int CreateDynamicProps( GameObject world )
+	{
+		var entities = ReadEntities( _scriptEntitySource );
+		if ( entities.Count == 0 ) return 0;
+
+		var root = new GameObject( world, true, "titanfall2_dynamic_props" );
+		root.IsStatic = false;
+		var created = 0;
+		var failed = 0;
+		var animated = 0;
+		var colliders = 0;
+		foreach ( var values in entities )
+		{
+			if ( !values.TryGetValue( "classname", out var className )
+				|| !(className.Equals( "prop_dynamic", StringComparison.OrdinalIgnoreCase )
+					|| className.Equals( "prop_dynamic_lightweight", StringComparison.OrdinalIgnoreCase )
+					|| className.Equals( "prop_dynamic_override", StringComparison.OrdinalIgnoreCase )) )
+				continue;
+			if ( IsEntityTrue( values.GetValueOrDefault( "StartDisabled" ) ) ) continue;
+			if ( !values.TryGetValue( "model", out var modelPath )
+				|| string.IsNullOrWhiteSpace( modelPath )
+				|| modelPath[0] == '*' ) continue;
+			if ( !values.TryGetValue( "origin", out var originText )
+				|| !TryParseVector3( originText, out var position ) ) continue;
+
+			var normalizedModelPath = NormalizeModelPath( modelPath );
+			var resourcePath = $"mount://{Host.Ident}/{normalizedModelPath}.vmdl";
+			var model = Model.Load( resourcePath );
+			if ( !model.IsValid() || model == Model.Error )
+			{
+				if ( failed++ < 12 )
+					Log.Warning( $"Unable to load Titanfall 2 dynamic prop '{resourcePath}'." );
+				continue;
+			}
+
+			var gameObject = new GameObject( root, true,
+				values.GetValueOrDefault( "targetname", System.IO.Path.GetFileNameWithoutExtension( normalizedModelPath ) ) );
+			gameObject.IsStatic = false;
+			gameObject.WorldPosition = position;
+			if ( values.TryGetValue( "angles", out var anglesText ) && TryParseVector3( anglesText, out var angles ) )
+				gameObject.WorldRotation = new Angles( angles.x, angles.y, angles.z );
+			if ( values.TryGetValue( "scale", out var scaleText ) && TryParseFloat( scaleText, out var scale ) )
+				gameObject.WorldScale = Vector3.One * Math.Clamp( scale, 0.001f, 1000f );
+
+			var disableShadows = IsEntityTrue( values.GetValueOrDefault( "disableshadows" ) );
+			if ( model.BoneCount > 0 || model.AnimationCount > 0 )
+			{
+				var renderer = gameObject.AddComponent<SkinnedModelRenderer>();
+				renderer.Model = model;
+				renderer.UseAnimGraph = false;
+				renderer.RenderType = disableShadows
+					? ModelRenderer.ShadowRenderType.Off
+					: ModelRenderer.ShadowRenderType.On;
+				if ( values.TryGetValue( "DefaultAnim", out var defaultAnimation )
+					&& !string.IsNullOrWhiteSpace( defaultAnimation ) )
+				{
+					renderer.Sequence.Name = defaultAnimation.Trim();
+					renderer.Sequence.Looping = !IsEntityTrue( values.GetValueOrDefault( "HoldAnimation" ) );
+					renderer.PlaybackRate = 1f;
+				}
+				animated++;
+			}
+			else
+			{
+				var renderer = gameObject.AddComponent<ModelRenderer>();
+				renderer.Model = model;
+				renderer.RenderType = disableShadows
+					? ModelRenderer.ShadowRenderType.Off
+					: ModelRenderer.ShadowRenderType.On;
+			}
+
+			var solid = values.TryGetValue( "solid", out var solidText )
+				&& int.TryParse( solidText, out var solidType ) && solidType != 0;
+			var collidable = solid
+				|| IsEntityTrue( values.GetValueOrDefault( "collide_human" ) )
+				|| IsEntityTrue( values.GetValueOrDefault( "collide_titan" ) );
+			if ( collidable )
+			{
+				var collider = gameObject.AddComponent<ModelCollider>();
+				collider.Model = model;
+				collider.Static = true;
+				colliders++;
+			}
+			created++;
+		}
+
+		if ( created == 0 )
+		{
+			root.Destroy();
+			return 0;
+		}
+
+		Log.Info( $"Titanfall 2 scripted dynamic props created: {created} models, "
+			+ $"{animated} animated, {colliders} colliders, {failed} failures ({Path})." );
+		return created;
 	}
 
 	static IReadOnlyList<Dictionary<string, string>> ReadEntities( ITitanfall2AssetSource source )
@@ -655,7 +795,9 @@ class MapLoader(
 		if ( string.IsNullOrWhiteSpace( materialName ) ) return false;
 		return materialName.Contains( "toolsskybox", StringComparison.OrdinalIgnoreCase )
 			|| materialName.Contains( "toolsnodraw", StringComparison.OrdinalIgnoreCase )
-			|| materialName.Contains( "toolsinvisible", StringComparison.OrdinalIgnoreCase );
+			|| materialName.Contains( "toolsinvisible", StringComparison.OrdinalIgnoreCase )
+			|| (!Titanfall2StreamingSettings.AtmosphericCardEffects
+				&& Titanfall2CollisionFilter.IsAtmosphericCardName( materialName ));
 	}
 
 	static float DistanceSquared( System.Numerics.Vector3 source, Vector3 target )
@@ -674,13 +816,139 @@ class MapLoader(
 		spawn.Tags.Add( "spawn", "info_player_start" );
 	}
 
-	static void CreateDefaultLighting()
+	void CreateEnvironment( Titanfall2BspReader.ParsedBsp parsed )
 	{
+		var entities = ReadEntities( _environmentEntitySource );
+		var center = (ToSandbox( parsed.World.Mins ) + ToSandbox( parsed.World.Maxs )) * 0.5f;
+		var lightValues = entities
+			.Where( values => values.TryGetValue( "classname", out var className )
+				&& className.Equals( "light_environment", StringComparison.OrdinalIgnoreCase ) )
+			.OrderBy( values => EntityDistanceSquared( values, center ) )
+			.FirstOrDefault();
+
 		var gameObject = new GameObject( true, "titanfall2_environment_light" );
 		gameObject.WorldRotation = new Angles( 50f, -35f, 0f );
+		if ( lightValues is not null
+			&& lightValues.TryGetValue( "angles", out var angleText )
+			&& TryParseVector3( angleText, out var angles ) )
+			gameObject.WorldRotation = new Angles( angles.x, angles.y, angles.z );
+
 		var light = gameObject.AddComponent<DirectionalLight>();
-		light.LightColor = new Color( 1.0f, 0.95f, 0.86f );
-		light.SkyColor = new Color( 0.38f, 0.48f, 0.62f );
+		light.LightColor = TryParseSourceLightColor( lightValues?.GetValueOrDefault( "_light" ), 0.78f,
+			out var lightColor ) ? lightColor : new Color( 0.78f, 0.74f, 0.68f );
+		light.SkyColor = TryParseSourceLightColor( lightValues?.GetValueOrDefault( "_ambient" ), 0.30f,
+			out var skyColor ) ? skyColor : new Color( 0.22f, 0.28f, 0.36f );
+		light.ShadowCascadeCount = 2;
+		light.ContactShadows = false;
+
+		var fogValues = Titanfall2StreamingSettings.MapFog
+			? entities
+				.Where( values => values.TryGetValue( "classname", out var className )
+					&& className.Equals( "env_fog_controller", StringComparison.OrdinalIgnoreCase )
+					&& (!values.TryGetValue( "fogenable", out var enabledText ) || !IsEntityFalse( enabledText )) )
+				.OrderBy( values => EntityDistanceSquared( values, center ) )
+				.FirstOrDefault()
+			: null;
+		if ( fogValues is not null )
+		{
+			var fogObject = new GameObject( true, "titanfall2_environment_fog" );
+			fogObject.WorldPosition = new Vector3( center.x, center.y, ToSandbox( parsed.World.Mins ).z - 1024f );
+			var fog = fogObject.AddComponent<GradientFog>();
+			fog.Height = MathF.Max( 2048f, ToSandbox( parsed.World.Maxs ).z - ToSandbox( parsed.World.Mins ).z + 2048f );
+			fog.StartDistance = GetEntityFloat( fogValues, "fogdistoffset",
+				GetEntityFloat( fogValues, "fogstart", 256f ) );
+			fog.EndDistance = GetEntityFloat( fogValues, "foghalfdistbottom",
+				GetEntityFloat( fogValues, "fogend", 6000f ) );
+			if ( fog.EndDistance <= fog.StartDistance )
+				fog.EndDistance = fog.StartDistance + 4096f;
+			var opacity = Math.Clamp( GetEntityFloat( fogValues, "fogdensity",
+				GetEntityFloat( fogValues, "fogmaxdensity", 0.28f ) ), 0.05f, 0.55f );
+			fog.Color = TryParseRgbColor( fogValues.GetValueOrDefault( "fogcolor" ), opacity, out var fogColor )
+				? fogColor
+				: new Color( 0.66f, 0.72f, 0.78f, opacity );
+			fog.FalloffExponent = 1.15f;
+			fog.VerticalFalloffExponent = 0.25f;
+		}
+
+		var color = new GameObject( true, "titanfall2_color_adjustments" ).AddComponent<ColorAdjustments>();
+		color.Blend = 1f;
+		color.Saturation = 0.86f;
+		color.Brightness = 0.94f;
+		color.Contrast = 0.92f;
+
+		Log.Info( $"Titanfall 2 environment created from map entities: "
+			+ $"{(lightValues is null ? "fallback light" : "light_environment")}, "
+			+ $"{(!Titanfall2StreamingSettings.MapFog ? "fog disabled" : fogValues is null ? "no fog entity" : "env_fog_controller")}, "
+			+ $"2 shadow cascades ({Path})." );
+	}
+
+	static float EntityDistanceSquared( IReadOnlyDictionary<string, string> values, Vector3 center )
+	{
+		return values.TryGetValue( "origin", out var originText ) && TryParseVector3( originText, out var origin )
+			? origin.DistanceSquared( center )
+			: float.MaxValue;
+	}
+
+	static float GetEntityFloat( IReadOnlyDictionary<string, string> values, string key, float fallback )
+		=> values.TryGetValue( key, out var text ) && TryParseFloat( text, out var value ) ? value : fallback;
+
+	static bool TryParseSourceLightColor( string value, float maximumIntensity, out Color result )
+	{
+		result = default;
+		if ( !TryParseFloatComponents( value, out var components ) || components.Length < 3 ) return false;
+		var authoredIntensity = components.Length >= 4 ? components[3] : 255f;
+		var intensity = Math.Clamp( authoredIntensity / 1020f, maximumIntensity * 0.35f, maximumIntensity );
+		result = new Color(
+			Math.Clamp( components[0] / 255f, 0f, 1f ) * intensity,
+			Math.Clamp( components[1] / 255f, 0f, 1f ) * intensity,
+			Math.Clamp( components[2] / 255f, 0f, 1f ) * intensity );
+		return true;
+	}
+
+	static bool TryParseRgbColor( string value, float alpha, out Color result )
+	{
+		result = default;
+		if ( !TryParseFloatComponents( value, out var components ) || components.Length < 3 ) return false;
+		result = new Color(
+			Math.Clamp( components[0] / 255f, 0f, 1f ),
+			Math.Clamp( components[1] / 255f, 0f, 1f ),
+			Math.Clamp( components[2] / 255f, 0f, 1f ),
+			Math.Clamp( alpha, 0f, 1f ) );
+		return true;
+	}
+
+	static bool TryParseFloatComponents( string value, out float[] components )
+	{
+		components = Array.Empty<float>();
+		if ( string.IsNullOrWhiteSpace( value ) ) return false;
+		var parts = value.Split( [' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries );
+		if ( parts.Length == 0 ) return false;
+		components = new float[parts.Length];
+		for ( var index = 0; index < parts.Length; index++ )
+		{
+			if ( !TryParseFloat( parts[index], out components[index] ) )
+			{
+				components = Array.Empty<float>();
+				return false;
+			}
+		}
+		return true;
+	}
+
+	static bool IsEntityTrue( string value ) => value is not null
+		&& (value == "1" || value.Equals( "true", StringComparison.OrdinalIgnoreCase )
+			|| value.Equals( "yes", StringComparison.OrdinalIgnoreCase ));
+
+	static bool IsEntityFalse( string value ) => value is not null
+		&& (value == "0" || value.Equals( "false", StringComparison.OrdinalIgnoreCase )
+			|| value.Equals( "no", StringComparison.OrdinalIgnoreCase ));
+
+	static string NormalizeModelPath( string path )
+	{
+		var normalized = path.Replace( '\\', '/' ).Trim().TrimStart( '/' );
+		return normalized.EndsWith( ".vmdl", StringComparison.OrdinalIgnoreCase )
+			? normalized[..^5]
+			: normalized;
 	}
 
 	static Vector3 ToSandbox( System.Numerics.Vector3 value ) => new( value.X, value.Y, value.Z );

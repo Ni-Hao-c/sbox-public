@@ -24,9 +24,12 @@ class LegacyMaterialLoader( string materialName ) : ResourceLoader<Titanfall2Mou
 	internal static Material CreateUnlitTwoTexture( Titanfall2Mount host, string resourcePath,
 		Titanfall2VmtDefinition definition, Titanfall2MaterialMetadata metadata, Action<string> warn )
 	{
-		var shader = metadata.Mode == Titanfall2MaterialMode.Additive
-			? "shaders/titanfall2_vmt_unlit_two_texture_additive.shader"
-			: "shaders/titanfall2_vmt_unlit_two_texture.shader";
+		var shader = metadata.Mode switch
+		{
+			Titanfall2MaterialMode.Additive => "shaders/titanfall2_vmt_unlit_two_texture_additive.shader",
+			Titanfall2MaterialMode.Opaque => "shaders/titanfall2_vmt_unlit_two_texture_opaque.shader",
+			_ => "shaders/titanfall2_vmt_unlit_two_texture.shader"
+		};
 		var material = Material.Create( resourcePath, shader );
 		material.Set( "g_tTexture1", Texture.Transparent );
 		material.Set( "g_tTexture2", Texture.Transparent );

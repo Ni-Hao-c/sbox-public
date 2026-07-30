@@ -47,6 +47,9 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 	int _batchCount;
 	int _renderingProps;
 	int _shadowCastingProps;
+	int _collidableProps;
+	int _collidersCreated;
+	int _colliderFailures;
 
 	public void Configure( string mountIdent, string mapPath, Vector3 fallbackAnchor,
 		IReadOnlyList<Titanfall2BspReader.StaticPropInstance> props )
@@ -120,10 +123,14 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 
 	protected override void OnDestroy()
 	{
+		var releasedProps = _liveProps;
+		var releasedBatches = _batchCount;
 		foreach ( var cell in _cells.Values )
 			DestroyCellInstances( cell );
 		_cells.Clear();
 		_workQueue.Clear();
+		Log.Info( $"Titanfall 2 static prop scene resources released: {releasedProps} props, "
+			+ $"{releasedBatches} instance batches ({MapPath})." );
 	}
 
 	void InitializeCells()
@@ -230,6 +237,7 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 			+ $"{_activeCells}/{_cells.Count} cells, {_instancedProps} GPU-instanced in {_batchCount} batches, "
 			+ $"{_skinnedProps} frozen-skinned fallbacks, {_plainProps} individual rigid, "
 			+ $"{_renderingProps} rendering, {_shadowCastingProps} casting shadows, "
+			+ $"{_collidersCreated}/{_collidableProps} colliders ({_colliderFailures} failures), "
 			+ $"{_failedProps} skipped ({MapPath})." );
 	}
 
@@ -303,6 +311,7 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 		GameObject collisionObject = null;
 		if ( (Titanfall2StreamingSettings.PropCollisions || Titanfall2StreamingSettings.NavMeshStaticProps) && prop.Collidable )
 		{
+			_collidableProps++;
 			collisionObject = new GameObject( GameObject, true, System.IO.Path.GetFileNameWithoutExtension( prop.ModelPath ) );
 			collisionObject.WorldPosition = prop.Position;
 			collisionObject.WorldRotation = prop.Rotation;
@@ -314,6 +323,21 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 			var collisionModel = Model.Load( resourcePath );
 			collider.Model = collisionModel.IsValid() && collisionModel != Model.Error ? collisionModel : model;
 			collider.Static = true;
+			if ( collider.Model.IsValid()
+				&& collider.Model != Model.Error
+				&& collider.Model.Physics is { Parts.Count: > 0 } )
+			{
+				_collidersCreated++;
+			}
+			else
+			{
+				_colliderFailures++;
+				if ( _failureLogs++ < 16 )
+					Log.Warning( $"Titanfall 2 static prop has no usable collision bodies: "
+						+ $"'{prop.ModelPath}' at {prop.Position} ({MapPath})." );
+				collisionObject.Destroy();
+				collisionObject = null;
+			}
 		}
 		cell.Instances.Add( new PropInstance(
 			collisionObject, renderObject, prop.Position, radius, renderingEnabled, castShadows, isBatched ) );
