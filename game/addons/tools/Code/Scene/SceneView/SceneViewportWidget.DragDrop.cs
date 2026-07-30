@@ -37,21 +37,28 @@ public partial class SceneViewportWidget : Widget
 	{
 		base.OnDragHover( ev );
 
-		// TODO: Use DragAssetData and deprecate StartInitialize using string
-
 		if ( string.IsNullOrWhiteSpace( ev.Data.Text ) )
 			return;
 
-		// Dragging an asset while one is selected will drag them both,
-		// in that situation we only want the first one.
-		var file = ev.Data.Files.FirstOrDefault();
+		// Asset browser drags can carry both text and a local file URL. Mount resources
+		// are virtual, so their usable identity is the AssetPath (mount://...), never the
+		// file URL that Qt may have normalized into a Windows path.
+		var file = ev.Data.OfType<Asset>().FirstOrDefault()?.Path;
+		file ??= ev.Data.Assets.FirstOrDefault()?.AssetPath;
 		if ( string.IsNullOrWhiteSpace( file ) )
 		{
-			var split = ev.Data.Text.Split( "\n" );
-			if ( split is null || split.Length == 0 )
-				return;
+			// Dragging an asset while one is selected will drag them both,
+			// in that situation we only want the first one.
+			file = ev.Data.Files.FirstOrDefault();
+			if ( string.IsNullOrWhiteSpace( file ) )
+			{
+				var split = ev.Data.Text.Split( "\n" );
+				if ( split is null || split.Length == 0 )
+					return;
 
-			file = split.FirstOrDefault();
+				file = split.FirstOrDefault();
+			}
+
 			if ( string.IsNullOrWhiteSpace( file ) )
 				return;
 		}

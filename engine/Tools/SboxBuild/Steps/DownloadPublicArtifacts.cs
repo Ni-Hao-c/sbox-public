@@ -15,6 +15,7 @@ internal class DownloadPublicArtifacts( bool nativeBinariesOnly = false )
 	private const string BaseUrl = "https://artifacts.sbox.game";
 	private const int MaxParallelDownloads = 32;
 	private const int MaxDownloadAttempts = 3;
+	private const int MaxManifestDownloadAttempts = 3;
 	private const int MaxManifestLookbackCommits = 128;
 	internal ExitCode Run()
 	{
@@ -193,35 +194,47 @@ internal class DownloadPublicArtifacts( bool nativeBinariesOnly = false )
 	{
 		var manifestUrl = $"{baseUrl.TrimEnd( '/' )}/manifests/{commitHash}.json";
 
-		Log.Info( $"Fetching manifest: {manifestUrl}" );
-
-		using var response = httpClient.GetAsync( manifestUrl, HttpCompletionOption.ResponseHeadersRead ).GetAwaiter().GetResult();
-		if ( response.StatusCode == HttpStatusCode.NotFound )
+		for ( var attempt = 1; attempt <= MaxManifestDownloadAttempts; attempt++ )
 		{
-			Log.Warning( $"Manifest not found for commit {commitHash}." );
-			return null;
+			try
+			{
+				Log.Info( $"Fetching manifest: {manifestUrl} (attempt {attempt}/{MaxManifestDownloadAttempts})" );
+
+				using var response = httpClient.GetAsync( manifestUrl, HttpCompletionOption.ResponseHeadersRead ).GetAwaiter().GetResult();
+				if ( response.StatusCode == HttpStatusCode.NotFound )
+				{
+					Log.Warning( $"Manifest not found for commit {commitHash}." );
+					return null;
+				}
+
+				if ( !response.IsSuccessStatusCode )
+				{
+					throw new HttpRequestException( $"Manifest request returned HTTP {(int)response.StatusCode}." );
+				}
+
+				using var stream = response.Content.ReadAsStreamAsync().GetAwaiter().GetResult();
+
+				var manifest = JsonSerializer.Deserialize<ArtifactManifest>( stream, new JsonSerializerOptions
+				{
+					PropertyNameCaseInsensitive = true
+				} );
+
+				if ( manifest is null )
+				{
+					throw new InvalidOperationException( "Manifest JSON could not be deserialized." );
+				}
+
+				return manifest;
+			}
+			catch ( Exception ex ) when ( attempt < MaxManifestDownloadAttempts )
+			{
+				Log.Warning( $"Manifest download attempt {attempt}/{MaxManifestDownloadAttempts} for {commitHash} failed: {ex.Message}" );
+				Thread.Sleep( TimeSpan.FromMilliseconds( 200 * attempt ) );
+			}
 		}
 
-		if ( !response.IsSuccessStatusCode )
-		{
-			Log.Warning( $"Failed to download manifest for commit {commitHash} (HTTP {(int)response.StatusCode})." );
-			return null;
-		}
-
-		using var stream = response.Content.ReadAsStreamAsync().GetAwaiter().GetResult();
-
-		var manifest = JsonSerializer.Deserialize<ArtifactManifest>( stream, new JsonSerializerOptions
-		{
-			PropertyNameCaseInsensitive = true
-		} );
-
-		if ( manifest is null )
-		{
-			Log.Warning( $"Failed to deserialize manifest JSON for commit {commitHash}." );
-			return null;
-		}
-
-		return manifest;
+		Log.Warning( $"Failed to download manifest for commit {commitHash} after {MaxManifestDownloadAttempts} attempts." );
+		return null;
 	}
 
 	private static bool DownloadArtifact( HttpClient httpClient, string baseUrl, ArtifactFileInfo entry, string destination )

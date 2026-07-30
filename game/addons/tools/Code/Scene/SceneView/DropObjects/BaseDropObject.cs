@@ -43,6 +43,7 @@ public abstract class BaseDropObject
 	{
 		try
 		{
+			dragData = NormalizeDragPath( dragData );
 			await Initialize( dragData, DragCancelSource.Token );
 			IsInitialized = true;
 		}
@@ -106,6 +107,8 @@ public abstract class BaseDropObject
 	/// </summary>
 	protected async Task<Asset> InstallAsset( string urlPath, CancellationToken token )
 	{
+		urlPath = NormalizeDragPath( urlPath );
+
 		if ( !Uri.TryCreate( urlPath, UriKind.Absolute, out var uri ) || uri.IsFile || uri.Scheme != "https" )
 		{
 			return AssetSystem.FindByPath( urlPath );
@@ -163,6 +166,7 @@ public abstract class BaseDropObject
 	/// </summary>
 	public static bool CanCreateDropFor( string path )
 	{
+		path = NormalizeDragPath( path );
 		if ( string.IsNullOrEmpty( path ) )
 			return false;
 
@@ -170,7 +174,7 @@ public abstract class BaseDropObject
 
 		foreach ( var obj in dropObjs )
 		{
-			if ( obj.Attribute.Extensions.Any( path.EndsWith ) )
+			if ( obj.Attribute.Extensions.Any( extension => path.EndsWith( extension, StringComparison.OrdinalIgnoreCase ) ) )
 				return true;
 		}
 
@@ -179,6 +183,7 @@ public abstract class BaseDropObject
 
 	public static async Task<BaseDropObject> CreateDropFor( string text )
 	{
+		text = NormalizeDragPath( text );
 		if ( string.IsNullOrEmpty( text ) ) return null;
 
 		string type = "unknown";
@@ -197,12 +202,35 @@ public abstract class BaseDropObject
 		foreach ( var obj in dropObjs )
 		{
 			var attribute = obj.Attribute;
-			if ( (!string.IsNullOrEmpty( attribute.Type ) && attribute.Type == type) || attribute.Extensions.Any( text.EndsWith ) )
+			if ( (!string.IsNullOrEmpty( attribute.Type ) && attribute.Type == type) || attribute.Extensions.Any( extension => text.EndsWith( extension, StringComparison.OrdinalIgnoreCase ) ) )
 			{
 				return EditorTypeLibrary.Create<BaseDropObject>( obj.Type.TargetType );
 			}
 		}
 
 		return null;
+	}
+
+	/// <summary>
+	/// Restores a mount URI if an older Qt drag converted it into a local Windows path.
+	/// New drags preserve mount:// directly, but this keeps all drop targets compatible
+	/// with existing widgets and other editor extensions.
+	/// </summary>
+	static string NormalizeDragPath( string path )
+	{
+		if ( string.IsNullOrWhiteSpace( path ) )
+			return path;
+
+		var mountIndex = path.IndexOf( "mount:", StringComparison.OrdinalIgnoreCase );
+		if ( mountIndex < 0 )
+			return path;
+
+		var mountPath = path[mountIndex..].Replace( '\\', '/' );
+		if ( mountPath.StartsWith( "mount:/", StringComparison.OrdinalIgnoreCase ) && !mountPath.StartsWith( "mount://", StringComparison.OrdinalIgnoreCase ) )
+		{
+			mountPath = "mount://" + mountPath["mount:/".Length..].TrimStart( '/' );
+		}
+
+		return mountPath;
 	}
 }

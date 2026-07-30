@@ -63,6 +63,20 @@ public partial class AssetList : ListView, AssetSystem.IEventListener
 
 		ItemDrag = ( a ) =>
 		{
+			void SetAssetDragData( Drag drag, Asset asset )
+			{
+				drag.Data.Text = asset.RelativePath;
+				drag.Data.Object = asset;
+
+				// Mount resources are virtual. Turning mount:// into file:///mount:// makes
+				// Qt resolve it as a local path such as "D:\\...\\mount:\\...", so consumers
+				// never receive the resource path that the mount system registered.
+				if ( !Sandbox.Mounting.MountUtility.IsMountPath( asset.AbsolutePath ) )
+				{
+					drag.Data.Url = new System.Uri( "file:///" + asset.AbsolutePath );
+				}
+			}
+
 			if ( a is PackageEntry pe )
 			{
 				var package = pe.Package;
@@ -81,8 +95,7 @@ public partial class AssetList : ListView, AssetSystem.IEventListener
 				else if ( a is Asset asset )
 				{
 					var drag = new Drag( this );
-					drag.Data.Text = asset.RelativePath;
-					drag.Data.Url = new System.Uri( "file:///" + asset.AbsolutePath );
+					SetAssetDragData( drag, asset );
 					drag.Execute();
 					return true;
 				}
@@ -100,16 +113,22 @@ public partial class AssetList : ListView, AssetSystem.IEventListener
 				}
 				else
 				{
-					drag.Data.Text = asset.RelativePath;
-					drag.Data.Url = new System.Uri( "file:///" + asset.AbsolutePath );
+					SetAssetDragData( drag, asset );
 				}
 
 				// Add the other selected assets too..
 				foreach ( var item in SelectedItems.OfType<AssetEntry>() )
 				{
 					if ( ae == item ) continue;
-					drag.Data.Text += "\n" + item.FileInfo.FullName;
+					drag.Data.Text += "\n" + (item.Asset?.RelativePath ?? item.FileInfo.FullName);
 				}
+
+				drag.Data.Object = SelectedItems.OfType<AssetEntry>()
+					.Select( x => x.Asset )
+					.Prepend( asset )
+					.Where( x => x is not null )
+					.Distinct()
+					.ToArray();
 
 				drag.Execute();
 
