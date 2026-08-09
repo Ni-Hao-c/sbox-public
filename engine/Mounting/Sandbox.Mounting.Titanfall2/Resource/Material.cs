@@ -69,17 +69,17 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 	{
 		if ( asset.Version != 12 )
 		{
-			Log.Warning( $"Failed to read Titanfall 2 material '{Path}': unsupported version {asset.Version}" );
+			Titanfall2Log.Warning( $"Failed to read Titanfall 2 material '{Path}': unsupported version {asset.Version}" );
 			return null;
 		}
 		if ( !archive.TryReadAsset( asset, out var data, out var error ) )
 		{
-			Log.Warning( $"Failed to read Titanfall 2 material '{Path}': {error}" );
+			Titanfall2Log.Warning( $"Failed to read Titanfall 2 material '{Path}': {error}" );
 			return null;
 		}
 		if ( data.Header.Length < MaterialHeaderSize )
 		{
-			Log.Warning( $"Titanfall 2 material header is truncated: {Path}" );
+			Titanfall2Log.Warning( $"Titanfall 2 material header is truncated: {Path}" );
 			return null;
 		}
 
@@ -191,7 +191,7 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 	void WarnBinding( string reason )
 	{
 		if ( System.Threading.Interlocked.Increment( ref _bindingWarningCount ) > BindingWarningLimit ) return;
-		Log.Warning( $"Titanfall 2 material binding failed for '{Path}' from '{System.IO.Path.GetFileName( archive.FilePath )}': {reason}." );
+		Titanfall2Log.Warning( $"Titanfall 2 material binding failed for '{Path}' from '{System.IO.Path.GetFileName( archive.FilePath )}': {reason}." );
 	}
 
 	/// <summary>

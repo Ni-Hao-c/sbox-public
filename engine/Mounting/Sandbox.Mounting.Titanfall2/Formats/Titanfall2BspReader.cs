@@ -123,6 +123,14 @@ public static partial class Titanfall2BspReader
 	public readonly record struct VisibilityCellMask( ulong Low, ulong High )
 	{
 		public bool IsEmpty => Low == 0 && High == 0;
+		public bool Intersects( VisibilityCellMask other ) => (Low & other.Low) != 0 || (High & other.High) != 0;
+		public VisibilityCellMask Union( VisibilityCellMask other ) => new( Low | other.Low, High | other.High );
+		public VisibilityCellMask Add( int cell ) => cell switch
+		{
+			>= 0 and < 64 => this with { Low = Low | (1UL << cell) },
+			>= 64 and < 128 => this with { High = High | (1UL << (cell - 64)) },
+			_ => this
+		};
 
 		public bool Contains( int cell ) => cell switch
 		{
@@ -154,6 +162,49 @@ public static partial class Titanfall2BspReader
 
 		public VisibilityCellMask GetObjectCellMask( int objectIndex ) =>
 			objectIndex >= 0 && objectIndex < ObjectCellMasks.Count ? ObjectCellMasks[objectIndex] : default;
+
+		/// <summary>
+		/// Resolves a source-space point to its rBSP visibility cell. Internal CellBSP
+		/// nodes store the first of two consecutive children; leaf nodes use Plane=-1
+		/// and Child as the cell index.
+		/// </summary>
+		public int FindCell( NumericsVector3 point )
+		{
+			if ( !IsValid ) return -1;
+			var nodeIndex = 0;
+			for ( var depth = 0; depth < Nodes.Count; depth++ )
+			{
+				if ( nodeIndex < 0 || nodeIndex >= Nodes.Count ) return -1;
+				var node = Nodes[nodeIndex];
+				if ( node.Plane < 0 ) return node.Child >= 0 && node.Child < CellCount ? node.Child : -1;
+				if ( node.Plane >= Planes.Count || node.Child < 0 || node.Child + 1 >= Nodes.Count ) return -1;
+				var plane = Planes[node.Plane];
+				var distance = NumericsVector3.Dot( point, plane.Normal ) - plane.Distance;
+				nodeIndex = node.Child + (distance < 0f ? 1 : 0);
+			}
+			return -1;
+		}
+
+		/// <summary>Returns all cells reachable through valid cell portals.</summary>
+		public VisibilityCellMask GetReachableCells( int startCell, int maximumPortalDepth )
+		{
+			if ( startCell < 0 || startCell >= CellCount ) return default;
+			var visible = new VisibilityCellMask().Add( startCell );
+			var queue = new Queue<(int Cell, int Depth)>();
+			queue.Enqueue( (startCell, 0) );
+			while ( queue.Count > 0 )
+			{
+				var (cell, depth) = queue.Dequeue();
+				if ( depth >= maximumPortalDepth ) continue;
+				foreach ( var portal in Portals )
+				{
+					if ( portal.FromCell != cell || portal.ToCell < 0 || portal.ToCell >= CellCount || visible.Contains( portal.ToCell ) ) continue;
+					visible = visible.Add( portal.ToCell );
+					queue.Enqueue( (portal.ToCell, depth + 1) );
+				}
+			}
+			return visible;
+		}
 	}
 
 	public readonly record struct VisibilityPlane( NumericsVector3 Normal, float Distance );
@@ -331,6 +382,7 @@ public static partial class Titanfall2BspReader
 			ReadLumpBytes( stream, headers, overrideLumps, LightmapDataSkyLumpId ),
 			ReadLumpBytes( stream, headers, overrideLumps, LightmapDataRealTimeLightsLumpId ) );
 		var cubemaps = ReadCubemaps( ReadLumpBytes( stream, headers, overrideLumps, CubemapsLumpId ) );
+		var visibility = ParseVisibility( stream, headers, overrideLumps, world.SourceMeshCount );
 		var embeddedCubemapVtf = ReadEmbeddedCubemapVtf(
 			ReadLumpBytes( stream, headers, overrideLumps, PakFileLumpId ), mapName );
 		parsedBsp = new ParsedBsp
@@ -342,6 +394,7 @@ public static partial class Titanfall2BspReader
 			World = world,
 			WorldCollision = worldCollision,
 			StaticProps = staticProps,
+			Visibility = visibility,
 			Cubemaps = cubemaps,
 			EmbeddedCubemapVtf = embeddedCubemapVtf,
 			Lightmaps = lightmaps

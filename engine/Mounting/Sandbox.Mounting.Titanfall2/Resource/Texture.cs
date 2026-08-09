@@ -11,20 +11,20 @@ class Titanfall2TextureLoader( ITitanfall2AssetSource source, bool animatedVtfAt
 		if ( _source is ITitanfall2TextureSource packedTexture )
 		{
 			if ( packedTexture.TryCreateTexture( out var runtimeTexture, out var packedError ) ) return runtimeTexture;
-			Log.Warning( $"Failed to decode Titanfall 2 RPAK texture '{Path}': {packedError}" );
+			Titanfall2Log.Warning( $"Failed to decode Titanfall 2 RPAK texture '{Path}': {packedError}" );
 			return Texture.White;
 		}
 
 		if ( !_source.TryReadAllBytes( out var data, out var error ) )
 		{
-			Log.Warning( $"Failed to read Titanfall 2 texture '{Path}': {error}" );
+			Titanfall2Log.Warning( $"Failed to read Titanfall 2 texture '{Path}': {error}" );
 			return Texture.White;
 		}
 
 		if ( VtfTextureDecoder.IsVtf( data ) )
 		{
 			if ( VtfTextureDecoder.TryCreate( data, _animatedVtfAtlas, out var vtfTexture, out error ) ) return vtfTexture;
-			Log.Warning( $"Failed to decode Titanfall 2 VTF texture '{Path}': {error}" );
+			Titanfall2Log.Warning( $"Failed to decode Titanfall 2 VTF texture '{Path}': {error}" );
 			return _animatedVtfAtlas ? Texture.Transparent : Texture.White;
 		}
 
@@ -34,7 +34,7 @@ class Titanfall2TextureLoader( ITitanfall2AssetSource source, bool animatedVtfAt
 		if ( TryLoadTga( data, out tex ) )
 			return tex;
 
-		Log.Warning( $"Unsupported texture format: {Path}" );
+		Titanfall2Log.Warning( $"Unsupported texture format: {Path}" );
 		return Texture.White;
 	}
 

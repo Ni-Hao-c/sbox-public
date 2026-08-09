@@ -1,8 +1,14 @@
 param(
-	[string]$OutputDirectory = (Join-Path $PSScriptRoot '..\..\..\..\..\game\mount\titanfall2')
+	[string]$OutputDirectory
 )
 
 $ErrorActionPreference = 'Stop'
+$repositoryRoot = [System.IO.Path]::GetFullPath( (Join-Path $PSScriptRoot '..\..\..\..\..') )
+if ( [string]::IsNullOrWhiteSpace( $OutputDirectory ) )
+{
+	$OutputDirectory = Join-Path $repositoryRoot 'game\mount\titanfall2'
+}
+
 $vsWhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 $vsRoot = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if ( [string]::IsNullOrWhiteSpace( $vsRoot ) ) { throw 'Visual Studio C++ build tools are required.' }

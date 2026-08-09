@@ -1,18 +1,24 @@
 param(
-	[string]$LzhamRoot = 'D:\ttf2 sbox\ttf2-sbox-main\3rd\TFVPKTool-main\src\lzham',
-	[string]$OutputDirectory = (Join-Path $PSScriptRoot '..\..\..\..\..\game\mount\titanfall2')
+	[string]$OutputDirectory
 )
 
 $ErrorActionPreference = 'Stop'
+$repositoryRoot = [System.IO.Path]::GetFullPath( (Join-Path $PSScriptRoot '..\..\..\..\..') )
+if ( [string]::IsNullOrWhiteSpace( $OutputDirectory ) )
+{
+	$OutputDirectory = Join-Path $repositoryRoot 'game\mount\titanfall2'
+}
+
 $vsWhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
 $vsRoot = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if ( [string]::IsNullOrWhiteSpace( $vsRoot ) ) { throw 'Visual Studio C++ build tools are required.' }
 
 $devCmd = Join-Path $vsRoot 'Common7\Tools\VsDevCmd.bat'
 $source = Join-Path $PSScriptRoot 'lzham_bridge.cpp'
-$library = Join-Path $LzhamRoot 'lib\liblzham_x64.lib'
-$include = Join-Path $LzhamRoot 'include'
-if ( !(Test-Path -LiteralPath $library) -or !(Test-Path -LiteralPath $include) ) { throw "LZHAM source root is invalid: $LzhamRoot" }
+$lzhamRoot = Join-Path $PSScriptRoot 'ThirdParty\lzham-alpha8'
+$library = Join-Path $lzhamRoot 'lib\liblzham_x64.lib'
+$include = Join-Path $lzhamRoot 'include'
+if ( !(Test-Path -LiteralPath $library) -or !(Test-Path -LiteralPath $include) ) { throw "Vendored LZHAM files are missing: $lzhamRoot" }
 
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $output = Join-Path $OutputDirectory 'titanfall2_lzham.dll'

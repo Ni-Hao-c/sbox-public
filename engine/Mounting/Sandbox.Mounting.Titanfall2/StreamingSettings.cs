@@ -16,6 +16,28 @@ static class Titanfall2StreamingSettings
 	// A generous radius plus each model's bounds keeps large landmarks visible and
 	// makes activation immediate without any VPK/RPAK work while the player moves.
 	public static float PropRenderDistance { get; } = GetFloat( "SBOX_TITANFALL2_PROP_RENDER_DISTANCE", 4096f, 512f, 65536f );
+	// rBSP stores a CellBSP tree plus portal-linked visibility cells. Keep the
+	// portal walk deliberately conservative: objects without a valid cell mask
+	// always remain visible, and batches remain visible when any member is.
+	public static bool PropPvsCulling { get; } = GetBool( "SBOX_TITANFALL2_PROP_PVS", true );
+	public static int PropPvsPortalDepth { get; } = GetInt( "SBOX_TITANFALL2_PROP_PVS_PORTAL_DEPTH", 16, 1, 64 );
+	// These choose among Respawn's own compiled MDL/VTX LODs. The wide bands and
+	// hysteresis avoid rebuilding an instanced batch while the camera sits near a
+	// threshold. Set SBOX_TITANFALL2_PROP_LODS=0 to keep LOD0 everywhere.
+	public static bool PropLods { get; } = GetBool( "SBOX_TITANFALL2_PROP_LODS", true );
+	public static float PropLod1Distance { get; } = GetFloat( "SBOX_TITANFALL2_PROP_LOD1_DISTANCE", 1536f, 256f, 65536f );
+	public static float PropLod2Distance { get; } = GetFloat( "SBOX_TITANFALL2_PROP_LOD2_DISTANCE", 4096f, 512f, 65536f );
+	public static float PropLod3Distance { get; } = GetFloat( "SBOX_TITANFALL2_PROP_LOD3_DISTANCE", 8192f, 1024f, 131072f );
+	public static float PropLodHysteresis { get; } = GetFloat( "SBOX_TITANFALL2_PROP_LOD_HYSTERESIS", 256f, 0f, 4096f );
+	// Loading a new MDL LOD and rebuilding an instance batch happens on the main
+	// thread.  Spread those transitions over frames so crossing an LOD band never
+	// turns into one large movement hitch.
+	public static int PropLodSwapsPerFrame { get; } = GetInt( "SBOX_TITANFALL2_PROP_LOD_SWAPS_PER_FRAME", 1, 1, 8 );
+	public static float PropLodSwapBudgetMilliseconds { get; } = GetFloat( "SBOX_TITANFALL2_PROP_LOD_SWAP_BUDGET_MS", 1.5f, 0.25f, 10f );
+	// Position-driven render, shadow and collision state is also applied in a
+	// bounded queue. Walking must not synchronously touch every BSP prop cell.
+	public static int PropRuntimeCellsPerFrame { get; } = GetInt( "SBOX_TITANFALL2_PROP_RUNTIME_CELLS_PER_FRAME", 16, 1, 256 );
+	public static float PropRuntimeCellBudgetMilliseconds { get; } = GetFloat( "SBOX_TITANFALL2_PROP_RUNTIME_CELL_BUDGET_MS", 1.5f, 0.25f, 10f );
 	public static int PropsPerFrame { get; } = GetInt( "SBOX_TITANFALL2_PROPS_PER_FRAME", 16, 1, 256 );
 	public static float PropFrameBudgetMilliseconds { get; } = GetFloat( "SBOX_TITANFALL2_PROP_FRAME_BUDGET_MS", 3f, 0.5f, 20f );
 	// Scene loading waits for every static prop. Work is still split across yields
@@ -27,6 +49,20 @@ static class Titanfall2StreamingSettings
 	// resubmitting the entire imported map and its props to directional CSM.
 	// Set SBOX_TITANFALL2_MAP_SHADOWS=1 to restore the previous dynamic shadows.
 	public static bool MapShadows { get; } = GetBool( "SBOX_TITANFALL2_MAP_SHADOWS", false );
+	// Use s&box's native world lighting as the stable default. The experimental
+	// Respawn lightmap shader remains available for comparison by setting this
+	// to 1, but it must not replace the native material path during normal map
+	// mounting because its decoded pages are not yet a complete Titanfall match.
+	public static bool UseBspLightmaps { get; } = GetBool( "SBOX_TITANFALL2_BSP_LIGHTMAPS", false );
+	// Native s&box screen-space contact shadows restore small-scale grounding
+	// without enabling the expensive world CSM pass. Disable with 0 if a GPU
+	// budget is tighter than the visual improvement.
+	public static bool NativeContactShadows { get; } = GetBool( "SBOX_TITANFALL2_CONTACT_SHADOWS", true );
+	// A restrained Titanfall grade on top of the native renderer. These are
+	// intentionally configurable because display HDR/exposure varies by GPU.
+	public static float NativeColorSaturation { get; } = GetFloat( "SBOX_TITANFALL2_COLOR_SATURATION", 1.05f, 0f, 2f );
+	public static float NativeColorBrightness { get; } = GetFloat( "SBOX_TITANFALL2_COLOR_BRIGHTNESS", 0.98f, 0f, 2f );
+	public static float NativeColorContrast { get; } = GetFloat( "SBOX_TITANFALL2_COLOR_CONTRAST", 1.08f, 0f, 2f );
 	// Keep nearby prop silhouettes/contact shadows even while the much more
 	// expensive BSP world chunks stay out of CSM. This is the useful visual
 	// middle ground while Respawn's direct-light lightmap term is unresolved.
@@ -52,6 +88,13 @@ static class Titanfall2StreamingSettings
 	// skeletal hitboxes), so enabling prop colliders no longer duplicates every
 	// render triangle into physics by default.
 	public static bool PropCollisions { get; } = GetBool( "SBOX_TITANFALL2_PROP_COLLISIONS", true );
+	// Rendering stays resident for the whole mounted map, but a ModelCollider
+	// creates native physics bodies and broad-phase entries for every instance.
+	// Keep only nearby prop collision active. The larger disable radius provides
+	// hysteresis so crossing a cell boundary cannot repeatedly rebuild physics.
+	public static bool StreamPropCollisions { get; } = GetBool( "SBOX_TITANFALL2_STREAM_PROP_COLLISIONS", true );
+	public static float PropCollisionEnableDistance { get; } = GetFloat( "SBOX_TITANFALL2_PROP_COLLISION_ENABLE_DISTANCE", 1536f, 128f, 32768f );
+	public static float PropCollisionDisableDistance { get; } = GetFloat( "SBOX_TITANFALL2_PROP_COLLISION_DISABLE_DISTANCE", 1792f, 128f, 65536f );
 	public static bool NavMeshStaticProps { get; } = GetBool( "SBOX_TITANFALL2_NAVMESH_STATIC_PROPS", false );
 	// Models without VPHY or hitboxes may fall back to their render mesh. Keep
 	// small props accurate, but replace complex render meshes with one convex

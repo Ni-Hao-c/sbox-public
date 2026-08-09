@@ -111,7 +111,7 @@ public partial class Titanfall2Mount
 	{
 		lock ( _particleCatalogLock ) _particleFileFailures++;
 		if ( _particleFailureLogs++ < 16 )
-			Log.Warning( $"Unable to index Titanfall 2 particle library '{path}': {error}" );
+			Titanfall2Log.Warning( $"Unable to index Titanfall 2 particle library '{path}': {error}" );
 	}
 
 	readonly record struct ParticleFileSource( string Path, ITitanfall2AssetSource Source );

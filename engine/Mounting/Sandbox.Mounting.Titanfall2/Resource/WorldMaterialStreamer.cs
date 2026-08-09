@@ -58,7 +58,7 @@ public sealed class Titanfall2WorldMaterialStreamer : Component, Component.DontE
 			if ( material is null || !material.IsValid )
 			{
 				_failedMaterials++;
-				Log.Warning( $"Unable to stream Titanfall 2 world material '{materialName}'." );
+				Titanfall2Log.Warning( $"Unable to stream Titanfall 2 world material '{materialName}'." );
 			}
 			else if ( materialIndex < _renderer.Materials.Count )
 			{
@@ -67,7 +67,7 @@ public sealed class Titanfall2WorldMaterialStreamer : Component, Component.DontE
 			else
 			{
 				_failedMaterials++;
-				Log.Warning( $"Titanfall 2 material slot {materialIndex} is outside the world model's material range." );
+				Titanfall2Log.Warning( $"Titanfall 2 material slot {materialIndex} is outside the world model's material range." );
 			}
 			processed++;
 		}

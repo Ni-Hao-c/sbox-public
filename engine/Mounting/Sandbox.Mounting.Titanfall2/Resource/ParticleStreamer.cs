@@ -67,7 +67,7 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 			_failed += _pending.Count;
 			foreach ( var entity in _pending.Take( 16 - Math.Min( 16, _failureLogs ) ) )
 			{
-				Log.Warning( $"Titanfall 2 particle definition '{entity.EffectName}' was not found for '{MapPath}'." );
+				Titanfall2Log.Warning( $"Titanfall 2 particle definition '{entity.EffectName}' was not found for '{MapPath}'." );
 				_failureLogs++;
 			}
 			_pending.Clear();
@@ -154,7 +154,7 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 		if ( !Titanfall2ParticleFactory.TryCreate( gameObject, mount, definition, out var createdSystems, out var error ) )
 		{
 			gameObject.Destroy();
-			if ( _failureLogs++ < 16 ) Log.Warning( $"Unable to create Titanfall 2 particle '{entity.EffectName}': {error}" );
+			if ( _failureLogs++ < 16 ) Titanfall2Log.Warning( $"Unable to create Titanfall 2 particle '{entity.EffectName}': {error}" );
 			return false;
 		}
 

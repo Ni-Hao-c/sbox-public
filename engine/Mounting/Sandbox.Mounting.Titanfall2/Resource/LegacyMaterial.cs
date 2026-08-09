@@ -125,6 +125,6 @@ class LegacyMaterialLoader( string materialName ) : ResourceLoader<Titanfall2Mou
 	void Warn( string reason )
 	{
 		if ( System.Threading.Interlocked.Increment( ref _warningCount ) > WarningLimit ) return;
-		Log.Warning( $"Titanfall 2 legacy material binding failed for '{materialName}': {reason}." );
+		Titanfall2Log.Warning( $"Titanfall 2 legacy material binding failed for '{materialName}': {reason}." );
 	}
 }

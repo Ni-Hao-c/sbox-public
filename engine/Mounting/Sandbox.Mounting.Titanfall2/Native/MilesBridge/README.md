@@ -11,5 +11,8 @@ Build the x64 bridge with:
 .\build.ps1
 ```
 
-The output is `game/mount/titanfall2/titanfall2_miles.dll`. The managed mounter
-passes the detected Steam game directory to the bridge at runtime.
+The script finds the repository root from its own location, so it has no
+machine-specific paths. The default output is
+`game/mount/titanfall2/titanfall2_miles.dll`; override it with
+`-OutputDirectory` when needed. The managed mounter passes the detected Steam
+game directory to the bridge at runtime.

@@ -3,9 +3,10 @@ using System.Runtime.InteropServices;
 using Titanfall2.Formats;
 
 /// <summary>Loads an embedded Titanfall 2 MDL53/RMDL as a runtime model.</summary>
-class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false ) : ResourceLoader<Titanfall2Mount>
+class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false, int staticLod = 0 ) : ResourceLoader<Titanfall2Mount>
 {
 	internal const string StaticInstanceSuffix = ".t2static";
+	internal const int StaticInstanceLodCount = Titanfall2Mdl53Constants.MaxLods;
 	const float DecalNormalOffset = 0.05f;
 	sealed class StaticInstanceEligibilityValue( bool eligible )
 	{
@@ -25,6 +26,7 @@ class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false ) 
 	static long _fallbackTriangleCount;
 	readonly ITitanfall2AssetSource _source = source;
 	readonly bool _staticInstance = staticInstance;
+	readonly int _staticLod = Math.Clamp( staticLod, 0, StaticInstanceLodCount - 1 );
 
 	[StructLayout( LayoutKind.Sequential )]
 	struct TitanfallVertex
@@ -80,27 +82,35 @@ class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false ) 
 	{
 		if ( !_source.TryReadAllBytes( out var data, out var error ) )
 		{
-			Log.Warning( $"Failed to read Titanfall 2 model '{Path}': {error}" );
+			Titanfall2Log.Warning( $"Failed to read Titanfall 2 model '{Path}': {error}" );
 			return null;
 		}
 
 		try
 		{
 			var parsed = Titanfall2Mdl53Reader.Parse( data );
-			var lod = Titanfall2MeshExtractor.ExtractLod( parsed, 0 );
+			var lod = Titanfall2MeshExtractor.ExtractLod( parsed, _staticInstance ? _staticLod : 0 );
+			if ( _staticInstance && lod.Meshes.Length == 0 && _staticLod != 0 )
+			{
+				// Some static props only ship LOD0.  Their virtual LOD resource still
+				// resolves safely instead of becoming an error model at range.
+				lod = Titanfall2MeshExtractor.ExtractLod( parsed, 0 );
+			}
 			return _staticInstance
 				? BuildStaticInstanceModel( lod )
 				: BuildModel( parsed, lod, data );
 		}
 		catch ( Exception exception )
 		{
-			Log.Warning( $"Failed to convert Titanfall 2 model '{Path}': {exception.Message}" );
+			Titanfall2Log.Warning( $"Failed to convert Titanfall 2 model '{Path}': {exception.Message}" );
 			return null;
 		}
 	}
 
-	internal static string GetStaticInstancePath( string sourceModelPath )
-		=> sourceModelPath + StaticInstanceSuffix;
+	internal static string GetStaticInstancePath( string sourceModelPath, int lod = 0 )
+		=> lod <= 0
+			? sourceModelPath + StaticInstanceSuffix
+			: sourceModelPath + StaticInstanceSuffix + $".lod{Math.Clamp( lod, 1, StaticInstanceLodCount - 1 )}";
 
 	internal static bool CanInstance( Model model )
 		=> model.IsValid()
@@ -169,13 +179,13 @@ class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false ) 
 
 		if ( !hasMesh )
 		{
-			Log.Warning( $"Titanfall 2 static instance model contains no LOD0 geometry: {Path}" );
+			Titanfall2Log.Warning( $"Titanfall 2 static instance model contains no LOD{_staticLod} geometry: {Path}" );
 			return null;
 		}
 
 		var model = builder.Create();
 		StaticInstanceEligibility.Add( model, new StaticInstanceEligibilityValue( canInstance ) );
-		Log.Trace( $"Titanfall 2 static instance model loaded: {Path} "
+		Titanfall2Log.Trace( $"Titanfall 2 static instance model loaded: {Path} "
 			+ $"({lod.Meshes.Length} meshes, {lod.VertexCount} vertices, "
 			+ $"{lod.TriangleCount} triangles, GPU instancing {(canInstance ? "enabled" : "disabled for special materials")})" );
 		return model;
@@ -296,11 +306,11 @@ class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false ) 
 
 		if ( !hasMesh && animationCount == 0 )
 		{
-			Log.Warning( $"Titanfall 2 model contains neither LOD0 geometry nor supported animations: {Path}" );
+			Titanfall2Log.Warning( $"Titanfall 2 model contains neither LOD0 geometry nor supported animations: {Path}" );
 			return null;
 		}
 
-		Log.Trace( $"Titanfall 2 model loaded: {Path} ({lod.Meshes.Length} meshes, {decalMeshCount} decal meshes, "
+		Titanfall2Log.Trace( $"Titanfall 2 model loaded: {Path} ({lod.Meshes.Length} meshes, {decalMeshCount} decal meshes, "
 			+ $"{lod.VertexCount} vertices, {lod.TriangleCount} triangles, {parsed.Bones.Length} bones, "
 			+ $"{animationCount} animations, {collisionHullCount} {collisionDescription} collision hulls)" );
 		return builder.Create();
@@ -409,7 +419,7 @@ class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false ) 
 		}
 
 		if ( failureCount > 5 )
-			Log.Warning( $"Titanfall 2 model '{Path}' skipped {failureCount - 5} additional invalid animation sequences." );
+			Titanfall2Log.Warning( $"Titanfall 2 model '{Path}' skipped {failureCount - 5} additional invalid animation sequences." );
 		return animationCount;
 	}
 
@@ -462,7 +472,7 @@ class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false ) 
 			addedNames.Remove( name );
 			failureCount++;
 			if ( failureCount <= 5 )
-				Log.Warning( $"Titanfall 2 animation '{name}' from '{sourceData.Description}' was skipped: {exception.Message}" );
+				Titanfall2Log.Warning( $"Titanfall 2 animation '{name}' from '{sourceData.Description}' was skipped: {exception.Message}" );
 		}
 	}
 
@@ -483,7 +493,7 @@ class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false ) 
 				if ( string.IsNullOrWhiteSpace( path ) || !visited.Add( path ) ) continue;
 				if ( !pathSource.TryReadPath( path, out var bytes, out var error ) )
 				{
-					Log.Warning( $"Unable to read included Titanfall 2 animation model '{path}' for '{Path}': {error}" );
+					Titanfall2Log.Warning( $"Unable to read included Titanfall 2 animation model '{path}' for '{Path}': {error}" );
 					continue;
 				}
 
@@ -498,7 +508,7 @@ class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false ) 
 				}
 				catch ( Exception exception )
 				{
-					Log.Warning( $"Unable to parse included Titanfall 2 animation model '{path}' for '{Path}': {exception.Message}" );
+					Titanfall2Log.Warning( $"Unable to parse included Titanfall 2 animation model '{path}' for '{Path}': {exception.Message}" );
 				}
 			}
 		}
@@ -537,7 +547,7 @@ class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false ) 
 						builder, parsed, skeleton, hulls, physics.Solids, physics.Constraints,
 						out var bodyCount, out var jointCount ) )
 					{
-						Log.Trace( $"Titanfall 2 ragdoll imported: {Path} ({bodyCount} bodies, {jointCount} joints)." );
+						Titanfall2Log.Trace( $"Titanfall 2 ragdoll imported: {Path} ({bodyCount} bodies, {jointCount} joints)." );
 					}
 					else
 					{
@@ -545,12 +555,12 @@ class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false ) 
 					}
 					return ("VPHY", hulls.Length);
 				}
-				Log.Warning( $"Embedded Titanfall 2 VPHY collision for '{Path}' contained no finite, indexed convex hulls." );
+				Titanfall2Log.Warning( $"Embedded Titanfall 2 VPHY collision for '{Path}' contained no finite, indexed convex hulls." );
 			}
 		}
 		catch ( Exception exception )
 		{
-			Log.Warning( $"Embedded Titanfall 2 VPHY collision for '{Path}' was skipped: {exception.Message}" );
+			Titanfall2Log.Warning( $"Embedded Titanfall 2 VPHY collision for '{Path}' was skipped: {exception.Message}" );
 		}
 
 		var hitboxHulls = CreateHitboxHulls( parsed );
@@ -574,7 +584,7 @@ class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false ) 
 			if ( CreateBoundsHull( renderVertices ) is { } boundsHull )
 			{
 				AddCollisionHulls( builder, parsed, skeleton, [boundsHull] );
-				Log.Trace( $"Titanfall 2 model collision simplified: {Path} ({triangleCount} render triangles -> one bounds hull)." );
+				Titanfall2Log.Trace( $"Titanfall 2 model collision simplified: {Path} ({triangleCount} render triangles -> one bounds hull)." );
 				return ("simplified-box", 1);
 			}
 		}

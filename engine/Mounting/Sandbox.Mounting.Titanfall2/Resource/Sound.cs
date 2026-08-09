@@ -9,13 +9,13 @@ class SoundLoader( ITitanfall2AssetSource source ) : ResourceLoader<Titanfall2Mo
 	{
 		if ( !_source.TryReadAllBytes( out var data, out var error ) )
 		{
-			Log.Warning( $"Failed to read Titanfall 2 sound '{Path}': {error}" );
+			Titanfall2Log.Warning( $"Failed to read Titanfall 2 sound '{Path}': {error}" );
 			return null;
 		}
 
 		var sound = SoundFile.FromWav( Path, data );
 		if ( sound is null )
-			Log.Warning( $"Titanfall 2 sound creation returned null: {Path} ({data.Length} bytes, headless={Application.IsHeadless})" );
+			Titanfall2Log.Warning( $"Titanfall 2 sound creation returned null: {Path} ({data.Length} bytes, headless={Application.IsHeadless})" );
 		return sound;
 	}
 }
@@ -30,18 +30,18 @@ class MilesSoundLoader( MilesBankArchive archive, MilesSoundAsset asset ) : Reso
 	{
 		if ( !_archive.TryReadBcf( _asset, out var bcf, out var readError ) )
 		{
-			Log.Warning( $"Failed to read Titanfall 2 BCF sound '{Path}': {readError}" );
+			Titanfall2Log.Warning( $"Failed to read Titanfall 2 BCF sound '{Path}': {readError}" );
 			return null;
 		}
 		if ( !_archive.TryDecode( bcf, out var pcm, out var rate, out var channels, out var decodeError ) )
 		{
-			Log.Warning( $"Failed to decode Titanfall 2 BCF sound '{Path}': {decodeError}" );
+			Titanfall2Log.Warning( $"Failed to decode Titanfall 2 BCF sound '{Path}': {decodeError}" );
 			return null;
 		}
 
 		var sound = SoundFile.FromPcm( Path, pcm, new SoundFile.PcmOptions { Channels = channels, Rate = rate, Bits = 16 } );
 		if ( sound is null )
-			Log.Warning( $"Titanfall 2 Miles sound creation returned null: {Path} ({pcm.Length} PCM bytes, headless={Application.IsHeadless})" );
+			Titanfall2Log.Warning( $"Titanfall 2 Miles sound creation returned null: {Path} ({pcm.Length} PCM bytes, headless={Application.IsHeadless})" );
 		return sound;
 	}
 }

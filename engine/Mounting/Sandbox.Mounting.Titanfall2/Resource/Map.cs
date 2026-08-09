@@ -58,8 +58,11 @@ class MapLoader(
 				+ $"({parsed.WorldCollision.BlockingWaterPrimitiveCount} player-blocking), "
 				+ $"{parsed.WorldCollision.TriangleCount} collision triangles"
 			: "original collision lumps unavailable";
+		var visibilitySummary = parsed.Visibility.IsValid
+			? $"PVS {parsed.Visibility.CellCount} cells/{parsed.Visibility.Portals.Count} portals"
+			: "PVS unavailable";
 		Log.Info( $"Titanfall 2 map parsed: {Path} ({parsed.World.Meshes.Count} world meshes, {collisionSummary}, "
-			+ $"{parsed.StaticProps.Count} static props, {timer.Elapsed.TotalSeconds:0.00}s)" );
+			+ $"{parsed.StaticProps.Count} static props, {visibilitySummary}, {timer.Elapsed.TotalSeconds:0.00}s)" );
 
 		var hasOriginalWorldCollision = parseOriginalWorldCollision
 			&& parsed.WorldCollision is { IsEmpty: false };
@@ -142,7 +145,7 @@ class MapLoader(
 		var worldProps = parsed.StaticProps.Where( static prop => !IsVistaModelPath( prop.ModelPath ) ).ToArray();
 		var streamerObject = new GameObject( true, "titanfall2_static_prop_streamer" );
 		streamerObject.AddComponent<Titanfall2StaticPropStreamer>()
-			.Configure( Host.Ident, Path, streamingAnchor, worldProps );
+			.Configure( Host.Ident, Path, streamingAnchor, worldProps, parsed.Visibility );
 		Log.Info( $"Titanfall 2 map loaded: {Path} ({parsed.World.Meshes.Count} world meshes, "
 			+ $"{worldProps.Length} world props registered for loading-stage preload, "
 			+ $"{skyboxModelCount} vista models moved to the 3D skybox, {cubemapProbeCount} environment probes, "
@@ -159,7 +162,9 @@ class MapLoader(
 		var groups = new Dictionary<WorldRenderCell, Dictionary<WorldMaterialKey, MapMeshGroup>>();
 		var decalGroups = new Dictionary<WorldRenderCell, Dictionary<WorldMaterialKey, MapMeshGroup>>();
 		var godrayGroups = new Dictionary<WorldRenderCell, Dictionary<WorldMaterialKey, MapMeshGroup>>();
-		var lightmaps = CreateLightmapTextures( parsed.Lightmaps );
+		var lightmaps = Titanfall2StreamingSettings.UseBspLightmaps
+			? CreateLightmapTextures( parsed.Lightmaps )
+			: null;
 		var worldMaterials = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
 		var decalMaterials = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
 		var godrayMaterials = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
@@ -210,7 +215,12 @@ class MapLoader(
 				var cell = WorldRenderCell.FromTriangle(
 					vertex0.Position, vertex1.Position, vertex2.Position,
 					Titanfall2StreamingSettings.WorldRenderCellSize );
-				var lightmapPage = !isGodray && !isDecal ? sourceMesh.LightmapPage : -1;
+				// Native s&box lighting does not need one material/draw group per
+				// Respawn lightmap page. Merge those pages when the experimental
+				// lightmap path is disabled to reduce both memory and draw calls.
+				var lightmapPage = Titanfall2StreamingSettings.UseBspLightmaps && !isGodray && !isDecal
+					? sourceMesh.LightmapPage
+					: -1;
 				var group = GetRenderGroup( targetGroups, cell, new WorldMaterialKey( materialName, lightmapPage ) );
 				var baseVertex = group.Vertices.Count;
 				group.Vertices.Add( vertex0 );
@@ -358,6 +368,8 @@ class MapLoader(
 	{
 		var sourceMaterial = LoadWorldMaterial( key.MaterialName )
 			?? MaterialLoader.CreateRuntimeMaterial( $"{Path}/world_fallback_{meshIndex}", GetMaterialMetadata( key.MaterialName ) );
+		if ( !Titanfall2StreamingSettings.UseBspLightmaps )
+			return sourceMaterial;
 		var metadata = GetMaterialMetadata( key.MaterialName );
 		if ( lightmaps is null || key.LightmapPage < 0 || key.LightmapPage >= lightmaps.Pages.Count
 			|| metadata.Mode != Titanfall2MaterialMode.Opaque || metadata.IsUnlit || metadata.IsWater )
@@ -1012,7 +1024,7 @@ class MapLoader(
 		light.SkyColor = TryParseSourceLightColor( lightValues?.GetValueOrDefault( "_ambient" ), 0.30f,
 			out var skyColor ) ? skyColor : new Color( 0.22f, 0.28f, 0.36f );
 		light.ShadowCascadeCount = Titanfall2StreamingSettings.MapShadows ? 2 : 1;
-		light.ContactShadows = false;
+		light.ContactShadows = Titanfall2StreamingSettings.NativeContactShadows;
 
 		var fogValues = Titanfall2StreamingSettings.MapFog
 			? entities
@@ -1045,14 +1057,14 @@ class MapLoader(
 
 		var color = new GameObject( true, "titanfall2_color_adjustments" ).AddComponent<ColorAdjustments>();
 		color.Blend = 1f;
-		color.Saturation = 0.86f;
-		color.Brightness = 0.94f;
-		color.Contrast = 0.92f;
+		color.Saturation = Titanfall2StreamingSettings.NativeColorSaturation;
+		color.Brightness = Titanfall2StreamingSettings.NativeColorBrightness;
+		color.Contrast = Titanfall2StreamingSettings.NativeColorContrast;
 
 		Log.Info( $"Titanfall 2 environment created from map entities: "
 			+ $"{(lightValues is null ? "fallback light" : "light_environment")}, "
 			+ $"{(!Titanfall2StreamingSettings.MapFog ? "fog disabled" : fogValues is null ? "no fog entity" : "env_fog_controller")}, "
-			+ $"2 shadow cascades ({Path})." );
+			+ $"{light.ShadowCascadeCount} shadow cascade(s), contact shadows {light.ContactShadows} ({Path})." );
 	}
 
 	static float EntityDistanceSquared( IReadOnlyDictionary<string, string> values, Vector3 center )

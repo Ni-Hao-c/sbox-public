@@ -11,7 +11,7 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 {
 	static readonly Sandbox.Diagnostics.Logger Log = new( "Titanfall2Props" );
 	const int DataMagic = 0x32505354; // TSP2
-	const int DataVersion = 2;
+	const int DataVersion = 3;
 	const int MaximumModelCount = 65536;
 	const int MaximumPropCount = 1_000_000;
 
@@ -29,6 +29,8 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 
 	readonly Dictionary<CellCoordinate, PropCell> _cells = new();
 	readonly List<PropCell> _workQueue = new();
+	readonly List<PropCell> _runtimeCellQueue = new();
+	readonly Queue<PendingBatch> _lodSwapQueue = new();
 	readonly Stopwatch _refreshTimer = new();
 	readonly Stopwatch _statusTimer = new();
 	Vector3 _lastAnchor;
@@ -36,6 +38,8 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 	bool _initialized;
 	bool _completionLogged;
 	bool _batchesBuilt;
+	bool _runtimePvsUpdatePending;
+	int _runtimeCellCursor;
 	int _totalProps;
 	int _activeCells;
 	int _liveProps;
@@ -50,14 +54,22 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 	int _collidableProps;
 	int _collidersCreated;
 	int _colliderFailures;
+	int _collidersReleased;
+	int _pvsCameraCell = -1;
+	int _pvsVisibleProps;
+	int _pvsCulledProps;
+	Titanfall2BspReader.VisibilityCellMask _visiblePvsCells;
+	Titanfall2BspReader.BspVisibility _visibility;
 
 	public void Configure( string mountIdent, string mapPath, Vector3 fallbackAnchor,
-		IReadOnlyList<Titanfall2BspReader.StaticPropInstance> props )
+		IReadOnlyList<Titanfall2BspReader.StaticPropInstance> props,
+		Titanfall2BspReader.BspVisibility visibility )
 	{
 		MountIdent = mountIdent;
 		MapPath = mapPath;
 		FallbackAnchor = fallbackAnchor;
-		EncodedProps = Encode( props );
+		_visibility = visibility;
+		EncodedProps = Encode( props, visibility );
 	}
 
 	protected override void OnAwake()
@@ -100,8 +112,9 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 			? Scene.Camera.WorldPosition
 			: FallbackAnchor;
 		var refreshDistance = Titanfall2StreamingSettings.PropCellSize * 0.25f;
+		var pvsCellChanged = TryFindPvsCell( anchor, out var pvsCell ) && pvsCell != _pvsCameraCell;
 		if ( !_hasAnchor
-			|| _refreshTimer.Elapsed.TotalSeconds >= 0.25
+			|| pvsCellChanged
 			|| anchor.DistanceSquared( _lastAnchor ) >= refreshDistance * refreshDistance )
 		{
 			RefreshCells( anchor );
@@ -110,6 +123,8 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 		PopulateCells(
 			Titanfall2StreamingSettings.PropsPerFrame,
 			Titanfall2StreamingSettings.PropFrameBudgetMilliseconds );
+		ProcessRuntimeCellQueue();
+		ProcessLodSwaps();
 		LogCompletion();
 		if ( !_completionLogged && _statusTimer.Elapsed.TotalSeconds >= 5.0 )
 		{
@@ -129,6 +144,8 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 			DestroyCellInstances( cell );
 		_cells.Clear();
 		_workQueue.Clear();
+		_runtimeCellQueue.Clear();
+		_lodSwapQueue.Clear();
 		Log.Info( $"Titanfall 2 static prop scene resources released: {releasedProps} props, "
 			+ $"{releasedBatches} instance batches ({MapPath})." );
 	}
@@ -174,14 +191,21 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 		_hasAnchor = true;
 		_refreshTimer.Restart();
 		var loadDistanceSquared = Titanfall2StreamingSettings.PropLoadRadius * Titanfall2StreamingSettings.PropLoadRadius;
+		var previousPvsCell = _pvsCameraCell;
+		var previousPvsCells = _visiblePvsCells;
+		_visiblePvsCells = ResolveVisiblePvsCells( anchor );
+		var pvsChanged = previousPvsCell != _pvsCameraCell || previousPvsCells != _visiblePvsCells;
 
 		foreach ( var cell in _cells.Values )
 		{
 			cell.DistanceSquared = cell.Coordinate.DistanceSquaredToCell( anchor, Titanfall2StreamingSettings.PropCellSize );
 			cell.Wanted = cell.DistanceSquared <= loadDistanceSquared;
-			UpdateCellShadowState( cell, anchor );
 		}
 
+		_runtimePvsUpdatePending |= pvsChanged;
+		QueueRuntimeCellRefresh();
+
+		if ( _completionLogged ) return;
 		_workQueue.Clear();
 		_workQueue.AddRange( _cells.Values.Where( static cell => cell.NextProp < cell.Props.Count ) );
 		_workQueue.Sort( static ( left, right ) =>
@@ -189,6 +213,156 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 			var priority = right.Wanted.CompareTo( left.Wanted );
 			return priority != 0 ? priority : left.DistanceSquared.CompareTo( right.DistanceSquared );
 		} );
+	}
+
+	void QueueRuntimeCellRefresh()
+	{
+		_runtimeCellQueue.Clear();
+		_runtimeCellQueue.AddRange( _cells.Values );
+		_runtimeCellQueue.Sort( static ( left, right ) => left.DistanceSquared.CompareTo( right.DistanceSquared ) );
+		_runtimeCellCursor = 0;
+	}
+
+	void ProcessRuntimeCellQueue()
+	{
+		if ( _runtimeCellCursor >= _runtimeCellQueue.Count ) return;
+		var timer = Stopwatch.StartNew();
+		var processed = 0;
+		while ( processed < Titanfall2StreamingSettings.PropRuntimeCellsPerFrame
+			&& _runtimeCellCursor < _runtimeCellQueue.Count )
+		{
+			var cell = _runtimeCellQueue[_runtimeCellCursor++];
+			if ( _runtimePvsUpdatePending ) UpdateCellVisibilityState( cell );
+			UpdateCellLodState( cell, _lastAnchor );
+			UpdateCellShadowState( cell, _lastAnchor );
+			UpdateCellCollisionState( cell, _lastAnchor );
+			processed++;
+			if ( timer.Elapsed.TotalMilliseconds >= Titanfall2StreamingSettings.PropRuntimeCellBudgetMilliseconds ) break;
+		}
+
+		if ( _runtimeCellCursor < _runtimeCellQueue.Count ) return;
+		_runtimePvsUpdatePending = false;
+		_runtimeCellQueue.Clear();
+		_runtimeCellCursor = 0;
+	}
+
+	Titanfall2BspReader.VisibilityCellMask ResolveVisiblePvsCells( Vector3 anchor )
+	{
+		_pvsCameraCell = -1;
+		if ( !TryFindPvsCell( anchor, out _pvsCameraCell ) ) return default;
+		return _visibility.GetReachableCells( _pvsCameraCell, Titanfall2StreamingSettings.PropPvsPortalDepth )
+			.Union( _visibility.AlwaysVisibleCells );
+	}
+
+	bool TryFindPvsCell( Vector3 anchor, out int cell )
+	{
+		cell = -1;
+		if ( !Titanfall2StreamingSettings.PropPvsCulling || _visibility is not { IsValid: true } ) return false;
+		cell = _visibility.FindCell( new System.Numerics.Vector3( anchor.x, anchor.y, anchor.z ) );
+		return cell >= 0;
+	}
+
+	bool IsPvsVisible( Titanfall2BspReader.VisibilityCellMask propCells )
+	{
+		// A missing/invalid PVS mapping must never hide a prop. This also covers
+		// static props which lie outside the original cell AABB reference table.
+		return _visiblePvsCells.IsEmpty || propCells.IsEmpty || propCells.Intersects( _visiblePvsCells );
+	}
+
+	void UpdateCellVisibilityState( PropCell cell )
+	{
+		foreach ( var instance in cell.Instances )
+		{
+			if ( instance.IsBatched ) continue;
+			var visible = IsPvsVisible( instance.Source.PvsCells );
+			if ( visible == instance.RenderingEnabled ) continue;
+			instance.RenderingEnabled = visible;
+			if ( instance.RenderObject.IsValid() ) instance.RenderObject.RenderingEnabled = visible;
+		}
+
+		foreach ( var batch in cell.Batches.Values )
+		{
+			var visible = IsPvsVisible( batch.PvsCells );
+			if ( batch.RenderingEnabled == visible ) continue;
+			batch.RenderingEnabled = visible;
+			if ( batch.RenderBatch.IsValid() ) batch.RenderBatch.RenderingEnabled = visible;
+			foreach ( var fallback in batch.FallbackObjects )
+				if ( fallback.IsValid() ) fallback.RenderingEnabled = visible;
+		}
+
+	}
+
+	void UpdatePvsStatistics()
+	{
+		_pvsVisibleProps = _cells.Values.Sum( static current =>
+			current.Instances.Count( instance => !instance.IsBatched && instance.RenderingEnabled )
+			+ current.Batches.Values.Sum( batch => batch.RenderingEnabled ? batch.Transforms.Count : 0 ) );
+		_pvsCulledProps = Math.Max( 0, _liveProps - _pvsVisibleProps );
+	}
+
+	void UpdateCellLodState( PropCell cell, Vector3 anchor )
+	{
+		if ( !Titanfall2StreamingSettings.PropLods ) return;
+		foreach ( var batch in cell.Batches.Values )
+		{
+			if ( !batch.RenderBatch.IsValid() || batch.FallbackObjects.Count > 0 ) continue;
+			var desiredLod = SelectLod( batch.DistanceToClosestInstance( anchor ), batch.CurrentLod );
+			if ( desiredLod == batch.CurrentLod && !batch.LodSwapQueued ) continue;
+			batch.DesiredLod = desiredLod;
+			if ( batch.LodSwapQueued ) continue;
+			batch.LodSwapQueued = true;
+			_lodSwapQueue.Enqueue( batch );
+		}
+	}
+
+	static int SelectLod( float distance, int currentLod )
+	{
+		if ( !Titanfall2StreamingSettings.PropLods ) return 0;
+		var hysteresis = Titanfall2StreamingSettings.PropLodHysteresis;
+		var lod = distance > Titanfall2StreamingSettings.PropLod3Distance + (currentLod >= 3 ? -hysteresis : hysteresis ) ? 3
+			: distance > Titanfall2StreamingSettings.PropLod2Distance + (currentLod >= 2 ? -hysteresis : hysteresis ) ? 2
+			: distance > Titanfall2StreamingSettings.PropLod1Distance + (currentLod >= 1 ? -hysteresis : hysteresis ) ? 1
+			: 0;
+		return Math.Clamp( lod, 0, ModelLoader.StaticInstanceLodCount - 1 );
+	}
+
+	void ProcessLodSwaps()
+	{
+		if ( _lodSwapQueue.Count == 0 ) return;
+		var timer = Stopwatch.StartNew();
+		var processed = 0;
+		while ( processed < Titanfall2StreamingSettings.PropLodSwapsPerFrame
+			&& _lodSwapQueue.Count > 0 )
+		{
+			var batch = _lodSwapQueue.Dequeue();
+			batch.LodSwapQueued = false;
+			if ( batch.DesiredLod != batch.CurrentLod ) TrySwapBatchLod( batch, batch.DesiredLod );
+			processed++;
+			if ( timer.Elapsed.TotalMilliseconds >= Titanfall2StreamingSettings.PropLodSwapBudgetMilliseconds ) break;
+		}
+	}
+
+	void TrySwapBatchLod( PendingBatch batch, int lod )
+	{
+		var path = $"mount://{MountIdent}/{ModelLoader.GetStaticInstancePath( batch.ModelPath, lod )}.vmdl";
+		var replacement = Model.Load( path );
+		if ( replacement is null || replacement == Model.Error || !ModelLoader.CanInstance( replacement ) ) return;
+		try
+		{
+			var replacementBatch = new Titanfall2StaticModelBatch(
+				Scene.SceneWorld, replacement, batch.Transforms, batch.RenderBatch.CastShadows, batch.AverageProbeColor )
+			{
+				RenderingEnabled = batch.RenderingEnabled
+			};
+			batch.RenderBatch.Delete();
+			batch.RenderBatch = replacementBatch;
+			batch.Model = replacement;
+			batch.CurrentLod = lod;
+		}
+		catch ( Exception exception )
+		{
+			Log.Warning( exception, $"Unable to switch Titanfall 2 prop batch '{batch.ModelPath}' to LOD{lod}." );
+		}
 	}
 
 	void PopulateCells( int maximumProps, float budgetMilliseconds )
@@ -237,7 +411,9 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 			+ $"{_activeCells}/{_cells.Count} cells, {_instancedProps} GPU-instanced in {_batchCount} batches, "
 			+ $"{_skinnedProps} frozen-skinned fallbacks, {_plainProps} individual rigid, "
 			+ $"{_renderingProps} rendering, {_shadowCastingProps} casting shadows, "
-			+ $"{_collidersCreated}/{_collidableProps} colliders ({_colliderFailures} failures), "
+			+ $"{_collidersCreated}/{_collidableProps} colliders active "
+			+ $"({_collidersReleased} released, {_colliderFailures} unavailable), "
+			+ $"PVS cell {_pvsCameraCell} ({_pvsVisibleProps} visible/{_pvsCulledProps} culled), "
 			+ $"{_failedProps} skipped ({MapPath})." );
 	}
 
@@ -245,21 +421,22 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 	{
 		if ( string.IsNullOrWhiteSpace( prop.ModelPath ) || string.IsNullOrWhiteSpace( MountIdent ) ) return false;
 		var resourcePath = $"mount://{MountIdent}/{prop.ModelPath}.vmdl";
-		var staticResourcePath = $"mount://{MountIdent}/{ModelLoader.GetStaticInstancePath( prop.ModelPath )}.vmdl";
+		var initialLod = SelectLod( MathF.Sqrt( cell.DistanceSquared ), 0 );
+		var staticResourcePath = $"mount://{MountIdent}/{ModelLoader.GetStaticInstancePath( prop.ModelPath, initialLod )}.vmdl";
 		var staticModel = Model.Load( staticResourcePath );
 		var model = staticModel is not null && staticModel != Model.Error
 			? staticModel
 			: Model.Load( resourcePath );
 		if ( model is null || model == Model.Error )
 		{
-			if ( _failureLogs++ < 16 ) Log.Warning( $"Unable to stream Titanfall 2 static prop model '{resourcePath}'." );
+			if ( _failureLogs++ < 16 ) Titanfall2Log.Warning( $"Unable to stream Titanfall 2 static prop model '{resourcePath}'." );
 			return false;
 		}
 
 		var scale = MathF.Max( prop.Scale, 0.001f );
 		var radius = model.Bounds.Size.Length * 0.5f * scale;
 		var castShadows = ShouldCastShadows( prop.Position, radius, _lastAnchor );
-		const bool renderingEnabled = true;
+		var renderingEnabled = IsPvsVisible( prop.PvsCells );
 		var worldTransform = new Transform( prop.Position, prop.Rotation.ToRotation(), scale );
 		SceneObject renderObject = null;
 		var isBatched = staticModel.IsValid() && staticModel != Model.Error && ModelLoader.CanInstance( staticModel );
@@ -272,10 +449,11 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 		{
 			if ( !cell.Batches.TryGetValue( staticModel, out var pendingBatch ) )
 			{
-				pendingBatch = new PendingBatch( staticModel );
+				pendingBatch = new PendingBatch( prop.ModelPath, staticModel, initialLod, renderingEnabled );
 				cell.Batches.Add( staticModel, pendingBatch );
 			}
-			pendingBatch.Add( worldTransform, radius, castShadows, prop.ProbeColor );
+			pendingBatch.Add( worldTransform, radius, castShadows, prop.ProbeColor, prop.PvsCells );
+			pendingBatch.RenderingEnabled |= renderingEnabled;
 			_instancedProps++;
 		}
 		else if ( staticModel.IsValid() && staticModel != Model.Error )
@@ -309,40 +487,79 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 
 		if ( renderingEnabled ) _renderingProps++;
 		if ( castShadows ) _shadowCastingProps++;
-		GameObject collisionObject = null;
-		if ( (Titanfall2StreamingSettings.PropCollisions || Titanfall2StreamingSettings.NavMeshStaticProps) && prop.Collidable )
+		var instance = new PropInstance( prop, renderObject, radius, renderingEnabled, castShadows, isBatched );
+		if ( prop.Collidable && (Titanfall2StreamingSettings.PropCollisions || Titanfall2StreamingSettings.NavMeshStaticProps) )
 		{
 			_collidableProps++;
-			collisionObject = new GameObject( GameObject, true, System.IO.Path.GetFileNameWithoutExtension( prop.ModelPath ) );
-			collisionObject.WorldPosition = prop.Position;
-			collisionObject.WorldRotation = prop.Rotation;
-			collisionObject.WorldScale = Vector3.One * scale;
-			collisionObject.IsStatic = true;
-			if ( Titanfall2StreamingSettings.NavMeshStaticProps )
-				collisionObject.Tags.Add( Titanfall2DeferredNavMeshBuilder.NavMeshBodyTag );
-			var collider = collisionObject.AddComponent<ModelCollider>();
-			var collisionModel = Model.Load( resourcePath );
-			collider.Model = collisionModel.IsValid() && collisionModel != Model.Error ? collisionModel : model;
-			collider.Static = true;
-			if ( collider.Model.IsValid()
-				&& collider.Model != Model.Error
-				&& collider.Model.Physics is { Parts.Count: > 0 } )
-			{
-				_collidersCreated++;
-			}
-			else
-			{
-				_colliderFailures++;
-				if ( _failureLogs++ < 16 )
-					Log.Warning( $"Titanfall 2 static prop has no usable collision bodies: "
-						+ $"'{prop.ModelPath}' at {prop.Position} ({MapPath})." );
-				collisionObject.Destroy();
-				collisionObject = null;
-			}
+			EnsureCollisionState( instance, anchor: _lastAnchor, fallbackModel: model );
 		}
-		cell.Instances.Add( new PropInstance(
-			collisionObject, renderObject, prop.Position, radius, renderingEnabled, castShadows, isBatched ) );
+		cell.Instances.Add( instance );
 		return true;
+	}
+
+	void UpdateCellCollisionState( PropCell cell, Vector3 anchor )
+	{
+		foreach ( var instance in cell.Instances )
+			EnsureCollisionState( instance, anchor, fallbackModel: null );
+	}
+
+	void EnsureCollisionState( PropInstance instance, Vector3 anchor, Model fallbackModel )
+	{
+		if ( !instance.Source.Collidable
+			|| (!Titanfall2StreamingSettings.PropCollisions && !Titanfall2StreamingSettings.NavMeshStaticProps)
+			|| instance.CollisionUnavailable )
+			return;
+
+		var collisionActive = instance.CollisionObject.IsValid() && !instance.CollisionObject.IsDestroyed;
+		var shouldBeActive = ShouldKeepCollision( instance.Position, instance.Radius, anchor, collisionActive );
+		if ( shouldBeActive == collisionActive ) return;
+		if ( !shouldBeActive )
+		{
+			instance.CollisionObject.Destroy();
+			instance.CollisionObject = null;
+			_collidersCreated = Math.Max( 0, _collidersCreated - 1 );
+			_collidersReleased++;
+			return;
+		}
+
+		var prop = instance.Source;
+		var collisionObject = new GameObject( GameObject, true, System.IO.Path.GetFileNameWithoutExtension( prop.ModelPath ) );
+		collisionObject.WorldPosition = prop.Position;
+		collisionObject.WorldRotation = prop.Rotation;
+		collisionObject.WorldScale = Vector3.One * MathF.Max( prop.Scale, 0.001f );
+		collisionObject.IsStatic = true;
+		if ( Titanfall2StreamingSettings.NavMeshStaticProps )
+			collisionObject.Tags.Add( Titanfall2DeferredNavMeshBuilder.NavMeshBodyTag );
+		var collider = collisionObject.AddComponent<ModelCollider>();
+		var resourcePath = $"mount://{MountIdent}/{prop.ModelPath}.vmdl";
+		var collisionModel = Model.Load( resourcePath );
+		collider.Model = collisionModel.IsValid() && collisionModel != Model.Error ? collisionModel : fallbackModel;
+		collider.Static = true;
+		if ( collider.Model.IsValid()
+			&& collider.Model != Model.Error
+			&& collider.Model.Physics is { Parts.Count: > 0 } )
+		{
+			instance.CollisionObject = collisionObject;
+			_collidersCreated++;
+			return;
+		}
+
+		_colliderFailures++;
+		instance.CollisionUnavailable = true;
+		if ( _failureLogs++ < 16 )
+			Titanfall2Log.Warning( $"Titanfall 2 static prop has no usable collision bodies: "
+				+ $"'{prop.ModelPath}' at {prop.Position} ({MapPath})." );
+		collisionObject.Destroy();
+	}
+
+	static bool ShouldKeepCollision( Vector3 position, float radius, Vector3 anchor, bool currentlyActive )
+	{
+		if ( Titanfall2StreamingSettings.NavMeshStaticProps || !Titanfall2StreamingSettings.StreamPropCollisions ) return true;
+		var configuredDistance = currentlyActive
+			? Math.Max( Titanfall2StreamingSettings.PropCollisionEnableDistance, Titanfall2StreamingSettings.PropCollisionDisableDistance )
+			: Titanfall2StreamingSettings.PropCollisionEnableDistance;
+		var distance = configuredDistance + radius;
+		return position.DistanceSquared( anchor ) <= distance * distance;
 	}
 
 	void UpdateCellShadowState( PropCell cell, Vector3 anchor )
@@ -413,7 +630,10 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 						pendingBatch.Model,
 						pendingBatch.Transforms,
 						castShadows,
-						pendingBatch.AverageProbeColor );
+						pendingBatch.AverageProbeColor )
+					{
+						RenderingEnabled = pendingBatch.RenderingEnabled
+					};
 					_batchCount++;
 
 					var batchedShadowCount = castShadows ? pendingBatch.Transforms.Count : 0;
@@ -437,6 +657,7 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 							pendingBatch.Transforms[index].Position,
 							pendingBatch.Radii[index],
 							_lastAnchor );
+						fallback.RenderingEnabled = pendingBatch.RenderingEnabled;
 						pendingBatch.FallbackObjects.Add( fallback );
 					}
 				}
@@ -480,7 +701,7 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 		_activeCells = Math.Max( 0, _activeCells - 1 );
 	}
 
-	static string Encode( IReadOnlyList<Titanfall2BspReader.StaticPropInstance> source )
+	static string Encode( IReadOnlyList<Titanfall2BspReader.StaticPropInstance> source, Titanfall2BspReader.BspVisibility visibility )
 	{
 		var valid = source.Where( static prop => !string.IsNullOrWhiteSpace( prop.ModelPath ) ).ToArray();
 		var models = valid.Select( static prop => NormalizeModelPath( prop.ModelPath ) )
@@ -512,6 +733,12 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 				writer.Write( 1f );
 				writer.Write( 1f );
 				writer.Write( 1f );
+				var objectIndex = visibility is { IsValid: true }
+					? visibility.WorldMeshCount + prop.SourceIndex
+					: -1;
+				var pvsCells = visibility?.GetObjectCellMask( objectIndex ) ?? default;
+				writer.Write( pvsCells.Low );
+				writer.Write( pvsCells.High );
 			}
 		}
 		return Convert.ToBase64String( stream.GetBuffer(), 0, checked((int)stream.Length) );
@@ -539,7 +766,8 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 			var scale = reader.ReadSingle();
 			var collidable = reader.ReadBoolean();
 			var probeColor = new Vector3( reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle() );
-			yield return new StreamedProp( models[modelIndex], position, rotation, scale, collidable, probeColor );
+			var pvsCells = new Titanfall2BspReader.VisibilityCellMask( reader.ReadUInt64(), reader.ReadUInt64() );
+			yield return new StreamedProp( models[modelIndex], position, rotation, scale, collidable, probeColor, pvsCells );
 		}
 	}
 
@@ -555,29 +783,37 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 		Angles Rotation,
 		float Scale,
 		bool Collidable,
-		Vector3 ProbeColor );
+		Vector3 ProbeColor,
+		Titanfall2BspReader.VisibilityCellMask PvsCells );
 
 	sealed class PropInstance(
-		GameObject collisionObject,
+		StreamedProp source,
 		SceneObject renderObject,
-		Vector3 position,
 		float radius,
 		bool renderingEnabled,
 		bool castShadows,
 		bool isBatched )
 	{
-		public GameObject CollisionObject { get; } = collisionObject;
+		public StreamedProp Source { get; } = source;
+		public GameObject CollisionObject { get; set; }
 		public SceneObject RenderObject { get; } = renderObject;
-		public Vector3 Position { get; } = position;
+		public Vector3 Position => Source.Position;
 		public float Radius { get; } = radius;
 		public bool RenderingEnabled { get; set; } = renderingEnabled;
 		public bool CastShadows { get; set; } = castShadows;
 		public bool IsBatched { get; } = isBatched;
+		public bool CollisionUnavailable { get; set; }
 	}
 
-	sealed class PendingBatch( Model model )
+	sealed class PendingBatch( string modelPath, Model model, int currentLod, bool renderingEnabled )
 	{
-		public Model Model { get; } = model;
+		public string ModelPath { get; } = modelPath;
+		public Model Model { get; set; } = model;
+		public int CurrentLod { get; set; } = currentLod;
+		public int DesiredLod { get; set; } = currentLod;
+		public bool LodSwapQueued { get; set; }
+		public bool RenderingEnabled { get; set; } = renderingEnabled;
+		public Titanfall2BspReader.VisibilityCellMask PvsCells { get; private set; }
 		public List<Transform> Transforms { get; } = new();
 		public List<float> Radii { get; } = new();
 		public List<Vector3> ProbeColors { get; } = new();
@@ -589,12 +825,21 @@ public sealed class Titanfall2StaticPropStreamer : Component, Component.DontExec
 			? Vector3.One
 			: ProbeColors.Aggregate( Vector3.Zero, static ( sum, color ) => sum + color ) / ProbeColors.Count;
 
-		public void Add( Transform transform, float radius, bool castShadows, Vector3 probeColor )
+		public void Add( Transform transform, float radius, bool castShadows, Vector3 probeColor,
+			Titanfall2BspReader.VisibilityCellMask pvsCells )
 		{
 			Transforms.Add( transform );
 			Radii.Add( radius );
 			ProbeColors.Add( probeColor );
+			PvsCells = PvsCells.Union( pvsCells );
 			if ( castShadows ) ShadowedInstanceCount++;
+		}
+
+		public float DistanceToClosestInstance( Vector3 anchor )
+		{
+			var result = float.MaxValue;
+			foreach ( var transform in Transforms ) result = MathF.Min( result, MathF.Sqrt( transform.Position.DistanceSquared( anchor ) ) );
+			return result;
 		}
 	}
 
