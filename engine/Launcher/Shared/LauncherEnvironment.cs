@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 
 namespace Sandbox;
 
@@ -34,10 +35,10 @@ public static class LauncherEnvironment
 	{
 		AppDomain.CurrentDomain.AssemblyResolve += CurrentDomain_AssemblyResolve;
 
-		GamePath = AppContext.BaseDirectory;
+		GamePath = System.IO.Path.TrimEndingDirectorySeparator( AppContext.BaseDirectory );
 
-		// this exe is in the bin folder
-		if ( GamePath.EndsWith( System.IO.Path.Combine( "bin", PlatformName ) ) )
+		// this exe is in a folder inside bin - bin/win64, bin/managed
+		if ( System.IO.Path.GetFileName( System.IO.Path.GetDirectoryName( GamePath ) ) == "bin" )
 		{
 			// go up two folders
 			GamePath = System.IO.Path.GetDirectoryName( GamePath );
@@ -51,15 +52,29 @@ public static class LauncherEnvironment
 		// make the game dir our current dir
 		Environment.CurrentDirectory = GamePath;
 
-		//
-		// Allows unit tests and csproj to find the engine path.
-		//
-		if ( System.Environment.GetEnvironmentVariable( "FACEPUNCH_ENGINE", EnvironmentVariableTarget.User ) != GamePath )
-		{
-			System.Environment.SetEnvironmentVariable( "FACEPUNCH_ENGINE", GamePath, EnvironmentVariableTarget.User );
-		}
+		System.Environment.SetEnvironmentVariable( "FACEPUNCH_ENGINE", GamePath );
 
 		UpdateNativeDllPath( nativeDllPath );
+		_ = UpdateEnginePathAsync( GamePath );
+	}
+
+	private static async Task UpdateEnginePathAsync( string gamePath )
+	{
+		try
+		{
+			await Task.Run( () =>
+			{
+				// Allows unit tests and csproj to find the engine path.
+				if ( System.Environment.GetEnvironmentVariable( "FACEPUNCH_ENGINE", EnvironmentVariableTarget.User ) != gamePath )
+				{
+					System.Environment.SetEnvironmentVariable( "FACEPUNCH_ENGINE", gamePath, EnvironmentVariableTarget.User );
+				}
+			} ).ConfigureAwait( false );
+		}
+		catch ( Exception e )
+		{
+			Console.Error.WriteLine( $"Failed to update FACEPUNCH_ENGINE: {e}" );
+		}
 	}
 
 	private static void UpdateNativeDllPath( string nativeDllPath )

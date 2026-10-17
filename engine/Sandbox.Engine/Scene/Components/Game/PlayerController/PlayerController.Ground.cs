@@ -23,11 +23,36 @@ public sealed partial class PlayerController : Component
 	public float GroundFriction { get; set; }
 
 	/// <summary>
+	/// The normal of the walkable surface beneath us.
+	/// </summary>
+	public Vector3 GroundNormal { get; private set; } = Vector3.Up;
+
+	/// <summary>
 	/// Are we standing on a surface that is physically dynamic
 	/// </summary>
 	public bool GroundIsDynamic { get; set; }
 
 	TimeUntil _timeUntilAllowedGround = 0;
+	PhysicsShape _groundShape;
+
+	// Moving surfaces need native contact forces rather than static-ground walking.
+	internal bool GroundUsesContactFriction
+	{
+		get
+		{
+			if ( GroundIsDynamic )
+				return true;
+
+			if ( !_groundShape.IsValid() )
+				return false;
+
+			var body = _groundShape.Body;
+			// Keyframe controllers can clear instantaneous velocity before the next physics step.
+			return !_groundShape.SurfaceVelocity.IsNearZeroLength
+				|| (body.BodyType == PhysicsBodyType.Keyframed
+					&& (!GroundVelocity.IsNearZeroLength || !body.Velocity.IsNearZeroLength || !body.AngularVelocity.IsNearZeroLength));
+		}
+	}
 
 	/// <summary>
 	/// Amount of time since this character was last on the ground
@@ -61,55 +86,33 @@ public sealed partial class PlayerController : Component
 	/// </summary>
 	internal void Reground( float stepSize )
 	{
-		if ( !IsOnGround )
+		if ( stepSize <= 0 || !CanStep || GroundUsesContactFriction )
 			return;
 
-		// Don't keep regrounding if we're not moving
-		if ( Body.Sleeping )
+		var from = WorldPosition;
+		var drop = stepSize * MathF.Abs( WorldTransform.UniformScale );
+		if ( !TryFindGround( from, 2, drop, out var ground, out var landing ) )
 			return;
 
-		var currentPosition = WorldPosition;
-
-		float radiusScale = 1.0f;
-		var tr = TraceBody( currentPosition + Vector3.Up * 1, currentPosition + Vector3.Down * stepSize, radiusScale, 0.5f );
-
-		while ( tr.StartedSolid )
-		{
-			radiusScale = radiusScale - 0.1f;
-			if ( radiusScale < 0.7f )
-				return;
-
-			tr = TraceBody( currentPosition + Vector3.Up * 1, currentPosition + Vector3.Down * stepSize, radiusScale, 0.5f );
-		}
-
-		if ( tr.StartedSolid )
-		{
+		if ( ground.Body?.BodyType == PhysicsBodyType.Dynamic )
 			return;
-		}
 
-		if ( tr.Hit )
-		{
-			var targetPosition = tr.EndPosition + Vector3.Up * 0.01f;
-			var delta = currentPosition - targetPosition;
-			if ( delta == Vector3.Zero ) return;
+		var height = (landing - from).Dot( UpDirection );
+		if ( height > _groundedFeetLift + _skin || height < -drop - _skin )
+			return;
 
-			WorldPosition = targetPosition;
+		var downward = TraceMovement( from, landing, _stepClearance );
+		if ( downward.StartedSolid || (downward.Hit && (downward.EndPosition - landing).Length > _stepClearance)
+			|| TraceMovement( landing, landing ).StartedSolid )
+			return;
 
-			// when stepping down, clear out the gravity velocity to avoid
-			// it thinking we're falling and building up like crazy
-			if ( delta.z > 0.01f )
-			{
-				var velocity = Body.Velocity;
-				velocity.z = 0;
-				Body.Velocity = velocity;
-			}
-		}
+		ApplyGroundStep( landing, ground );
 	}
 
 	void CategorizeGround()
 	{
-		var groundVel = GroundVelocity.z;
-		bool wasOnGround = IsOnGround;
+		var up = UpDirection;
+		var groundVel = GroundVelocity.Dot( up );
 
 		if ( !Mode.AllowGrounding )
 		{
@@ -126,38 +129,13 @@ public sealed partial class PlayerController : Component
 			return;
 		}
 
-		var velocity = Velocity - GroundVelocity;
 		if ( _timeUntilAllowedGround > 0 || groundVel > 300 )
 		{
 			UpdateGroundFromTraceResult( default );
 			return;
 		}
 
-		var from = WorldPosition + Vector3.Up * 4;
-		var to = WorldPosition + Vector3.Down * 2;
-
-		float radiusScale = 1;
-		var tr = TraceBody( from, to, radiusScale, 0.5f );
-
-		while ( tr.StartedSolid || (tr.Hit && !Mode.IsStandableSurface( tr )) )
-		{
-			radiusScale = radiusScale - 0.1f;
-			if ( radiusScale < 0.7f )
-			{
-				UpdateGroundFromTraceResult( default );
-				return;
-			}
-
-			tr = TraceBody( from, to, radiusScale, 0.5f );
-		}
-
-		if ( tr.StartedSolid )
-		{
-			UpdateGroundFromTraceResult( default );
-			return;
-		}
-
-		if ( !tr.StartedSolid && tr.Hit && Mode.IsStandableSurface( tr ) )
+		if ( TryFindGround( WorldPosition, 4, 2, out var tr, out _ ) )
 		{
 			UpdateGroundFromTraceResult( tr );
 		}
@@ -175,22 +153,18 @@ public sealed partial class PlayerController : Component
 
 		GroundObject = body?.GameObject;
 		GroundComponent = body?.Component;
+		_groundShape = tr.Shape;
 		GroundSurface = tr.Surface;
+		GroundNormal = tr.Hit ? tr.Normal : UpDirection;
 		GroundIsDynamic = true;
 
 		if ( GroundObject is not null )
 		{
 			TimeSinceGrounded = 0;
 			_groundTransform = GroundObject.WorldTransform;
-			GroundFriction = tr.Surface.Friction;
-
-			if ( tr.Component is Collider collider )
-			{
-				if ( collider.Friction.HasValue )
-					GroundFriction = collider.Friction.Value;
-
-				GroundIsDynamic = collider.IsDynamic;
-			}
+			var friction = _groundShape.IsValid() ? _groundShape.Friction : -1;
+			GroundFriction = friction >= 0 ? friction : tr.Surface.Friction;
+			GroundIsDynamic = body.BodyType == PhysicsBodyType.Dynamic;
 		}
 		else
 		{

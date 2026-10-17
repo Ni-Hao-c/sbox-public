@@ -1,4 +1,4 @@
-using Sandbox.Engine;
+﻿using Sandbox.Engine;
 
 namespace Sandbox.Network;
 
@@ -34,6 +34,7 @@ internal partial class NetworkSystem
 			return;
 
 		IsDeveloperHost = msg.IsDeveloperHost;
+		IsHostMigrationEnabled = msg.HostMigration;
 
 		source.UpdateFrom( msg.Host );
 		source.State = Connection.ChannelState.LoadingServerInformation;
@@ -148,7 +149,8 @@ internal partial class NetworkSystem
 
 	async Task On_Handshake_ClientInfo( UserInfo msg, Connection source, Guid msgId )
 	{
-		if ( source.IsHost )
+		// Only the host lets people in. A peer would check them against rules it doesn't have.
+		if ( !IsHost || source.IsHost )
 			return;
 
 		if ( msg.HandshakeId != source.HandshakeId )
@@ -184,21 +186,19 @@ internal partial class NetworkSystem
 		Log.Info( $"{msg.Name} [{msg.SteamId}] is connecting" );
 
 		//
-		// If the lobby is set to FriendsOnly, only allow players who are Steam friends with the host.
+		// Private and friends-only lobbies. Steam lets anyone with the lobby id join it, so this is
+		// the only thing keeping people out. Only lobby connections have a Steam Id we can trust; the
+		// rest are loopback (local instances), or a dedicated server's, which this doesn't cover.
 		//
-		if ( !Application.IsDedicatedServer && Config.Privacy == LobbyPrivacy.FriendsOnly )
+		if ( !Application.IsDedicatedServer && source is SteamLobbyConnection )
 		{
-			var hostSteamId = Utility.Steam.SteamId;
-
-			// Host is always allowed
-			if ( msg.SteamId != hostSteamId.Value && !new Friend( msg.SteamId ).IsFriend )
+			if ( !Access.CanJoin( msg.SteamId, out var privacyDenial ) )
 			{
-				Log.Info( $"Kicked {msg.Name} [{msg.SteamId}] - not friends with host [{hostSteamId}]" );
-				source.Kick( "This lobby is Friends Only." );
+				Log.Info( $"Kicked {msg.Name} [{msg.SteamId}] - not allowed into this {Access.Privacy} lobby" );
+				source.Kick( privacyDenial );
 				return;
 			}
 		}
-
 
 		var denialReason = "";
 
@@ -207,6 +207,12 @@ internal partial class NetworkSystem
 			Log.Info( $"Kicking {msg.Name} [{msg.SteamId}] - {denialReason}" );
 			source.Kick( denialReason );
 			return;
+		}
+
+		// They're in, so they can come back - even after the host has changed
+		if ( source is SteamLobbyConnection )
+		{
+			Access.Admit( msg.SteamId );
 		}
 
 		source.PreInfo = null;
@@ -288,7 +294,7 @@ internal partial class NetworkSystem
 
 	Task On_Handshake_RequestMountedVPKs( RequestMountedVPKs msg, Connection source, Guid msgId )
 	{
-		if ( source.IsHost )
+		if ( !IsHost || source.IsHost )
 			return Task.CompletedTask;
 
 		if ( msg.HandshakeId != source.HandshakeId )
@@ -340,7 +346,7 @@ internal partial class NetworkSystem
 
 	Task On_Handshake_RequestSnapshot( RequestInitialSnapshot msg, Connection source, Guid msgId )
 	{
-		if ( source.IsHost )
+		if ( !IsHost || source.IsHost )
 			return Task.CompletedTask;
 
 		if ( msg.HandshakeId != source.HandshakeId )
@@ -362,21 +368,15 @@ internal partial class NetworkSystem
 
 		log.Trace( $"[{this}] Requesting a snapshot" );
 
-		var snapshot = new SnapshotMsg
+		var handshakeId = source.HandshakeId;
+		if ( GameSystem is not null )
 		{
-			GameObjectSystems = [],
-			NetworkObjects = new( 64 )
-		};
-
-		GameSystem?.GetSnapshot( source, ref snapshot );
-
-		var output = new InitialSnapshotResponse
+			GameSystem.SendSnapshot( source, snapshot => new InitialSnapshotResponse { HandshakeId = handshakeId, Snapshot = snapshot } );
+		}
+		else
 		{
-			HandshakeId = source.HandshakeId,
-			Snapshot = snapshot
-		};
-
-		source.SendMessage( output );
+			source.SendMessage( new InitialSnapshotResponse { HandshakeId = handshakeId, Snapshot = SnapshotMsg.Create() } );
+		}
 		return Task.CompletedTask;
 	}
 
@@ -432,7 +432,7 @@ internal partial class NetworkSystem
 
 	Task On_Handshake_ClientReady( ClientReady msg, Connection source, Guid msgId )
 	{
-		if ( source.IsHost )
+		if ( !IsHost || source.IsHost )
 			return Task.CompletedTask;
 
 		if ( msg.HandshakeId != source.HandshakeId )
@@ -466,7 +466,7 @@ internal partial class NetworkSystem
 
 	Task On_Handshake_Restart( RestartHandshakeMsg msg, Connection source, Guid msgId )
 	{
-		if ( source.IsHost )
+		if ( !IsHost || source.IsHost )
 			return Task.CompletedTask;
 
 		StartHandshake( source );
@@ -482,7 +482,9 @@ internal partial class NetworkSystem
 			return Task.CompletedTask;
 		}
 
-		IGameInstanceDll.Current.Disconnect( $"Kicked from server.\n\nReason: {msg.Reason}" );
+		FailureReason = $"Kicked from server.\n\nReason: {msg.Reason}";
+		Api.Activity.SetExitReason( "kicked", msg.Reason );
+		IGameInstanceDll.Current.Disconnect( FailureReason );
 		return Task.CompletedTask;
 	}
 
@@ -504,9 +506,13 @@ internal partial class NetworkSystem
 
 		Log.Trace( $"[{this}] I am spawning into the game!" );
 		LoadingScreen.IsVisible = false;
+		Api.Activity.LoadFinished();
 
 		Connection.Local.State = Connection.ChannelState.Connected;
 		source.State = Connection.ChannelState.Connected;
+
+		// Before the party sees we're in and follows
+		InviteParty();
 
 		return Task.CompletedTask;
 	}

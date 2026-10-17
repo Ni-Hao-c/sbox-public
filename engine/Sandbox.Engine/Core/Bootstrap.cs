@@ -1,4 +1,4 @@
-﻿using NativeEngine;
+using NativeEngine;
 using Sandbox.Network;
 using Sandbox.Utility;
 using Sandbox.VR;
@@ -22,18 +22,28 @@ internal static class Bootstrap
 	internal static Api.Events.EventRecord StartupTiming;
 
 	/// <summary>
-	/// Called before anything else. This should set up any low level stuff that
-	/// might be relied on if static functions are called.
+	/// Set up application flags, the main thread and filesystems so the startup window can read its settings.
 	/// </summary>
-	internal static void PreInit( CMaterialSystem2AppSystemDict appDict )
+	internal static void InitApplication( CMaterialSystem2AppSystemDict appDict, string rootFolder = null )
 	{
 		Application.Initialize( appDict.IsDedicatedServer(), appDict.IsConsoleApp(), appDict.IsInToolsMode(), appDict.IsInTestMode(), EngineGlobal.IsRetail() );
+		InitFileSystem( rootFolder ?? EngineGlobal.GetGameRootFolder() );
+		DLLImportResolver.SetupResolvers();
+	}
 
+
+	/// <summary>
+	/// Bootstrap managed services after the startup window has been painted.
+	/// </summary>
+	internal static void PreInit( Action initializeWindow = null )
+	{
 		try
 		{
-			InitMinimal( EngineGlobal.GetGameRootFolder() );
+			initializeWindow?.Invoke();
+			InitServices();
+			Graphics.Initialize();
+			GameWindow.Current?.UpdateStartupProgress( 0.1f, "Preparing files" );
 
-			DLLImportResolver.SetupResolvers();
 
 			StartupTiming = new Api.Events.EventRecord( $"StartupTiming.{(Application.IsEditor ? "Editor" : (Application.IsHeadless ? "Server" : "Game"))}" );
 			StartupTiming.StartTimer( "Time" );
@@ -52,10 +62,14 @@ internal static class Bootstrap
 			Logging.OnException = ErrorReporter.ReportException;
 			Logging.PrintToConsole = Application.IsHeadless;
 
+			if ( Application.IsEditor || CommandLine.HasSwitch( "-mcp" ) )
+			{
+				Editor.Mcp.LogBuffer.StartCapture();
+			}
+
 			{
 				using var timerFs = StartupTiming?.ScopeTimer( "FilesystemInit" );
 
-				EngineFileSystem.InitializeAddonsFolder();
 				EngineFileSystem.InitializeDataFolder();
 
 				if ( !Application.IsStandalone )
@@ -70,6 +84,7 @@ internal static class Bootstrap
 			}
 
 			Api.Init();
+			GameWindow.Current?.UpdateStartupProgress( 0.2f, "Loading game code" );
 
 			if ( Application.IsStandalone )
 			{
@@ -92,11 +107,20 @@ internal static class Bootstrap
 
 				Mounting.Directory.LoadAssemblies();
 			}
+
+			GameWindow.Current?.UpdateStartupProgress( 0.4f, "Starting engine systems" );
 		}
 		catch ( Exception ex )
 		{
+			// Window creation can fail before services and the exception logger are initialized.
+			try
+			{
+				ErrorReporter.Initialize();
+				ErrorReporter.ReportException( ex );
+				ErrorReporter.Flush();
+			}
+			catch { }
 			Log.Error( ex );
-			ErrorReporter.Flush();
 			EngineGlobal.Plat_MessageBox( "Bootstrap::PreInit Error", $"Failed to bootstrap engine: {ex.Message}\n\n{ex.StackTrace}" );
 			try { NLog.LogManager.Shutdown(); } catch { }
 			EngineGlobal.Plat_ExitProcess( 1 );
@@ -140,6 +164,11 @@ internal static class Bootstrap
 	{
 		try
 		{
+			Material.Preload();
+			using ( var _ = StartupTiming?.ScopeTimer( "Material Preload" ) )
+				Material.Preload();
+			GameWindow.Current?.UpdateStartupProgress( 0.55f, "Loading engine assemblies" );
+
 			IToolsDll.Current?.Spin();
 
 #pragma warning disable CS0612 // Type or member is obsolete
@@ -157,8 +186,13 @@ internal static class Bootstrap
 
 #pragma warning restore CS0612 // Type or member is obsolete
 
-			ReflectionUtility.RunAllStaticConstructors( "Sandbox.System" );
-			ReflectionUtility.RunAllStaticConstructors( "Sandbox.Engine" );
+			using ( var _ = StartupTiming?.ScopeTimer( "Static Constructors" ) )
+			{
+				ReflectionUtility.RunAllStaticConstructors( "Sandbox.System" );
+				ReflectionUtility.RunAllStaticConstructors( "Sandbox.Engine" );
+				Rendering.RenderPipeline.WarmUp();
+			}
+			GameWindow.Current?.UpdateStartupProgress( 0.6f, "Loading built-in projects" );
 
 			//log.Trace( "Bootstrap::Init" );
 			//log.Trace( $"Current Directory is {System.IO.Directory.GetCurrentDirectory()}" );
@@ -173,7 +207,14 @@ internal static class Bootstrap
 				SyncContext.RunBlocking( Project.InitializeBuiltIn() );
 			}
 
+			GameWindow.Current?.UpdateStartupProgress( 0.7f, "Initializing services" );
+
 			InitEngineConVars();
+			ConsoleConfig.ExecuteAutoexec();
+
+			// After registration, or the managed half of every quality profile is dropped on the
+			// floor and shadows and post-processing sit at their code defaults.
+			Settings.RenderSettings.Instance.ApplyQualityProfiles();
 
 			if ( IToolsDll.Current is not null )
 			{
@@ -188,14 +229,25 @@ internal static class Bootstrap
 
 			Screen.UpdateFromEngine();
 
+			// Not in RenderSettings' constructor: SystemInfo is only filled in at the tail of SourceEngineInit.
+			if ( Graphics.IsAvailable && !Application.IsEditor )
+			{
+				Settings.RenderSettings.Instance.EnsureFirstRunPreset();
+			}
+
 			if ( !Application.IsHeadless && !Application.IsStandalone )
 			{
-				// we really want the items available before we continue
-				// here we'll wait up to 5 seconds for them, but they're
-				// generally available completely immediately.
 				using var timeout = new CancellationTokenSource( 5000 );
 				SyncContext.RunBlocking( Services.Inventory.WaitForSteamInventoryItems( timeout.Token ) );
 			}
+
+			if ( !Application.IsStandalone )
+			{
+				// Know what's subscribed before the menu or a game asks for a package
+				Services.Ugc.InitializeSubscriptions();
+			}
+
+			GameWindow.Current?.UpdateStartupProgress( 0.8f, "Loading menu" );
 
 			if ( IMenuDll.Current is not null )
 			{
@@ -203,11 +255,15 @@ internal static class Bootstrap
 				SyncContext.RunBlocking( IMenuDll.Current.Initialize() );
 			}
 
+			GameWindow.Current?.UpdateStartupProgress( 0.9f, "Loading game" );
+
 			if ( IGameInstanceDll.Current is not null )
 			{
 				using var x = StartupTiming?.ScopeTimer( $"IGameMenuDll Bootstrap" );
 				SyncContext.RunBlocking( IGameInstanceDll.Current.Initialize() );
 			}
+
+			GameWindow.Current?.UpdateStartupProgress( 0.95f, "Finalizing startup" );
 
 			if ( SteamClient.IsValid && ErrorReporter.IsUsingSentry )
 			{
@@ -234,6 +290,10 @@ internal static class Bootstrap
 				LoadingFinished();
 			}
 
+			// Steam starts us with a friend's "connect" rich presence when joining them from Steam
+			if ( CommandLine.HasSwitch( "+connect" ) )
+				Api.Activity.GameRequested( new( "invite" ) );
+
 			// Run any commands
 			foreach ( var sw in CommandLine.GetSwitches() )
 			{
@@ -253,8 +313,18 @@ internal static class Bootstrap
 			//
 			Networking.Bootstrap();
 
+			// Local automation uses a separate same-user pipe for every process. Games opt in;
+			// editors follow the project's AI preferences, including when launched with -mcp.
+			if ( Application.IsEditor
+				? Project.Current?.Config.AI?.EnableMcpCommunication != false
+				: CommandLine.HasSwitch( "-mcp" ) )
+			{
+				Editor.Mcp.McpPipeServer.Start();
+			}
+
 			if ( Application.IsJoinLocal )
 			{
+				Api.Activity.GameRequested( new( "local" ) );
 				NetworkConsoleCommands.ConnectToServer( "local" );
 			}
 		}
@@ -280,12 +350,22 @@ internal static class Bootstrap
 
 	internal static void InitMinimal( string rootFolder )
 	{
-		Environment.CurrentDirectory = rootFolder;
+		InitFileSystem( rootFolder );
+		InitServices();
+	}
 
+	static void InitFileSystem( string rootFolder )
+	{
+		Environment.CurrentDirectory = rootFolder;
+		ThreadSafe.MarkMainThread();
+		EngineFileSystem.Initialize( rootFolder );
+		EngineFileSystem.InitializeConfigFolder();
+	}
+
+	static void InitServices()
+	{
 		if ( !Application.IsDedicatedServer )
 			Sandbox.Utility.Steam.InitializeClient();
-
-		ThreadSafe.MarkMainThread();
 
 		ThreadPool.SetMinThreads( Environment.ProcessorCount, Environment.ProcessorCount );
 
@@ -293,9 +373,6 @@ internal static class Bootstrap
 		AppDomain.CurrentDomain.UnhandledException += ( _, args ) => Log.Error( args.ExceptionObject as Exception, "AppDomain unhandled exception" );
 
 		//System.Net.ServicePointManager.ServerCertificateValidationCallback += ( sender, cert, chain, sslPolicyErrors ) => true;
-
-		EngineFileSystem.Initialize( Environment.CurrentDirectory );
-		EngineFileSystem.InitializeConfigFolder();
 
 		if ( !Application.IsStandalone )
 		{
@@ -314,6 +391,14 @@ internal static class Bootstrap
 			StartupTiming.FinishTimer( "Time" );
 			StartupTiming.SetValue( "package.ident", Application.GameIdent );
 			StartupTiming.Submit( true );
+			try
+			{
+				StartupProfiler.Write( StartupTiming );
+			}
+			catch ( Exception ex )
+			{
+				Log.Warning( ex, "Couldn't write startup profile" );
+			}
 		}
 
 		if ( Application.IsBenchmark )

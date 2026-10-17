@@ -6,6 +6,7 @@ partial class PublishWizard : BaseWizard
 	PublishConfig Config = new();
 
 	ResourcePublishContext context;
+	bool restartingCompile;
 
 	public override string Title => $"Upload to {Global.BackendTitle}";
 	public override string Icon => "upload_file";
@@ -14,11 +15,6 @@ partial class PublishWizard : BaseWizard
 	{
 		Project = project;
 		context = publishContext;
-
-		if ( context != null )
-		{
-			ConfigureResource();
-		}
 
 		AddSteps();
 	}
@@ -32,8 +28,14 @@ partial class PublishWizard : BaseWizard
 			CanUploadSourceFiles = context?.CanIncludeSourceFiles ?? true
 		} );
 
-		// Show license warnings for games/maps/scenes that reference cloud assets
 		var projectType = Project.Config.Type;
+
+		if ( projectType == "game" )
+		{
+			AddStep( new PlayersWizardPage() { Project = Project, PublishConfig = Config } );
+		}
+
+		// Show license warnings for games/maps/scenes that reference cloud assets
 		if ( projectType is "game" or "map" && CloudAsset.GetAssetReferences( true ).Count > 0 )
 		{
 			AddStep( new LicenseCheckWizardPage() { Project = Project, PublishConfig = Config } );
@@ -44,17 +46,61 @@ partial class PublishWizard : BaseWizard
 			AddStep( new CompileWizardPage() { Project = Project, PublishConfig = Config } );  // compile everything
 		}
 
-		AddStep( new UploadWizardPage() { Project = Project, PublishConfig = Config } );       // upload files
-		AddStep( new UploadMediaPage() { Project = Project, PublishConfig = Config } );           // upload files
-		AddStep( new FinalizeWizardPage() { Project = Project, PublishConfig = Config } );        // make live
+		// Maps go to the workshop - no files for the backend, no video, and the revision gets a default changelist
+		if ( ProjectPublisher.PublishesToWorkshop( Project ) )
+		{
+			AddStep( new WorkshopUploadPage() { Project = Project, PublishConfig = Config } );    // item and thumbnail, then files to the workshop, then make live
+		}
+		else
+		{
+			AddStep( new UploadWizardPage() { Project = Project, PublishConfig = Config } );       // upload files
+			AddStep( new UploadMediaPage() { Project = Project, PublishConfig = Config } );        // upload files
+			AddStep( new FinalizeWizardPage() { Project = Project, PublishConfig = Config } );     // make live
+		}
+
 		AddStep( new SuccessWizardPage() { Project = Project, PublishConfig = Config } );     // make live
 
 		Current = Steps.First();
 	}
 
+	/// <summary>
+	/// What a revision's called if nobody says otherwise
+	/// </summary>
+	static string DefaultChangeTitle() => $"Changes on {DateTime.UtcNow:yyyy-MM-dd}";
+
 	public override void OnSave()
 	{
 		EditorUtility.Projects.Updated( Project );
+	}
+
+	[Event( "compile.complete" )]
+	void OnCompileComplete( CompileGroup group )
+	{
+		if ( !IsValid || !group.BuildResult.Success || Config.AssemblyFiles is null ) return;
+
+		var compileStep = Steps.FindIndex( x => x is CompileWizardPage );
+		if ( compileStep < 0 || Steps.IndexOf( Current ) <= compileStep ) return;
+
+		// Only code included in this publish matters; editor-only recompiles don't invalidate it.
+		if ( Config.CompilerOutput is null || !group.BuildResult.Output.Any( output =>
+			Config.CompilerOutput.Any( published => published.Compiler.AssemblyName == output.Compiler.AssemblyName ) ) )
+			return;
+
+		if ( restartingCompile ) return;
+		_ = RestartCompileAsync( Steps[compileStep] );
+	}
+
+	async Task RestartCompileAsync( BaseWizardPage compilePage )
+	{
+		restartingCompile = true;
+		try
+		{
+			await ReturnToPageAsync( compilePage );
+		}
+		finally
+		{
+			restartingCompile = false;
+		}
 	}
 
 	public static PublishWizard Open( Project project, ResourcePublishContext publishContext = default )
@@ -62,28 +108,6 @@ partial class PublishWizard : BaseWizard
 		var w = new PublishWizard( project, publishContext );
 		w.CreateWindow( 800, 600 );
 		return w;
-	}
-
-	/// <summary>
-	/// Take ResourcePublishContext and apply any changes to Project
-	/// which we will assume is a temporary project, and we're uploading
-	/// an asset, rather than a game.
-	/// </summary>
-	void ConfigureResource()
-	{
-		if ( context.IncludeCode )
-		{
-			//
-			// We don't have a better way right now. In the future
-			// we'll allow them to define which code to include and whatever.
-			//
-			Project.RootDirectory = Project.Current.RootDirectory;
-		}
-		else
-		{
-			// Don't drag in code from whatever project happens to be open right now.
-			Project.RootDirectory = null;
-		}
 	}
 }
 

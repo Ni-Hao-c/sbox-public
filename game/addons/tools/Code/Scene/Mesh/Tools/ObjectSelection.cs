@@ -19,9 +19,12 @@ public sealed partial class ObjectSelection( MeshTool tool ) : SelectionTool( to
 	MeshComponent[] _meshes = [];
 	GameObject[] _objects = [];
 
+	protected override bool ShowSelectionBoundsDefault => true;
+
 	readonly Dictionary<MeshComponent, FaceTextureParameters[]> _startFaceParameters = [];
 
 	readonly record struct FaceTextureParameters( FaceHandle Face, Vector4 AxisU, Vector4 AxisV, Vector2 Scale );
+	readonly record struct MeshTopology( int VertexCount, int EdgeCount, int FaceCount );
 
 	public override void BuildSceneContextMenu( Menu menu, Ray ray, SceneTraceResult? trace )
 	{
@@ -30,6 +33,12 @@ public sealed partial class ObjectSelection( MeshTool tool ) : SelectionTool( to
 		bool hasMeshes = _meshes.Length > 0;
 		bool manyMeshes = _meshes.Length > 1;
 		bool hasObjects = _objects.Length > 0;
+
+		if ( hasObjects )
+		{
+			var selection = menu.AddMenu( "Selection", "select_all" );
+			AddMenuOption( selection, "Select Similar", "filter_center_focus", SelectSimilar, "mesh.select-similar", true );
+		}
 
 		bool convertible = _objects
 			.Select( x => x.GetComponent<ModelRenderer>() )
@@ -55,6 +64,9 @@ public sealed partial class ObjectSelection( MeshTool tool ) : SelectionTool( to
 			AddMenuOption( transform, "Align Down Local", "vertical_align_bottom", "mesh.align-down-local", true );
 			AddMenuOption( transform, "Align Down World", "vertical_align_bottom", "mesh.align-down-world", true );
 			AddMenuOption( transform, "Align To Closest Normal", "swap_vert", "mesh.align-to-closest-normal", true );
+			transform.AddSeparator();
+			AddMenuOption( transform, "Flip Horizontal", "swap_horiz", "mesh.flip-horizontal", true );
+			AddMenuOption( transform, "Flip Vertical", "swap_vert", "mesh.flip-vertical", true );
 		}
 
 		if ( hasObjects )
@@ -79,8 +91,7 @@ public sealed partial class ObjectSelection( MeshTool tool ) : SelectionTool( to
 				.WithComponentChanges( _meshes )
 				.Push();
 
-			DuplicateSelection();
-			OnSelectionChanged();
+			DuplicateSelectionKeepingPivot();
 		}
 		else
 		{
@@ -135,6 +146,8 @@ public sealed partial class ObjectSelection( MeshTool tool ) : SelectionTool( to
 		{
 			entry.Key.WorldPosition = entry.Value.Position + delta;
 		}
+
+		Pivot.Drag( delta );
 	}
 
 	public override void Rotate( Vector3 origin, Rotation basis, Rotation delta )
@@ -157,20 +170,25 @@ public sealed partial class ObjectSelection( MeshTool tool ) : SelectionTool( to
 	{
 		_transformKind = TextureLockTransform.Scale;
 
+		var scaleFromIndividualOrigins = !GlobalSpace && _startPoints.Count > 1;
+
 		foreach ( var entry in _startPoints )
 		{
-			var position = entry.Value.Position - origin;
-			position *= basis.Inverse;
-			position *= deltaScale;
-			position *= basis;
-			position += origin;
+			var position = entry.Value.Position;
 
-			var scale = entry.Value.Scale * deltaScale;
+			if ( !scaleFromIndividualOrigins )
+			{
+				position -= origin;
+				position *= basis.Inverse;
+				position *= deltaScale;
+				position *= basis;
+				position += origin;
+			}
 
 			entry.Key.WorldTransform = new Transform(
 				position,
 				entry.Value.Rotation,
-				scale
+				entry.Value.Scale * deltaScale
 			);
 		}
 	}
@@ -253,30 +271,35 @@ public sealed partial class ObjectSelection( MeshTool tool ) : SelectionTool( to
 
 		using var scope = SceneEditorSession.Scope();
 		var duplicate = Gizmo.IsShiftPressed;
-		using var undoScope = duplicate
+
+		var rotation = CalculateSelectionBasis();
+		var delta = Gizmo.Nudge( rotation, direction );
+
+		Pivot.BeginDrag();
+
+		using ( duplicate
 			? SceneEditorSession.Active.UndoScope( "Duplicate Object(s)" )
 				.WithGameObjectCreations()
 				.WithComponentChanges( _meshes )
 				.Push()
 			: SceneEditorSession.Active.UndoScope( "Nudge Mesh(s)" )
 				.WithGameObjectChanges( _objects, GameObjectUndoFlags.Properties )
-				.Push();
-
-		if ( duplicate )
+				.Push() )
 		{
-			DuplicateSelection();
-			OnSelectionChanged();
+			if ( duplicate )
+			{
+				DuplicateSelectionKeepingPivot();
+			}
+
+			foreach ( var go in _objects )
+			{
+				go.WorldPosition -= delta;
+			}
+
+			Pivot.Translate( -delta );
 		}
 
-		var rotation = CalculateSelectionBasis();
-		var delta = Gizmo.Nudge( rotation, direction );
-
-		Pivot -= delta;
-
-		foreach ( var go in _objects )
-		{
-			go.WorldPosition -= delta;
-		}
+		Pivot.EndDrag();
 
 		Tool?.MoveMode?.OnBegin( this );
 	}
@@ -313,7 +336,7 @@ public sealed partial class ObjectSelection( MeshTool tool ) : SelectionTool( to
 
 		try
 		{
-			Rotate( Pivot, Rotation.Identity, delta );
+			Rotate( Pivot.Position, Rotation.Identity, delta );
 			UpdateDrag();
 		}
 		finally
@@ -371,33 +394,29 @@ public sealed partial class ObjectSelection( MeshTool tool ) : SelectionTool( to
 
 		OnSelectionChanged();
 
-		var undo = SceneEditorSession.Active.UndoSystem;
-		undo.OnUndo += OnUndoRedo;
-		undo.OnRedo += OnUndoRedo;
+		SubscribeUndo();
 	}
 
 	public override void OnDisabled()
 	{
-		var undo = SceneEditorSession.Active.UndoSystem;
-		undo.OnUndo -= OnUndoRedo;
-		undo.OnRedo -= OnUndoRedo;
+		UnsubscribeUndo();
 
 		SaveCurrentSelection<GameObject>();
 	}
 
-	void OnUndoRedo( object _ )
-	{
-		OnSelectionChanged();
-	}
+	protected override void OnAfterUndoRedo() => RebuildSelectionCache();
 
 	public override void OnUpdate()
 	{
 		GlobalSpace = Gizmo.Settings.GlobalSpace;
 
+		Pivot.Update();
 		UpdateMoveMode();
 		UpdateHovered();
 		UpdateSelectionMode();
-		DrawBounds();
+
+		if ( ShowSelectionBounds )
+			DrawBounds();
 	}
 
 	void UpdateMoveMode()
@@ -424,6 +443,28 @@ public sealed partial class ObjectSelection( MeshTool tool ) : SelectionTool( to
 
 	public override void OnSelectionChanged()
 	{
+		// Undo restores the selection, reselecting the same objects. That isn't a change,
+		// so the pivot stays where it is. Ids are used because a restore rebuilds the objects.
+		var previous = _objects.Select( x => x?.Id ).ToHashSet();
+
+		RebuildSelectionCache();
+
+		if ( !previous.SetEquals( _objects.Select( x => x?.Id ) ) )
+			Pivot.Reset();
+	}
+
+	/// <summary>
+	/// Duplicating swaps the selection for copies sat in the same place. That isn't a selection
+	/// change as far as the pivot is concerned, so refresh the cache without resetting it.
+	/// </summary>
+	void DuplicateSelectionKeepingPivot()
+	{
+		DuplicateSelection();
+		RebuildSelectionCache();
+	}
+
+	void RebuildSelectionCache()
+	{
 		_objects = Selection.OfType<GameObject>().ToArray();
 		_meshes = Selection.OfType<GameObject>()
 			.Select( x => x.GetComponent<MeshComponent>() )
@@ -440,13 +481,64 @@ public sealed partial class ObjectSelection( MeshTool tool ) : SelectionTool( to
 				_transformVertices[v] = mesh.WorldTransform.PointToWorld( mesh.Mesh.GetVertexPosition( vertex ) );
 			}
 		}
+	}
 
-		ClearPivot();
+	public void SelectSimilar()
+	{
+		var meshTopologies = _meshes
+			.Where( x => x.IsValid() && x.Mesh is not null )
+			.Select( GetTopology )
+			.ToHashSet();
+
+		var models = _objects
+			.Select( x => x.GetComponent<ModelRenderer>() )
+			.Where( x => x.IsValid() && x.Model.IsValid() )
+			.Select( x => x.Model )
+			.ToHashSet();
+
+		if ( meshTopologies.Count == 0 && models.Count == 0 )
+			return;
+
+		using var scope = SceneEditorSession.Scope();
+		using var undoScope = SceneEditorSession.Active
+			.UndoScope( "Select Similar Objects" )
+			.Push();
+
+		foreach ( var go in Scene.GetAllObjects( true ) )
+		{
+			if ( go == Scene || go.Tags.Has( "hidden" ) )
+				continue;
+
+			bool matchingMesh = go.GetComponent<MeshComponent>() is { } meshComponent
+				&& meshComponent.IsValid()
+				&& meshComponent.Mesh is not null
+				&& meshTopologies.Contains( GetTopology( meshComponent ) );
+
+			bool matchingModel = go.GetComponent<ModelRenderer>() is { } modelRenderer
+				&& modelRenderer.IsValid()
+				&& modelRenderer.Model.IsValid()
+				&& models.Contains( modelRenderer.Model );
+
+			if ( matchingMesh || matchingModel )
+				Selection.Add( go );
+		}
+	}
+
+	private static MeshTopology GetTopology( MeshComponent component )
+	{
+		var mesh = component.Mesh;
+
+		return new MeshTopology(
+			mesh.VertexHandles.Count(),
+			mesh.HalfEdgeHandles.Count() / 2,
+			mesh.FaceHandles.Count()
+		);
 	}
 
 	void UpdateSelectionMode()
 	{
 		if ( !Gizmo.HasMouseFocus ) return;
+		if ( !IsAllowedToSelect ) return;
 
 		if ( Gizmo.WasLeftMouseReleased && !Gizmo.Pressed.Any && !IsBoxSelecting )
 		{
@@ -460,6 +552,8 @@ public sealed partial class ObjectSelection( MeshTool tool ) : SelectionTool( to
 	void UpdateHovered()
 	{
 		if ( IsBoxSelecting ) return;
+
+		if ( !IsAllowedToSelect ) return;
 
 		var tr = MeshTrace.Run();
 
@@ -512,76 +606,6 @@ public sealed partial class ObjectSelection( MeshTool tool ) : SelectionTool( to
 	}
 
 	public override bool HasBoxSelectionMode() => true;
-
-	static IReadOnlyList<Vector3> GetPivots( BBox box )
-	{
-		var mins = box.Mins;
-		var maxs = box.Maxs;
-		var center = box.Center;
-
-		return
-		[
-			center,
-
-			new Vector3( mins.x, mins.y, mins.z ),
-			new Vector3( maxs.x, mins.y, mins.z ),
-			new Vector3( mins.x, maxs.y, mins.z ),
-			new Vector3( maxs.x, maxs.y, mins.z ),
-
-			new Vector3( mins.x, mins.y, maxs.z ),
-			new Vector3( maxs.x, mins.y, maxs.z ),
-			new Vector3( mins.x, maxs.y, maxs.z ),
-			new Vector3( maxs.x, maxs.y, maxs.z ),
-
-			new Vector3( center.x, center.y, mins.z ),
-			new Vector3( center.x, center.y, maxs.z ),
-		];
-	}
-
-	int _pivotIndex = 0;
-
-	void StepPivot( int direction )
-	{
-		var box = CalculateSelectionBounds();
-		if ( box.Size.Length <= 0 ) return;
-
-		var pivots = GetPivots( box );
-
-		_pivotIndex = (_pivotIndex + direction + pivots.Count) % pivots.Count;
-		Pivot = pivots[_pivotIndex];
-
-		Tool?.MoveMode?.OnBegin( this );
-	}
-
-	public void PreviousPivot() => StepPivot( -1 );
-	public void NextPivot() => StepPivot( 1 );
-
-	public void ClearPivot()
-	{
-		Pivot = CalculateSelectionOrigin();
-		_pivotIndex = 0;
-
-		Tool?.MoveMode?.OnBegin( this );
-	}
-
-	public void ZeroPivot()
-	{
-		Pivot = default;
-		_pivotIndex = 0;
-
-		Tool?.MoveMode?.OnBegin( this );
-	}
-
-	public void CenterPivot()
-	{
-		var box = CalculateSelectionBounds();
-		if ( box.Size.Length <= 0 ) return;
-
-		_pivotIndex = 0;
-		Pivot = box.Center;
-
-		Tool?.MoveMode?.OnBegin( this );
-	}
 
 	public override void AlignDown( bool useLocalDown )
 	{

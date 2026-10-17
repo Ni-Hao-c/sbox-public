@@ -20,7 +20,7 @@
                     <GamePackageSortOrder Value:bind="@filterOrder"></GamePackageSortOrder>
                 </div>
 
-                <TextEntry @ref="SearchEntry" placeholder="Search games..." OnTextEdited=@OnSearchEdited></TextEntry>
+                <TextEntry @ref="SearchEntry" placeholder="#menu.home.search_games" OnTextEdited=@OnSearchEdited></TextEntry>
 
                 @if (Result?.Properties is not null && Result.Properties.Length > 0)
                 {
@@ -34,7 +34,7 @@
                 {
                     foreach (var facet in Result.Facets)
                     {
-                        <div class="flex-column flex-gap-16">
+                        <div class="flex-column flex-gap-8">
                             <h2><WithIcon Icon="@facet.Entries.FirstOrDefault()?.Icon" Text="@facet.Title"></WithIcon></h2>
                             <PackageCategoryFilter Result=@Result Selected="@SelectedCategory" Facet="@facet"></PackageCategoryFilter>
                         </div>
@@ -42,7 +42,7 @@
                 }
 
                 <div class="flex-column flex-gap-16">
-                    <h2><WithIcon Icon="tag" Text="Tags"></WithIcon></h2>
+                    <h2><WithIcon Icon="tag" Text="#menu.home.tags"></WithIcon></h2>
                     <PackageTagFilter Result=@Result Selected="@SelectedTags"></PackageTagFilter>
                 </div>
 
@@ -51,7 +51,7 @@
         </Left>
 
         <Body>
-            <PackageList @ref=PackageList ShowFilters="@false" Query=@($"type:game sort:{filterOrder} {Filter} {GetQuery()}") OnSelected=@Selected OnMenu=@Menu Take=@(200)></PackageList>
+            <MenuProject.UI.PackageList @ref=PackageList Surface="search" ShowFilters="@false" Query=@($"type:game sort:{filterOrder} {Filter} {GetQuery()}") OnSelected=@Selected OnMenu=@Menu Take=@(200)></MenuProject.UI.PackageList>
         </Body>
     </Page>
 </root>
@@ -96,12 +96,12 @@
     TextEntry SearchEntry = default;
     string debouncedSearch = "";
     bool searchPending = false;
-    TimeSince timeSinceSearchEdited;
+    RealTimeSince timeSinceSearchEdited;
 
     List<string> SelectedTags = new();
     Dictionary<string, string> SelectedCategory = new();
 
-    PackageList PackageList = default;
+    MenuProject.UI.PackageList PackageList = default;
 
     Package.FindResult Result => PackageList?.Result;
 

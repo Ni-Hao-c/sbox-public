@@ -1,7 +1,9 @@
 using NativeEngine;
 using Sandbox.Audio;
 using Sandbox.Engine;
+using Sandbox.Engine.Settings;
 using Sandbox.Internal;
+using Sandbox.Modals;
 using System;
 
 namespace Sandbox;
@@ -16,6 +18,12 @@ internal class ToolsDll : IToolsDll
 	{
 		Global.Assembly = GetType().Assembly;
 	}
+
+	/// <inheritdoc />
+	public void SetRelativeMouseOverride( bool relative ) => g_pToolFramework2.SetOverrideCursor( relative );
+
+	/// <inheritdoc />
+	public bool IsApplicationActive => Native.QApp.IsApplicationActive();
 
 	public void Bootstrap()
 	{
@@ -107,11 +115,14 @@ internal class ToolsDll : IToolsDll
 		//
 		// Compile our base projects first
 		//
-		if ( !await Project.CompileAsync() )
+		using ( var _ = Sandbox.Engine.Bootstrap.StartupTiming?.ScopeTimer( "Tools - Compile Base Projects" ) )
 		{
-			// If we can't compile base projects, bail - everything will be fucked
-			// Doesn't need to be descriptive because it's either we've fucked it, or the user has edited base files and fucked it.
-			throw new System.Exception( "Base projects failed to compile. Can't continue. (Check log file)" );
+			if ( !await Project.CompileAsync() )
+			{
+				// If we can't compile base projects, bail - everything will be fucked
+				// Doesn't need to be descriptive because it's either we've fucked it, or the user has edited base files and fucked it.
+				throw new System.Exception( "Base projects failed to compile. Can't continue. (Check log file)" );
+			}
 		}
 
 		// Rebuild content path now because some projects are added during bootstrap
@@ -194,8 +205,6 @@ internal class ToolsDll : IToolsDll
 		// Add all game addons to be compiled in tools mode, making them accessible for Hammer, Asset Editor, etc.
 		//
 		ManagedTools.AssembliesDirty = true;
-
-		Editor.Mcp.McpServer.Start();
 	}
 
 	/// <summary>
@@ -250,7 +259,7 @@ internal class ToolsDll : IToolsDll
 
 	public void OnFunctionKey( ButtonCode key, KeyboardModifiers modifiers )
 	{
-		var keys = NativeEngine.InputSystem.CodeToString( key ).ToUpperInvariant();
+		var keys = Sandbox.Engine.KeyTranslation.CodeToString( key ).ToUpperInvariant();
 		if ( modifiers.HasFlag( KeyboardModifiers.Shift ) ) keys = "SHIFT+" + keys;
 		if ( modifiers.HasFlag( KeyboardModifiers.Alt ) ) keys = "ALT+" + keys;
 		if ( modifiers.HasFlag( KeyboardModifiers.Ctrl ) ) keys = "CTRL+" + keys;
@@ -265,7 +274,7 @@ internal class ToolsDll : IToolsDll
 	public void Spin()
 	{
 		BindSystem?.Tick();
-		g_pToolFramework2.Spin();
+		Editor.Application.Spin();
 		EngineLoop.RunAsyncTasks();
 
 		NativeEngine.EngineGlobal.ToolsStallMonitor_IndicateActivity();
@@ -282,13 +291,24 @@ internal class ToolsDll : IToolsDll
 			Time.Update( scene.TimeNow, scene.TimeDelta );
 		}
 
-		// Escape was pressed in game and wasn't swallowed
-		// so lets change focus from the game window to the main editor
-		// window, which is going to free the mouse cursor from being captured
+		// Shift+Escape toggles the platform menu without releasing game focus.
+		if ( Game.IsPlaying && InputRouter.EditorPauseMenuWasPressed )
+		{
+			InputRouter.EditorPauseMenuWasPressed = false;
+			Input.EscapePressed = false;
+
+			using var scope = GlobalContext.MenuScope();
+			IModalSystem.Current?.PauseMenu();
+
+			return;
+		}
+
+		// Escape was pressed in game and wasn't swallowed. Return focus to the editor
+		// to release the captured mouse.
 		if ( Game.IsPlaying && Input.EscapePressed )
 		{
-			EditorWindow.Focus();
 			Input.EscapePressed = false;
+			EditorWindow.Focus();
 		}
 	}
 
@@ -308,6 +328,15 @@ internal class ToolsDll : IToolsDll
 	/// </summary>
 	[Obsolete]
 	public bool IsGameViewVisible => false;
+	public GameSurface GameSurface
+	{
+		get
+		{
+			var playWidget = GameMode.PlayWidget;
+			var window = playWidget is not null ? GameMode.PlayWindow : WindowInput.GetEditorMainWindow();
+			return new( window, playWidget?.SwapChain ?? default, RenderSettings.Instance.VSync );
+		}
+	}
 
 	public async Task OnInitializeHost()
 	{

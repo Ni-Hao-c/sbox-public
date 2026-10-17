@@ -88,6 +88,26 @@ sealed public partial class Rigidbody : Component, Component.ExecuteInEditor, IG
 	}
 
 	/// <summary>
+	/// Multiplier for the calculated rotational inertia.
+	/// </summary>
+	[Advanced, Property, Group( "Mass" )]
+	public float InertiaScale
+	{
+		get;
+		set
+		{
+			if ( !float.IsFinite( value ) || value <= 0 )
+				throw new ArgumentOutOfRangeException( nameof( value ) );
+			if ( field == value )
+				return;
+
+			field = value;
+			if ( _body.IsValid() )
+				_body.ScaleInertia( field );
+		}
+	} = 1.0f;
+
+	/// <summary>
 	/// Override mass for this body, only when value is more than zero
 	/// </summary>
 	[Property, Title( "Mass Override" ), Group( "Mass" )]
@@ -237,7 +257,9 @@ sealed public partial class Rigidbody : Component, Component.ExecuteInEditor, IG
 		{
 			if ( _body.IsValid() && !IsProxy )
 			{
+				// Leave _lastVelocity as the last networked value, so PrePhysicsStep sees this change and syncs it
 				_body.Velocity = value;
+				return;
 			}
 
 			_lastVelocity = value;
@@ -252,6 +274,7 @@ sealed public partial class Rigidbody : Component, Component.ExecuteInEditor, IG
 			if ( _body.IsValid() && !IsProxy )
 			{
 				_body.AngularVelocity = value;
+				return;
 			}
 
 			_lastAngularVelocity = value;
@@ -491,7 +514,7 @@ sealed public partial class Rigidbody : Component, Component.ExecuteInEditor, IG
 	{
 		if ( _body.IsValid() ) return;
 
-		_body = new PhysicsBody( Scene.PhysicsWorld );
+		_body = Scene.PhysicsWorld?.CreateBody();
 
 		_body.Component = this;
 		_body.Transform = WorldTransform;
@@ -579,6 +602,10 @@ sealed public partial class Rigidbody : Component, Component.ExecuteInEditor, IG
 
 		var tx = WorldTransform;
 		var target = _body.Transform.WithScale( tx.Scale );
+
+		if ( Scene.Is2D )
+			target.Position = target.Position.WithZ( tx.Position.z );
+
 		if ( target == tx ) return;
 
 		isUpdatingFromPhysics = true;
@@ -803,6 +830,7 @@ sealed public partial class Rigidbody : Component, Component.ExecuteInEditor, IG
 			_body.GravityEnabled = Gravity;
 			_body.GravityScale = GravityScale;
 			_body.Mass = MassOverride;
+			_body.ScaleInertia( InertiaScale );
 			_body.OverrideMassCenter = OverrideMassCenter;
 			_body.LocalMassCenter = MassCenterOverride;
 		}
@@ -820,7 +848,17 @@ sealed public partial class Rigidbody : Component, Component.ExecuteInEditor, IG
 		{
 			Gizmo.Draw.IgnoreDepth = true;
 			Gizmo.Draw.Color = Color.White;
-			Gizmo.Draw.LineSphere( _body.MotionEnabled ? _body.LocalMassCenter : MassCenterOverride, 1, 4 );
+
+			var center = _body.MotionEnabled ? _body.LocalMassCenter : MassCenterOverride;
+
+			if ( Scene.Is2D )
+			{
+				Gizmo.Draw.LineCircle( center, Vector3.Up, 1 );
+			}
+			else
+			{
+				Gizmo.Draw.LineSphere( center, 1, 4 );
+			}
 		}
 	}
 	void IGameObjectNetworkEvents.StartControl()

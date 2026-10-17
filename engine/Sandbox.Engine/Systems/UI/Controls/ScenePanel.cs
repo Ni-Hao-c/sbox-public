@@ -96,7 +96,7 @@ namespace Sandbox.UI
 			if ( !RenderScene.IsValid() )
 				return;
 
-			using ( RenderScene.Push() )
+			using ( RenderScene.PushScope() )
 			{
 				RenderScene.GameTick( RealTime.Delta );
 			}
@@ -117,23 +117,61 @@ namespace Sandbox.UI
 			if ( oldRt != RenderTexture )
 			{
 				shouldRender = true;
-				IsRenderDirty = true;
 			}
 
 			if ( shouldRender )
 			{
 				// reset
 				shouldRenderNextFrame = false;
+				QueueRender();
+			}
+		}
 
-				if ( Camera.World.IsValid() )
-				{
-					Camera.RenderToTexture( RenderTexture, null, default );
-				}
-				else if ( RenderScene.IsValid() && RenderScene.Camera.IsValid() )
-				{
-					RenderScene.PreCameraRender(); // TODO WTF?... terrible hack to get around Graphics.IsActive guard in RenderToTexture
-					RenderScene.Camera.RenderToTexture( RenderTexture );
-				}
+		// Panels wanting a render this frame. Rendered together during client output so
+		// they join the frame's view bracket instead of each blocking mid UI tick.
+		static readonly List<ScenePanel> _pendingRenders = new();
+		bool _renderQueued;
+
+		void QueueRender()
+		{
+			if ( _renderQueued ) return;
+
+			_renderQueued = true;
+			_pendingRenders.Add( this );
+		}
+
+		/// <summary>
+		/// Render every scene panel that queued a render this frame. Called once per frame
+		/// during client output.
+		/// </summary>
+		internal static void RenderPending()
+		{
+			if ( _pendingRenders.Count == 0 )
+				return;
+
+			foreach ( var panel in _pendingRenders )
+			{
+				panel._renderQueued = false;
+
+				if ( !panel.IsValid() ) continue;
+				if ( panel.RenderTexture == null ) continue;
+
+				panel.RenderNow();
+			}
+
+			_pendingRenders.Clear();
+		}
+
+		void RenderNow()
+		{
+			if ( Camera.World.IsValid() )
+			{
+				Camera.RenderToTexture( RenderTexture, null, default );
+			}
+			else if ( RenderScene.IsValid() && RenderScene.Camera.IsValid() )
+			{
+				RenderScene.PreCameraRender(); // TODO WTF?... terrible hack to get around Graphics.IsActive guard in RenderToTexture
+				RenderScene.Camera.RenderToTexture( RenderTexture );
 			}
 		}
 
@@ -161,12 +199,12 @@ namespace Sandbox.UI
 			base.Delete( immediate );
 		}
 
-		public override void OnDraw()
+		public override void OnDraw( Painter painter )
 		{
 			if ( Box.RectInner.Size.x <= 0 ) return;
 			if ( Box.RectInner.Size.y <= 0 ) return;
 
-			DrawBackgroundTexture( RenderTexture, Length.Contain );
+			DrawTexture( painter, RenderTexture, Length.Contain );
 		}
 
 		public override void SetProperty( string name, string value )

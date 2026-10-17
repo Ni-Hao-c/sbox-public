@@ -82,8 +82,14 @@ internal sealed class RemotePackage : Package
 		}
 	}
 
+	/// <summary>
+	/// What the backend last told us about this package, kept so it can be installed offline
+	/// </summary>
+	internal PackageDto Dto { get; private set; }
+
 	public void UpdateFromDto( PackageDto p )
 	{
+		Dto = p;
 		Org = Package.Organization.FromDto( p.Org );
 
 		Ident = p.Ident;
@@ -93,7 +99,7 @@ internal sealed class RemotePackage : Package
 		Thumb = p.Thumb;
 		ThumbWide = p.ThumbWide ?? p.Thumb;
 		ThumbTall = p.ThumbTall ?? p.Thumb;
-		VideoThumb = VideoThumb ?? p.Screenshots?.Where( x => x.IsVideo ).Select( x => x.Thumb ).FirstOrDefault();
+		VideoThumb = VideoThumb ?? p.Screenshots?.Where( x => x.IsVideo ).Select( x => x.Url ).FirstOrDefault();
 		Updated = p.Updated;
 		Created = p.Created;
 		Tags = p.Tags;

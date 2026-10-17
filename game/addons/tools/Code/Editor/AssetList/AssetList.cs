@@ -119,16 +119,11 @@ public partial class AssetList : ListView, AssetSystem.IEventListener
 				// Add the other selected assets too..
 				foreach ( var item in SelectedItems.OfType<AssetEntry>() )
 				{
-					if ( ae == item ) continue;
-					drag.Data.Text += "\n" + (item.Asset?.RelativePath ?? item.FileInfo.FullName);
-				}
+					if ( string.Equals( ae.AbsolutePath, item.AbsolutePath, StringComparison.OrdinalIgnoreCase ) )
+						continue;
 
-				drag.Data.Object = SelectedItems.OfType<AssetEntry>()
-					.Select( x => x.Asset )
-					.Prepend( asset )
-					.Where( x => x is not null )
-					.Distinct()
-					.ToArray();
+					drag.Data.Text += "\n" + item.FileInfo.FullName;
+				}
 
 				drag.Execute();
 
@@ -661,7 +656,7 @@ public partial class AssetList : ListView, AssetSystem.IEventListener
 	{
 		Action<string> CreateNew = ( string s ) =>
 		{
-			File.WriteAllText( s, File.ReadAllText( asset.GetSourceFile( true ) ) );
+			EditorUtility.CopyAsset( asset, s, true );
 
 			var copy = AssetSystem.RegisterFile( s );
 			MainAssetBrowser.Instance?.Local.UpdateAssetList();

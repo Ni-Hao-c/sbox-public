@@ -8,7 +8,12 @@
 #include "modeldoc_lib/modeldoc_physicsmeshfromrender.h"
 #include "modeldoc_lib/modeldoc_materialgroup.h"
 #include "modeldoc_lib/modeldoc_renderprimitive_mesh.h"
+#include "modeldoc_lib/modeldoc_lodgroup.h"
+#include "modeldoc_lib/modeldoc_physicsmeshfile.h"
+#include "modeldoc_lib/modeldoc_physicshullfile.h"
+#include "modeldoc_lib/modeldoc_singletons.h"
 #include "modeldoc_utils/imodeldocutils.h"
+#include "tier0/fmtstr.h"
 
 native class CModelDocEditorApp as NativeModelDoc.CModelDocEditorApp
 {
@@ -171,6 +176,13 @@ native class CModelMesh
 	}
 }
 
+native class CModelDocDefaultMaterialGroup
+{
+	int AddRemap( string pFrom, string pTo );
+	int FindReplacementIndex( string pFromMaterial );
+	void SetHasGlobalDefault( bool bValue );
+}
+
 native class CModelDoc
 {
 	void DeleteThis(); [delete]
@@ -212,6 +224,118 @@ native class CModelDoc
 		for ( CModelDocSkeletonFile *pNode : skeletonFiles )
 			pNode->SetImportScale( flScale );
 	}
+
+	/// Add render mesh from external model file
+	inline void AddRenderMeshFile( string pFilename, int nLod )
+	{
+		CModelDocRenderMeshList *pDstRenderMeshList = self->FindSingletonNode< CModelDocRenderMeshList >();
+		CModelDocRenderMeshFile *pRenderMeshFile = self->CreateNode< CModelDocRenderMeshFile >( nullptr, pDstRenderMeshList, MODELDOC_CREATE_NODE_DEFAULT );
+		pRenderMeshFile->SetFilename( pFilename );
+
+		if ( nLod < 0 )
+			return;
+
+		pRenderMeshFile->SetName( CFmtStr( "LOD%i", nLod ) );
+
+		CModelDocLODGroupList *pDstLodGroupList = self->FindSingletonNode< CModelDocLODGroupList >();
+		CModelDocLODGroup *pLodGroup = self->CreateNode< CModelDocLODGroup >( nullptr, pDstLodGroupList, MODELDOC_CREATE_NODE_DEFAULT );
+		pLodGroup->SetSwitchThreshold( nLod * 50.0f );
+		pLodGroup->AddMesh( CFmtStr( "LOD%i", nLod ) );
+	}
+
+	/// Add physics collider mesh from external model file
+	inline void AddPhysicsMeshFile( string pFilename )
+	{
+		CModelDocPhysicsShapeList *pDstPhysicsShapeList = self->FindSingletonNode< CModelDocPhysicsShapeList >();
+		CModelDocPhysicsMeshFile *pPhysicsMeshFile = self->CreateNode< CModelDocPhysicsMeshFile >( nullptr, pDstPhysicsShapeList, MODELDOC_CREATE_NODE_DEFAULT );
+		pPhysicsMeshFile->SetFilename( pFilename );
+	}
+
+	/// Add convex hull physics collider from external model file
+	inline void AddPhysicsHullFile( string pFilename )
+	{
+		CModelDocPhysicsShapeList *pDstPhysicsShapeList = self->FindSingletonNode< CModelDocPhysicsShapeList >();
+		CModelDocPhysicsHullFile *pPhysicsHullFile = self->CreateNode< CModelDocPhysicsHullFile >( nullptr, pDstPhysicsShapeList, MODELDOC_CREATE_NODE_DEFAULT );
+		pPhysicsHullFile->SetFilename( pFilename );
+	}
+
+	/// Add a default material group
+	inline void AddDefaultMaterialGroup( string pGlobalMaterial )
+	{
+		CModelDocNode *pParentNode = self->FindSingletonNode< CModelDocMaterialGroupList >();
+		CModelDocDefaultMaterialGroup *pMaterialGroup = self->CreateNode< CModelDocDefaultMaterialGroup >( "", pParentNode, MODELDOC_CREATE_NODE_DEFAULT );
+
+		if ( pMaterialGroup )
+		{
+			const char *pMaterial = ( pGlobalMaterial && *pGlobalMaterial ) ? pGlobalMaterial : "materials/default.vmat";
+			pMaterialGroup->SetHasGlobalDefault( true );
+			pMaterialGroup->SetGlobalDefaultMaterial( pMaterial );
+		}
+	}
+
+	/// Get the document's DefaultMaterialGroup, create an empty one if it doesn't have one yet.
+	/// Returns null only if the document has no MaterialGroupList to parent it to
+	inline CModelDocDefaultMaterialGroup FindOrCreateDefaultMaterialGroup()
+	{
+		CModelDocMaterialGroupList *pMaterialGroupList = self->FindSingletonNode< CModelDocMaterialGroupList >();
+		if ( !pMaterialGroupList )
+			return (CModelDocDefaultMaterialGroup *)nullptr;
+
+		CUtlVector< CModelDocDefaultMaterialGroup * > defaultMaterialGroups;
+		pMaterialGroupList->GetChildren( &defaultMaterialGroups, MDGN_RECURSE_FULL, MDGN_FLAG_DEFAULT );
+		if ( !defaultMaterialGroups.IsEmpty() )
+			return defaultMaterialGroups[ 0 ];
+
+		return self->CreateNode< CModelDocDefaultMaterialGroup >( "", pMaterialGroupList, MODELDOC_CREATE_NODE_DEFAULT );
+	}
+
+	/// Get the material slot names declared by this document's input meshes
+	inline string GetInputMaterials()
+	{
+		static thread_local CUtlString result;
+		result = "";
+
+		CUtlVector< CModelDocRenderMeshFile * > renderMeshFiles;
+		self->FindNodesByType( &renderMeshFiles );
+
+		IModelDocLoaderUtils *pLoaderUtils = g_pModelDocUtils->LoaderUtils();
+
+		CUtlVector< CUtlString > materials;
+		for ( CModelDocRenderMeshFile *pRenderMeshFile : renderMeshFiles )
+		{
+			CModelMesh tempMesh;
+			CModelDoc tempDoc;
+
+			if ( !pRenderMeshFile->LoadDataIntoMesh( pLoaderUtils, nullptr, &tempMesh, &tempDoc ) )
+				continue;
+
+			for ( int iFaceGroup = 0; iFaceGroup < tempMesh.GetNumFaceGroups(); ++iFaceGroup )
+			{
+				if ( !tempMesh.HasFacesInFaceGroup( iFaceGroup ) )
+					continue;
+
+				const char *pFaceGroupMaterial = tempMesh.GetFaceGroupMaterial( iFaceGroup );
+				if ( !pFaceGroupMaterial || !*pFaceGroupMaterial )
+					continue;
+
+				if ( materials.HasElement( pFaceGroupMaterial ) )
+					continue;
+
+				materials.AddToTail( pFaceGroupMaterial );
+			}
+		}
+
+		for ( int i = 0; i < materials.Count(); ++i )
+		{
+			if ( i > 0 )
+				result += "\n";
+
+			result += materials[ i ];
+		}
+
+		return result;
+	}
+
 }
 
 native static accessor g_pModelDocUtils

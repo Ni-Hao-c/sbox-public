@@ -115,6 +115,7 @@ public sealed partial class PolygonMesh : IJsonConvert
 			TextureOffset[pair.Value] = sourceMesh.TextureOffset[pair.Key];
 
 			SetFaceMaterial( pair.Value, sourceMesh.GetFaceMaterial( pair.Key ) );
+			SetFaceHidden( pair.Value, sourceMesh.IsFaceHidden( pair.Key ) );
 		}
 
 		IsDirty = true;
@@ -135,13 +136,26 @@ public sealed partial class PolygonMesh : IJsonConvert
 
 	internal IEnumerable<Vector3> GetFaceVertexNormals()
 	{
+		_faceNormalCache.Clear();
+
 		foreach ( var hFace in Topology.FaceHandles )
 		{
-			ComputeFaceNormal( hFace, out var normal );
-			var vertexCount = Topology.ComputeNumEdgesInFace( hFace );
-			for ( var i = 0; i < vertexCount; ++i )
-				yield return normal;
+			PlaneEquation( hFace, out var n, out _ );
+			_faceNormalCache[hFace] = n;
 		}
+
+		var normals = new List<Vector3>();
+
+		foreach ( var hFace in Topology.FaceHandles )
+		{
+			GetFaceVerticesConnectedToFace( hFace, out var hEdges );
+			foreach ( var hEdge in hEdges )
+				normals.Add( ComputeFaceVertexNormal( hEdge ) );
+		}
+
+		_faceNormalCache.Clear();
+
+		return normals;
 	}
 
 	internal IEnumerable<Vector2> GetFaceVertexTexCoords()
@@ -445,6 +459,63 @@ public sealed partial class PolygonMesh : IJsonConvert
 	}
 
 	/// <summary>
+	/// Is every face using this edge hidden?
+	/// </summary>
+	public bool IsEdgeHidden( HalfEdgeHandle hEdge )
+	{
+		if ( _hiddenFaces.Count == 0 )
+			return false;
+
+		GetFacesConnectedToEdge( hEdge, out var hFaceA, out var hFaceB );
+
+		var hasFaceA = hFaceA.IsValid;
+		var hasFaceB = hFaceB.IsValid;
+
+		if ( hasFaceA && !IsFaceHidden( hFaceA ) )
+			return false;
+
+		if ( hasFaceB && !IsFaceHidden( hFaceB ) )
+			return false;
+
+		// An edge with no face at all was never drawn by a face being hidden
+		return hasFaceA || hasFaceB;
+	}
+
+	/// <summary>
+	/// Is every face using this vertex hidden?
+	/// </summary>
+	public bool IsVertexHidden( VertexHandle hVertex )
+	{
+		if ( _hiddenFaces.Count == 0 )
+			return false;
+
+		var hFirstEdge = hVertex.Edge;
+		if ( !hFirstEdge.IsValid )
+			return false;
+
+		var hEdge = hFirstEdge;
+		var hasFace = false;
+
+		do
+		{
+			var hFace = hEdge.Face;
+			if ( hFace.IsValid )
+			{
+				if ( !IsFaceHidden( hFace ) )
+					return false;
+
+				hasFace = true;
+			}
+
+			hEdge = hEdge.OppositeEdge.NextEdge;
+		}
+		while ( hEdge != hFirstEdge );
+
+		// A loose vertex was never drawn by a face being hidden
+		return hasFace;
+	}
+
+	/// <summary>
 	/// Get the smoothing of this edge
 	/// </summary>
 	public EdgeSmoothMode GetEdgeSmoothing( HalfEdgeHandle hEdge )
@@ -686,11 +757,39 @@ public sealed partial class PolygonMesh : IJsonConvert
 		}
 	}
 
+	private void CopyEdgeFlagsToFace( HalfEdgeHandle sourceEdge, FaceHandle face )
+	{
+		var flags = EdgeFlags[Topology.GetFullEdgeForHalfEdge( sourceEdge )];
+		Topology.GetFullEdgesConnectedToFace( face, out var edges );
+
+		foreach ( var edge in edges )
+			EdgeFlags[edge] = flags;
+	}
+
+	private bool ExtendEdges( IReadOnlyList<HalfEdgeHandle> edges, out List<HalfEdgeHandle> newEdges, out List<HalfEdgeHandle> originalEdges )
+	{
+		if ( !Topology.ExtendEdges( edges, edges.Count, out newEdges, out originalEdges, out _, out _ ) )
+			return false;
+
+		for ( int i = 0; i < newEdges.Count; ++i )
+		{
+			var face = FindFaceConnectingEdges( originalEdges[i], newEdges[i] );
+			var sourceFace = Topology.GetOppositeFaceConnectedToFullEdge( originalEdges[i], face );
+
+			if ( sourceFace.IsValid )
+				SetFaceMaterialIndex( face, GetFaceMaterialIndex( sourceFace ) );
+
+			CopyEdgeFlagsToFace( originalEdges[i], face );
+		}
+
+		return true;
+	}
+
 	public bool ExtendEdges( IReadOnlyList<HalfEdgeHandle> edges, float amount, out List<HalfEdgeHandle> newEdges, out List<FaceHandle> newFaces )
 	{
 		newFaces = new();
 
-		if ( !Topology.ExtendEdges( edges, edges.Count, out newEdges, out var originalEdges, out _, out _ ) )
+		if ( !ExtendEdges( edges, out newEdges, out var originalEdges ) )
 			return false;
 
 		if ( originalEdges.Count == newEdges.Count )
@@ -1692,6 +1791,11 @@ public sealed partial class PolygonMesh : IJsonConvert
 	{
 		hOutNewFace = FaceHandle.Invalid;
 
+		Topology.GetFacesConnectedToFullEdge( hEdgeA, out var hFaceA0, out var hFaceA1 );
+		var hSourceFace = hFaceA0.IsValid ? hFaceA0 : hFaceA1;
+		if ( !hSourceFace.IsValid )
+			return false;
+
 		if ( !Topology.BridgeEdges( hEdgeA, hEdgeB, out var hNewFace ) )
 		{
 			var hSharedVertex = Topology.FindVertexConnectingFullEdges( hEdgeA, hEdgeB );
@@ -1717,10 +1821,8 @@ public sealed partial class PolygonMesh : IJsonConvert
 		if ( !hNewFace.IsValid )
 			return false;
 
-		Topology.GetFacesConnectedToFullEdge( hEdgeA, out var hFaceA0, out var hFaceA1 );
-		var hSourceFace = hFaceA0.IsValid ? hFaceA0 : hFaceA1;
-		if ( hSourceFace.IsValid )
-			SetFaceMaterialIndex( hNewFace, GetFaceMaterialIndex( hSourceFace ) );
+		SetFaceMaterialIndex( hNewFace, GetFaceMaterialIndex( hSourceFace ) );
+		CopyEdgeFlagsToFace( hEdgeA, hNewFace );
 
 		TextureAlignToGrid( Transform, hNewFace );
 
@@ -1789,7 +1891,6 @@ public sealed partial class PolygonMesh : IJsonConvert
 
 		BuildBridgeEdgeSets( fromEdges, toEdges, parameters, edgeSets );
 		GenerateBridgeTopology( edgeSets );
-		AssignBridgeMaterials( edgeSets );
 		AssignBridgeInterpolatedPositions( edgeSets );
 
 		if ( parameters.UVMode == BridgeUVMode.Auto )
@@ -1823,26 +1924,6 @@ public sealed partial class PolygonMesh : IJsonConvert
 		}
 
 		return true;
-	}
-
-	void AssignBridgeMaterials( List<BridgeEdgeSet> edgeSets )
-	{
-		var faces = new List<FaceHandle>( 128 );
-
-		foreach ( var edgeSet in edgeSets )
-		{
-			var sourceFace = edgeSet.FromFace != FaceHandle.Invalid ? edgeSet.FromFace : edgeSet.ToFace;
-			if ( sourceFace == FaceHandle.Invalid )
-				continue;
-
-			var materialIndex = GetFaceMaterialIndex( sourceFace );
-			Topology.FindFacesConnectedToFullEdges( edgeSet.StepEdges, faces, null );
-
-			foreach ( var face in faces )
-			{
-				SetFaceMaterialIndex( face, materialIndex );
-			}
-		}
 	}
 
 	void GenerateBridgeUVsAxis( List<BridgeEdgeSet> edgeSets, BridgeInterpolationParameters parameters )
@@ -2186,7 +2267,7 @@ public sealed partial class PolygonMesh : IJsonConvert
 
 		for ( int iStep = 1; iStep < numSteps; ++iStep )
 		{
-			if ( !Topology.ExtendEdges( currentEdges, currentEdges.Count, out var newEdges, out var originalEdges, out _, out _ ) )
+			if ( !ExtendEdges( currentEdges, out var newEdges, out var originalEdges ) )
 				return;
 
 			for ( int iEdge = 0; iEdge < numEdges; ++iEdge )
@@ -2379,7 +2460,7 @@ public sealed partial class PolygonMesh : IJsonConvert
 
 		var plane = new Plane( basePosition, normal );
 
-		if ( plane.GetDistance( targetPosition ) < 0.0f )
+		if ( plane.GetDistance( targetPosition ) <= -0.01f )
 		{
 			normal = -normal;
 		}
@@ -2907,6 +2988,21 @@ public sealed partial class PolygonMesh : IJsonConvert
 	{
 		pOutNewEdge = HalfEdgeHandle.Invalid;
 
+		if ( !ResolveFaceVerticesForNewEdge( hFace, hVertexA, hVertexB, out var hFaceVertexA, out var hFaceVertexB ) )
+			return false;
+
+		return Topology.AddEdgeToFace( hFaceVertexA, hFaceVertexB, out pOutNewEdge );
+	}
+
+	/// <summary>
+	/// Find the two incoming half edges of the face that a new edge between these vertices would be
+	/// spliced into.
+	/// </summary>
+	private bool ResolveFaceVerticesForNewEdge( FaceHandle hFace, VertexHandle hVertexA, VertexHandle hVertexB, out HalfEdgeHandle hFaceVertexA, out HalfEdgeHandle hFaceVertexB )
+	{
+		hFaceVertexA = HalfEdgeHandle.Invalid;
+		hFaceVertexB = HalfEdgeHandle.Invalid;
+
 		if ( !hVertexA.IsValid || !hVertexB.IsValid )
 			return false;
 
@@ -2914,8 +3010,8 @@ public sealed partial class PolygonMesh : IJsonConvert
 		if ( hVertexA == hVertexB )
 			return false;
 
-		var hFaceVertexA = Topology.FindEdgeConnectedToFaceEndingAtVertex( hFace, hVertexA );
-		var hFaceVertexB = Topology.FindEdgeConnectedToFaceEndingAtVertex( hFace, hVertexB );
+		hFaceVertexA = Topology.FindEdgeConnectedToFaceEndingAtVertex( hFace, hVertexA );
+		hFaceVertexB = Topology.FindEdgeConnectedToFaceEndingAtVertex( hFace, hVertexB );
 
 		// If either of the vertices is internal the edge must be connected in the correct winding 
 		// order, use the vertex which is not internal to determine the correct winding order.
@@ -2998,7 +3094,7 @@ public sealed partial class PolygonMesh : IJsonConvert
 			}
 		}
 
-		return Topology.AddEdgeToFace( hFaceVertexA, hFaceVertexB, out pOutNewEdge );
+		return true;
 	}
 
 	private bool FindOpenEdgeLoop( HalfEdgeHandle hEdge, out List<HalfEdgeHandle> pOutEdgeList )
@@ -3208,6 +3304,7 @@ public sealed partial class PolygonMesh : IJsonConvert
 		{
 			int nNumSubsetLoopEdges = subSetLoopEdges.Count;
 			loopEdges.Clear();
+			index = 0;
 			loopEdges.EnsureCapacity( nNumSubsetLoopEdges );
 			for ( int iEdge = 0; iEdge < nNumSubsetLoopEdges; ++iEdge )
 			{
@@ -3467,6 +3564,20 @@ public sealed partial class PolygonMesh : IJsonConvert
 	}
 
 	/// <summary>
+	/// Get the positions of all vertices still used by a face that isn't hidden
+	/// </summary>
+	public IEnumerable<Vector3> GetVisibleVertexPositions()
+	{
+		foreach ( var hVertex in Topology.VertexHandles )
+		{
+			if ( IsVertexHidden( hVertex ) )
+				continue;
+
+			yield return Positions[hVertex];
+		}
+	}
+
+	/// <summary>
 	/// Set the blend of a vertex
 	/// </summary>
 	public void SetVertexBlend( HalfEdgeHandle hFaceVertex, Color32 blend )
@@ -3546,6 +3657,23 @@ public sealed partial class PolygonMesh : IJsonConvert
 		foreach ( var hEdge in Topology.HalfEdgeHandles )
 		{
 			if ( hEdge.Index > Topology.GetOppositeHalfEdge( hEdge ).Index )
+				continue;
+
+			yield return GetEdgeLine( hEdge );
+		}
+	}
+
+	/// <summary>
+	/// Get the start and end points of all edges still used by a face that isn't hidden
+	/// </summary>
+	public IEnumerable<Line> GetVisibleEdges()
+	{
+		foreach ( var hEdge in Topology.HalfEdgeHandles )
+		{
+			if ( hEdge.Index > Topology.GetOppositeHalfEdge( hEdge ).Index )
+				continue;
+
+			if ( IsEdgeHidden( hEdge ) )
 				continue;
 
 			yield return GetEdgeLine( hEdge );
@@ -4334,9 +4462,9 @@ public sealed partial class PolygonMesh : IJsonConvert
 	}
 
 	/// <summary>
-	/// Triangulate the polygons into a model
+	/// Triangulate the polygons into a model with the selected collision type.
 	/// </summary>
-	public Model Rebuild()
+	public Model Rebuild( MeshComponent.CollisionType collision = MeshComponent.CollisionType.None )
 	{
 		var faceCount = Topology.FaceCount;
 		var halfEdgeCount = Topology.HalfEdgeCount;
@@ -4358,7 +4486,6 @@ public sealed partial class PolygonMesh : IJsonConvert
 		_meshFaces.EnsureCapacity( faceCount );
 		_faceNormalCache.EnsureCapacity( faceCount );
 
-		var builder = Model.Builder;
 		var submeshes = new Dictionary<int, Submesh>();
 
 		// Prune hidden entries for faces that no longer exist
@@ -4388,8 +4515,6 @@ public sealed partial class PolygonMesh : IJsonConvert
 				};
 
 				submeshes.Add( materialId, submesh );
-
-				builder.AddSurface( material?.Surface );
 			}
 
 			TriangulateFace( hFace, submesh );
@@ -4397,13 +4522,6 @@ public sealed partial class PolygonMesh : IJsonConvert
 
 		_submeshes.Clear();
 		_submeshes.AddRange( submeshes.Values );
-
-		if ( _meshVertices.Count >= 3 && _meshIndices.Count >= 3 )
-		{
-			builder.AddCollisionHull( _meshVertices );
-			builder.AddCollisionMesh( _meshVertices, _meshIndices, _meshTriangleMaterials );
-			builder.AddTraceMesh( _meshVertices, _meshIndices );
-		}
 
 		foreach ( var submesh in submeshes.Values )
 		{
@@ -4430,14 +4548,38 @@ public sealed partial class PolygonMesh : IJsonConvert
 				mesh.UvDensity = uvDensity[2 * (uvDensity.Count - 1) / 10];
 			}
 
-			builder.AddMesh( mesh );
-
 			submesh.Mesh = mesh;
 		}
 
 		IsDirty = false;
 
 		_faceNormalCache.Clear();
+		return CreateModel( collision );
+	}
+
+	internal Model CreateModel( MeshComponent.CollisionType collision )
+	{
+		var builder = Model.Builder;
+		foreach ( var submesh in _submeshes )
+		{
+			builder.AddSurface( submesh.Material?.Surface );
+			builder.AddMesh( submesh.Mesh );
+		}
+
+		if ( _meshVertices.Count >= 3 && _meshIndices.Count >= 3 )
+		{
+			switch ( collision )
+			{
+				case MeshComponent.CollisionType.Hull:
+					builder.AddCollisionHull( _meshVertices );
+					break;
+				case MeshComponent.CollisionType.Mesh:
+					builder.AddCollisionMesh( _meshVertices, _meshIndices, _meshTriangleMaterials );
+					break;
+			}
+			builder.AddTraceMesh( _meshVertices, _meshIndices );
+		}
+
 		return builder.Create();
 	}
 
@@ -6392,7 +6534,7 @@ public sealed partial class PolygonMesh : IJsonConvert
 	}
 
 	[StructLayout( LayoutKind.Sequential )]
-	struct MeshVertex( Vector3 position, Vector3 normal, Vector4 tangent, Vector2 texcoord, Color32 blend, Color32 color )
+	internal struct MeshVertex( Vector3 position, Vector3 normal, Vector4 tangent, Vector2 texcoord, Color32 blend, Color32 color )
 	{
 		[VertexLayout.Position] public Vector3 Position = position;
 		[VertexLayout.Normal] public Vector3 Normal = normal;

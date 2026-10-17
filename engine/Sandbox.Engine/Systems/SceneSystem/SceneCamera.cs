@@ -13,7 +13,7 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 	// these systems into systems that are configurable per camera and from addon code.
 	// For example, volumetricFog should hold the render state. The addon code should hold
 	// the volumes. Tonemapping should hold the render state for this camera only.
-	internal ToneMapping ToneMapping = Application.IsHeadless ? null : new ToneMapping();
+	internal ToneMapping ToneMapping = Graphics.IsAvailable ? new ToneMapping() : null;
 	internal VolumetricFog VolumetricFogImpl = null;
 
 	/// <summary>
@@ -69,16 +69,36 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 	internal Action<Rendering.Stage, SceneCamera> OnRenderStageHook;
 
 	/// <summary>
-	/// Called when rendering the post process pass
+	/// Whether the camera component's post processing reads the depth-normals G-buffer.
 	/// </summary>
-	[Obsolete]
-	public Action OnRenderPostProcess { get; set; }
+	internal Func<bool> WantsDepthNormalsHook;
 
 	/// <summary>
-	/// Called when rendering the transparent pass
+	/// Whether something in this camera's frame reads the normals and roughness G-buffer of the depth-normals prepass
+	/// (AO, SSR). Native always draws it; the managed scene renderer only when this says so.
 	/// </summary>
-	[Obsolete]
-	public Action OnRenderOpaque { get; set; }
+	internal bool WantsDepthNormals => WantsDepthNormalsHook?.Invoke() ?? false;
+
+	/// <summary>
+	/// Queries and runs the camera component's independent effects ahead of their normal stage.
+	/// </summary>
+	internal Func<Rendering.Stage, PostProcessQueue, bool> HasEarlyPostProcessHook;
+	internal Action<Rendering.Stage, bool> ScheduleEarlyPostProcessHook;
+	internal Action<Rendering.Stage, PostProcessQueue> RenderEarlyPostProcessHook;
+
+	/// <summary>
+	/// Whether something at <paramref name="stage"/> can run early on <paramref name="queue"/>
+	/// (<see cref="BasePostProcess.EarlyQueue"/>).
+	/// </summary>
+	internal bool HasEarlyPostProcess( Rendering.Stage stage, PostProcessQueue queue ) => HasEarlyPostProcessHook?.Invoke( stage, queue ) ?? false;
+
+	internal void ScheduleEarlyPostProcess( Rendering.Stage stage, bool enabled ) => ScheduleEarlyPostProcessHook?.Invoke( stage, enabled );
+
+	/// <summary>
+	/// Run what <see cref="HasEarlyPostProcess"/> found, inside a <see cref="Graphics"/> block on the selected queue. The stage then
+	/// skips it.
+	/// </summary>
+	internal void RenderEarlyPostProcess( Rendering.Stage stage, PostProcessQueue queue ) => RenderEarlyPostProcessHook?.Invoke( stage, queue );
 
 	/// <summary>
 	/// Called when rendering the transparent pass
@@ -86,9 +106,14 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 	[Obsolete]
 	public Action OnRenderTransparent { get; set; }
 
-	public Action OnRenderOverlay { get; set; }
+	internal Action OnRenderOverlay { get; set; }
 
-	public Action OnRenderUI { get; set; }
+	internal Action OnRenderUI { get; set; }
+
+	/// <summary>
+	/// Called before post processing, for UI that wants bloom and color grading applied to it.
+	/// </summary>
+	internal Action OnRenderUIBeforePostProcess { get; set; }
 
 	/// <summary>
 	/// The size of the screen. Allows us to work out aspect ratio.
@@ -476,6 +501,12 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 	/// </summary>
 	internal bool ExcludeFromTextureStreaming { get; set; }
 
+	/// <summary>
+	/// Render as a tools view (<c>SVF_TOOL_VIEW</c>), as native's tools render theirs: tools materials draw in the pipeline's
+	/// ToolsUtil layers. Off by default, as every camera has been.
+	/// </summary>
+	internal bool ToolsView { get; set; }
+
 	private static WeakReference<SceneCamera> _recordingCamera;
 
 	/// <summary>
@@ -520,6 +551,14 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 	}
 
 	/// <summary>
+	/// This camera only draws UI - skip the scene rendering pipeline entirely and put the UI
+	/// straight onto its target. For a window that is nothing but panels, which is what a
+	/// launcher window is: the pipeline's passes and render targets are all for a scene that
+	/// isn't there.
+	/// </summary>
+	internal bool UIOnly { get; set; }
+
+	/// <summary>
 	/// Should be called before a render
 	/// </summary>
 	internal void OnPreRender( Vector2 size )
@@ -554,13 +593,20 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 					break;
 				}
 
+			case Rendering.Stage.EarlyUI:
+				{
+					if ( RenderUI )
+						OnRenderUIBeforePostProcess?.Invoke();
+					break;
+				}
+
 			case Rendering.Stage.AfterPostProcess:
 				{
 					OnRenderOverlay?.Invoke();
 					break;
 				}
 
-			case Rendering.Stage.AfterUI:
+			case Rendering.Stage.UI:
 				{
 					OnRenderUI?.Invoke();
 					break;
@@ -808,7 +854,7 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 
 		using var setup = new CameraRenderer( "RenderToTexture", _cameraId );
 		setup.Configure( this, config );
-		setup.Native.RenderToTexture( texture.native, Graphics.SceneView );
+		setup.Native.RenderToTexture( texture.native, Graphics.SceneView, default );
 	}
 
 
@@ -856,6 +902,7 @@ public sealed partial class SceneCamera : IDisposable, IManagedCamera
 		//
 		var setup = new CameraRenderer( "RenderToCubeTexture", _cameraId );
 		setup.Configure( this, config );
+		setup.Native.EnableUI = false;
 
 		for ( int i = 0; i < CubeRotations.Length; i++ )
 		{

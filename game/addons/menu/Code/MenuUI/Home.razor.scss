@@ -1,81 +1,141 @@
 @import "/styles/_theme.scss";
 @import "/styles/_front.scss";
 
-// 104px from the top of the screen, less the 64px navbar above Home.
-$front-panel-top: 40px;
-$front-panel-side: 26px;
-
 Home
 {
-	position: relative;
 	width: 100%;
 	height: 100%;
 	flex-grow: 1;
-	flex-direction: row;
-	justify-content: center;
 
-	// The middle belongs to the character - only the panels take clicks.
-	pointer-events: none;
+	// A transparent strip, not a bar - the scene behind it is the backdrop, the rail
+	.tabs
+	{
+		flex-shrink: 0;
+		align-items: center;
+		gap: 0;
+		padding: $front-chrome-gap 24px 4px 18px;
 
-	// Caps how far apart the panels can drift on an ultrawide.
-	.stage
+		// Splits the sort feeds from the genre feeds.
+		separator.vertical
+		{
+			height: 16px;
+			width: 1px;
+			background-color: $front-hairline;
+			margin: 0 14px;
+		}
+
+		.button
+		{
+			flex-shrink: 0;
+			align-items: center;
+			padding: 6px 0;
+			margin: 0 14px;
+			pointer-events: all;
+			cursor: pointer;
+			transition: all 0.15s ease;
+
+			Label
+			{
+				font-family: $front-font;
+				font-size: 16px;
+				font-weight: 500;
+				color: $front-secondary;
+				transition: all 0.15s ease;
+			}
+
+			&:hover
+			{
+				sound-in: "ui.button.over";
+
+				Label
+				{
+					color: $front-heading;
+				}
+			}
+
+			&.active
+			{
+				Label
+				{
+					color: #ffffff;
+					font-weight: 700;
+				}
+			}
+
+			&:active
+			{
+				sound-in: "ui.button.press";
+			}
+		}
+	}
+
+	.home-row
+	{
+		flex-direction: row;
+		flex-grow: 1;
+		overflow: hidden;
+	}
+
+	// width 0 + grow: take the leftover space, never the content's width -
+	// otherwise the wide content blocks shove the aside off screen.
+	.feed
 	{
 		position: relative;
-		width: 100%;
-		max-width: $front-stage-max;
-		height: 100%;
+		flex-direction: column;
+		flex-grow: 1;
+		width: 0;
+		overflow: hidden;
 	}
 
-	.panel
+	// Sorted and genre feeds - a plain grid, the tab up top is the heading.
+	.feed PackageList
 	{
-		@include front-panel;
-		top: $front-panel-top;
+		flex-grow: 1;
 	}
 
-	.panel-left
+	.feed PackageList VirtualGrid
 	{
-		left: $front-panel-side;
-		width: 428px;
+		padding: 12px 24px 48px 24px;
+		gap: 16px;
 	}
 
-	// 400px to match News below it, which brings its own width and aspect ratio.
-	.panel-right
+	// Right-hand column - one card: your avatar, your stats, then your friends,
+	// split by hairlines rather than gaps.
+	.aside
 	{
-		right: $front-panel-side;
+		flex-shrink: 0;
 		width: 400px;
+		flex-direction: column;
+		padding: $front-chrome-gap $front-chrome-gap $front-chrome-gap 0;
+		overflow: hidden;
+
+		.profile-card
+		{
+			@include front-card;
+
+			flex-grow: 1;
+			flex-shrink: 1;
+			height: 0;
+			box-shadow: $front-rail-shadow;
+
+			// The avatar and stats keep their natural height - the friends list takes the
+			// rest, so the card reaches the bottom of the screen and scrolls inside.
+			> *
+			{
+				flex-shrink: 0;
+			}
+
+			> ProfileStats, > FriendsRail
+			{
+				border-top: $front-border-width solid $front-hairline;
+			}
+
+			> FriendsRail
+			{
+				flex-grow: 1;
+				flex-shrink: 1;
+				height: 0;
+			}
+		}
 	}
-
-	// Styled by News.razor.scss - this is only placement.
-	News
-	{
-		position: absolute;
-		right: $front-panel-side;
-		bottom: 50px;
-	}
-
-	// Positioning only; DesktopButtons.razor.scss owns its appearance.
-	.model-toggle
-	{
-		position: absolute;
-		left: 0;
-		right: 0;
-		bottom: 40px;
-		justify-content: center;
-		pointer-events: none;
-
-		// Its stylesheet uses z-index: -10, relative to this box.
-		z-index: 1;
-	}
-}
-
-// News overrides most of this but relies on the blur, outline and radius.
-Home Card
-{
-	background: rgba( $default-950, 0.8 );
-	backdrop-filter: blur( 10px );
-	outline: 1px solid #000a;
-	width: 100%;
-	flex-direction: column;
-	padding: 2rem;
-	border-radius: $rounding-large;
 }

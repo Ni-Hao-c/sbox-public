@@ -20,8 +20,77 @@ public partial class MoveModeWalk : MoveMode
 
 	public override void AddVelocity()
 	{
-		Controller.WishVelocity = Controller.WishVelocity.WithZ( 0 );
-		base.AddVelocity();
+		Controller.WishVelocity = Controller.WithoutVertical( Controller.WishVelocity );
+		// Idle moving surfaces use native friction; active input needs slope-relative acceleration.
+		if ( !Controller.IsOnGround || (Controller.GroundUsesContactFriction && Controller.WishVelocity.IsNearZeroLength) )
+		{
+			base.AddVelocity();
+			return;
+		}
+
+		var body = Controller.Body;
+		var normal = Controller.GroundNormal;
+		var up = Controller.UpDirection;
+		var normalUp = normal.Dot( up );
+		Vector3 GroundDirection( Vector3 value )
+		{
+			var horizontal = Controller.WithoutVertical( value );
+			return (horizontal * normalUp - up * horizontal.Dot( normal )).Normal;
+		}
+
+		var velocity = body.Velocity - Controller.GroundVelocity;
+		var normalVelocity = normal * velocity.Dot( normal );
+		var tangentVelocity = velocity - normalVelocity;
+		var speed = tangentVelocity.Length;
+		// Follow the ground vertically instead of letting its normal steer horizontal movement.
+		velocity = Controller.GroundUsesContactFriction ? tangentVelocity : GroundDirection( velocity ) * speed;
+
+		// Brake along the ground plane, rather than using contact friction which also grabs walls
+		var friction = Controller.GroundFriction.Clamp( 0, 1 );
+		if ( speed > 0 )
+		{
+			var drop = MathF.Max( speed, 100 ) * 6 * Controller.BrakePower * friction * Time.Delta;
+			velocity *= MathF.Max( speed - drop, 0 ) / speed;
+		}
+
+		var wish = Controller.WishVelocity;
+		var wishSpeed = wish.Length;
+		var wishDirection = GroundDirection( wish );
+		var addSpeed = wishSpeed - velocity.Dot( wishDirection );
+		if ( addSpeed > 0 )
+		{
+			velocity += wishDirection * MathF.Min( addSpeed, 10 * wishSpeed * friction * Time.Delta );
+		}
+
+		if ( Controller.GroundUsesContactFriction )
+		{
+			// Control walking along the surface, but leave settling and weight transfer to physics.
+			velocity += normalVelocity;
+			if ( friction > 0 && body.Gravity )
+			{
+				var gravity = Scene.PhysicsWorld.Gravity * body.GravityScale;
+				velocity -= (gravity - normal * gravity.Dot( normal )) * Time.Delta;
+			}
+		}
+
+		body.Velocity = velocity + Controller.GroundVelocity;
+	}
+
+	public override void UpdateRigidBody( Rigidbody body )
+	{
+		base.UpdateRigidBody( body );
+
+		if ( !Controller.IsOnGround )
+			return;
+
+		body.LinearDamping = 0;
+		if ( Controller.GroundUsesContactFriction )
+			return;
+
+		// Grounded motion follows the slope and StickToGround handles descending.
+		// (Gravity would otherwise add downhill drift every physics step)
+		body.Gravity = Controller.GroundFriction <= 0;
+		Controller.FeetCollider.Friction = 0;
 	}
 
 	public override void PrePhysicsStep()
@@ -43,7 +112,7 @@ public partial class MoveModeWalk : MoveMode
 
 	public override bool IsStandableSurface( in SceneTraceResult result )
 	{
-		if ( Vector3.GetAngle( Vector3.Up, result.Normal ) > GroundAngle )
+		if ( Vector3.GetAngle( Controller.UpDirection, result.Normal ) > GroundAngle )
 			return false;
 
 		return true;
@@ -51,6 +120,9 @@ public partial class MoveModeWalk : MoveMode
 
 	public override Vector3 UpdateMove( Rotation eyes, Vector3 input )
 	{
+		if ( Scene.Is2D )
+			return base.UpdateMove( Rotation.Identity, Vector3.Backward * input.y );
+
 		// ignore pitch when walking
 		eyes = eyes.Angles() with { pitch = 0 };
 

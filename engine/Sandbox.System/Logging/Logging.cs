@@ -27,7 +27,7 @@ internal static partial class Logging
 			{
 				var frames = logEvent.StackTrace.GetFrames().Skip( 1 ).Take( 10 ).Where( x => x.GetMethod().DeclaringType.Name != "Logger" );
 				var stack = string.Join( "\n", frames.Select( x => $"\t\t{x.GetMethod()?.DeclaringType?.Name}.{x.GetMethod()?.Name} - {x.GetFileName()}:{x.GetFileLineNumber()}" ) );
-				if ( stack.StartsWith( "\t\tEngineLoop.Print - " ) ) return "";
+				if ( stack.StartsWith( "\t\tLogging.PrintNative - " ) ) return "";
 
 				return $"\n{stack}\n";
 			} );
@@ -35,7 +35,8 @@ internal static partial class Logging
 
 		var appName = Process.GetCurrentProcess().ProcessName.Split( '.' )[0];
 
-		var gamePath = System.Environment.GetEnvironmentVariable( "FACEPUNCH_ENGINE", EnvironmentVariableTarget.User );
+		var gamePath = System.Environment.GetEnvironmentVariable( "FACEPUNCH_ENGINE" );
+		gamePath ??= System.Environment.GetEnvironmentVariable( "FACEPUNCH_ENGINE", EnvironmentVariableTarget.User );
 		gamePath ??= AppContext.BaseDirectory;
 
 #pragma warning disable CA2000 // Dispose objects before losing scope

@@ -57,6 +57,19 @@ internal sealed partial class PackageLoader : IDisposable
 		changedPackageDlls.Clear();
 	}
 
+	internal void QueueCompiledAssemblies( IReadOnlyList<CompilerOutput> outputs )
+	{
+		foreach ( var output in outputs )
+		{
+			var package = loadedPackages.FirstOrDefault( x => x.Package is LocalPackage local
+				&& (local.Compiler == output.Compiler || local.EditorCompiler == output.Compiler) );
+			if ( package is null )
+				continue;
+
+			changedPackageDlls.Add( (package, $"/.bin/{output.Compiler.AssemblyName}.dll") );
+		}
+	}
+
 	public void Dispose()
 	{
 		foreach ( var dllWatcher in dllWatchers )
@@ -141,10 +154,7 @@ internal sealed partial class PackageLoader : IDisposable
 										.Where( x => x.ap is not null )
 										.ToArray();
 
-		var changedPackages = changedPackageDlls
-									.Select( x => x.ap )
-									.Distinct()
-									.ToArray();
+		var changedPackages = new HashSet<PackageManager.ActivePackage>();
 
 		//
 		// We need to force-reload any package assemblies that depend on a changed package.
@@ -175,7 +185,9 @@ internal sealed partial class PackageLoader : IDisposable
 			if ( e.filename.EndsWith( ".editor.dll", StringComparison.OrdinalIgnoreCase ) && !ToolsMode )
 				continue;
 
-			var result = LoadAssemblyFromPackage( e.ap, e.filename );
+			var result = LoadAssemblyFromPackage( e.ap, e.filename, skipUnchanged: true );
+			if ( result is not null )
+				changedPackages.Add( e.ap );
 
 			if ( result is not null && !result.FastHotload )
 			{
@@ -183,27 +195,12 @@ internal sealed partial class PackageLoader : IDisposable
 			}
 		}
 
-		var baseHotloaded = hotloadedPackages.Any( x => x.Package.IsNamed( "local.base" ) );
 		var toolBaseHotloaded = hotloadedPackages.Any( x => x.Package.IsNamed( "local.toolbase" ) );
 
 		bool ReferencesHotloadedPackage( Package package )
 		{
-			switch ( package.TypeName )
-			{
-				case "tool":
-					if ( toolBaseHotloaded ) return true;
-					break;
-
-				case "game":
-				case "addon":
-					if ( baseHotloaded ) return true;
-					break;
-
-				default:
-					// addon code can exist with a resource package
-					if ( baseHotloaded && !string.IsNullOrWhiteSpace( package.Info.ParentPackage ) ) return true;
-					break;
-			}
+			if ( package.TypeName == "tool" && toolBaseHotloaded )
+				return true;
 
 			return package.EnumeratePackageReferences()
 				.Any( x => hotloadedPackages
@@ -260,7 +257,7 @@ internal sealed partial class PackageLoader : IDisposable
 		return assembly is not null;
 	}
 
-	private LoadedAssembly LoadAssemblyFromPackage( PackageManager.ActivePackage ap, string filename, byte[] bytes = null )
+	private LoadedAssembly LoadAssemblyFromPackage( PackageManager.ActivePackage ap, string filename, byte[] bytes = null, bool skipUnchanged = false )
 	{
 		log.Trace( $"Loading \"{filename}\" from {ap.Package.Title}" );
 
@@ -274,6 +271,13 @@ internal sealed partial class PackageLoader : IDisposable
 		Assert.True( ap.AssemblyFileSystem.FileExists( filename ), "File doesn't exist? Maybe a case sensitivity issue??" );
 
 		bytes ??= ap.AssemblyFileSystem.ReadAllBytes( filename ).ToArray();
+		if ( skipUnchanged )
+		{
+			var loaded = Loaded.FirstOrDefault( x => string.Equals( x.Name, assmName, StringComparison.OrdinalIgnoreCase ) );
+			if ( loaded?.CompiledAssemblyBytes is { } previous && bytes.AsSpan().SequenceEqual( previous ) )
+				return null;
+		}
+
 		var dll_stream = new System.IO.MemoryStream( bytes );
 
 		TrustedBinaryStream trustedDll = null;
@@ -398,15 +402,6 @@ internal sealed partial class PackageLoader : IDisposable
 			//
 			{
 				bool needsToolsPackage = packageLocal.TypeName == "tool";
-
-				if ( packageLocal.NeedsLocalBasePackage() )
-				{
-					LoadPackage( "local.base#local" );
-
-					// if we're loading a local game, then load the tools package first, because
-					// we are assuming that there is an editor folder, which will require it.
-					needsToolsPackage = packageLocal.TypeName == "game" && ToolsMode;
-				}
 
 				if ( needsToolsPackage )
 				{
@@ -628,6 +623,7 @@ internal sealed partial class PackageLoader : IDisposable
 		outgoing.FastHotload = true;
 		outgoing.ModifiedAssembly = incoming?.Assembly;
 		outgoing.CodeArchiveBytes = incoming.CodeArchiveBytes;
+		outgoing.CompiledAssemblyBytes = incoming.CompiledAssemblyBytes;
 		outgoing.Version = incoming.Assembly.GetName().Version;
 		return true;
 	}
@@ -753,14 +749,6 @@ internal sealed partial class PackageLoader : IDisposable
 
 		if ( deep )
 		{
-			if ( package.Package is LocalPackage pl && pl.NeedsLocalBasePackage() )
-			{
-				var children = GetLoadedAssemblies( "local.base#local", deep, allowEditor );
-
-				foreach ( var c in children )
-					foundList.Add( c );
-			}
-
 			foreach ( var child in package.Package.EnumeratePackageReferences() )
 			{
 				var children = GetLoadedAssemblies( child, deep, allowEditor );

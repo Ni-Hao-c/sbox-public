@@ -1,7 +1,3 @@
-using Sandbox;
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using System.Text.Json.Nodes;
 
 namespace Editor.Mcp;
@@ -432,7 +428,9 @@ public static partial class SceneTools
 			_ => FindByGuid( parent )
 		};
 
-		using ( session.UndoScope( "Edit GameObject" ).WithGameObjectChanges( go, GameObjectUndoFlags.All ).Push() )
+		// Name, enabled, parent and transform are all the object's own properties - All would make an
+		// edit inside a prefab instance snapshot the whole instance, before and after
+		using ( session.UndoScope( "Edit GameObject" ).WithGameObjectChanges( go, GameObjectUndoFlags.Properties ).Push() )
 		{
 			if ( !string.IsNullOrWhiteSpace( name ) )
 				go.Name = name;

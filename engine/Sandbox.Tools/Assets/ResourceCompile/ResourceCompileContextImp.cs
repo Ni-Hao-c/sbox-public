@@ -94,7 +94,7 @@ unsafe class ResourceCompileContextImp : ResourceCompileContext, IDisposable
 	public override byte[] ReadSource()
 	{
 		// read from in memory, if we have an override
-		var buffer = _context.GetOverrideData();
+		var buffer = _context.GetOverrideData( true );
 		if ( buffer.IsValid )
 		{
 			IntPtr basePtr = buffer.Base();
@@ -129,6 +129,13 @@ unsafe class ResourceCompileContextImp : ResourceCompileContext, IDisposable
 
 		Log.Warning( $"Couldn't read source file: [{AbsolutePath}]" );
 		return null;
+	}
+
+	internal bool TryReadOverrideInput( out byte[] data )
+	{
+		var buffer = _context.GetOverrideData( false );
+		data = buffer.IsValid ? buffer.ToArray() : null;
+		return buffer.IsValid;
 	}
 
 	/// <summary>
@@ -193,6 +200,10 @@ unsafe class ResourceCompileContextImp : ResourceCompileContext, IDisposable
 
 			foreach ( var e in jsonobj )
 			{
+				// component type names aren't asset references, but can look like one (eg Sandbox.Decal)
+				if ( e.Key.Equals( "__type", StringComparison.OrdinalIgnoreCase ) )
+					continue;
+
 				//
 				// An object with a $compiler has been found. 
 				// This is an embedded resource definition.
@@ -268,8 +279,6 @@ unsafe class ResourceCompileContextImp : ResourceCompileContext, IDisposable
 					AddRuntimeReference( asset.Path );
 					Log.Trace( $"AddRuntimeReference: {str} {asset.Path}" );
 				}
-
-
 			}
 			else if ( AssetType.FromExtension( extension ) is { } type )
 			{

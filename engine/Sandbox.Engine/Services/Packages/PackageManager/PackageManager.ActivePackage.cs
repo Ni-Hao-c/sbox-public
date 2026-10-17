@@ -1,4 +1,5 @@
 ﻿using System.IO;
+using Sandbox.Utility;
 using System.Net;
 using System.Threading;
 
@@ -38,34 +39,16 @@ internal static partial class PackageManager
 
 			if ( package is LocalPackage localPackage )
 			{
-				var projectSettingsPath = System.IO.Path.Combine( localPackage.Project.GetRootPath(), "ProjectSettings" );
+				// A local package mounts it's project's filesystems (don't use them directly!)
+				o.FileSystem = new AggregateFileSystem();
+				o.FileSystem.Mount( localPackage.Project.CodeFileSystem );
+				o.FileSystem.Mount( localPackage.Project.AssetsFileSystem );
 
 				o.ProjectSettings = new AggregateFileSystem();
-				if ( System.IO.Directory.Exists( projectSettingsPath ) )
-				{
-					o.ProjectSettings.CreateAndMount( projectSettingsPath );
-				}
+				o.ProjectSettings.Mount( localPackage.Project.ProjectSettingsFileSystem );
 
-				o.Localization ??= new AggregateFileSystem();
-				if ( System.IO.Directory.Exists( localPackage.LocalizationPath ) )
-				{
-					o.Localization.CreateAndMount( localPackage.LocalizationPath );
-				}
-
-				o.FileSystem = new AggregateFileSystem();
-
-				if ( System.IO.Directory.Exists( localPackage.CodePath ) )
-				{
-					if ( localPackage.CodePath != null )
-					{
-						o.FileSystem.CreateAndMount( localPackage.CodePath );
-					}
-				}
-
-				if ( System.IO.Directory.Exists( localPackage.ContentPath ) )
-				{
-					o.FileSystem.CreateAndMount( localPackage.ContentPath );
-				}
+				o.Localization = new AggregateFileSystem();
+				o.Localization.Mount( localPackage.Project.LocalizationFileSystem );
 
 				o.AssemblyFileSystem = new AggregateFileSystem();
 
@@ -129,7 +112,7 @@ internal static partial class PackageManager
 			//
 			// Mount localization data from this package
 			//
-			Localization ??= new AggregateFileSystem();
+			Localization = new AggregateFileSystem();
 			if ( FileSystem.DirectoryExists( "localization" ) )
 			{
 				// Mount as a subsystem of the package's FileSystem
@@ -137,22 +120,19 @@ internal static partial class PackageManager
 			}
 
 			//
-			// If the ProjectSettings folder exists, we can create a filesystem for it.
-			// If not, just create a memory filesystem, which will be empty, but at least won't be null.
+			// Same for ProjectSettings. Empty if the package hasn't got the folder, so callers get
+			// a filesystem with nothing in it rather than a null.
 			//
+			ProjectSettings = new AggregateFileSystem();
 			if ( FileSystem.DirectoryExists( "ProjectSettings" ) )
 			{
-				ProjectSettings = FileSystem.CreateSubSystem( "ProjectSettings" );
-			}
-			else
-			{
-				ProjectSettings = new MemoryFileSystem();
+				ProjectSettings.Mount( FileSystem.CreateSubSystem( "ProjectSettings" ) );
 			}
 
 			//
 			// Mount assembly from this package
 			//
-			AssemblyFileSystem ??= new AggregateFileSystem();
+			AssemblyFileSystem = new AggregateFileSystem();
 			if ( FileSystem.DirectoryExists( ".bin" ) )
 			{
 				// Mount as a subsystem of the package's FileSystem
@@ -162,7 +142,6 @@ internal static partial class PackageManager
 			var dllFs = await DownloadBinDllsAsync( Package.Revision, token );
 			if ( dllFs != null )
 			{
-				AssemblyFileSystem ??= new AggregateFileSystem();
 				AssemblyFileSystem.Mount( dllFs );
 			}
 		}
@@ -186,7 +165,7 @@ internal static partial class PackageManager
 				token.ThrowIfCancellationRequested();
 				LoadingScreen.Subtitle = System.IO.Path.GetFileName( file.Path );
 
-				var bytes = await Sandbox.Utility.Web.GrabFile( file.Url, token );
+				var bytes = await GetCachedDllAsync( file, token );
 				if ( bytes is not null )
 				{
 					memFs.WriteAllBytes( System.IO.Path.GetFileName( file.Path ), bytes );
@@ -195,6 +174,31 @@ internal static partial class PackageManager
 
 			LoadingScreen.Subtitle = null;
 			return memFs;
+		}
+
+		/// <summary>
+		/// The dll's bytes from the download cache, fetched into it first when they aren't there or
+		/// don't match the manifest's crc. The bytes still go through access control before they load.
+		/// </summary>
+		private static async Task<byte[]> GetCachedDllAsync( ManifestSchema.File file, CancellationToken token )
+		{
+			var crc = Convert.ToUInt64( file.Crc, 16 );
+			var cachePath = AssetDownloadCache.GetAbsolutePath( file.Path, crc );
+
+			if ( System.IO.File.Exists( cachePath ) )
+			{
+				var cached = await System.IO.File.ReadAllBytesAsync( cachePath, token );
+				if ( Crc64.FromBytes( cached ) == crc )
+					return cached;
+			}
+
+			var bytes = await Sandbox.Utility.Web.GrabFile( file.Url, token );
+			if ( bytes is not null && Crc64.FromBytes( bytes ) == crc )
+			{
+				AssetDownloadCache.StoreFile( file.Path, crc, bytes );
+			}
+
+			return bytes;
 		}
 
 		internal bool HasPrecompiledDlls()
@@ -346,6 +350,14 @@ internal static partial class PackageManager
 
 			AssemblyFileSystem.Dispose();
 			AssemblyFileSystem = null;
+
+			// Ours as well - for a local package these are wrappers around the project's
+			// filesystems, and the project keeps those
+			ProjectSettings?.Dispose();
+			ProjectSettings = null;
+
+			Localization?.Dispose();
+			Localization = null;
 
 			// Reload any resident resources that were just unmounted (they shouldn't be used & will appear as an error, or a local variant)
 			NativeEngine.g_pResourceSystem.ReloadSymlinkedResidentResources();

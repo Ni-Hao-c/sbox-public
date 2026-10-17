@@ -17,12 +17,17 @@ internal class UploadBuildArtifacts
 	private static readonly string[] IncludeGlobs =
 	{
 		"*.exe",
-		"*.dll",
-		"*.json",
+		"sbox",
+		"sbox-dev",
+		"sbox-launcher",
+		"sbox-server",
+		"benchmark",
 		".version",
 		"thirdpartylegalnotices.txt",
 		"thirdpartylegalnotices/**",
 		"bin/win64/**",
+		"bin/linuxsteamrt64/**",
+		"bin/osxarm64/**",
 		"bin/managed/**",
 		"bin/assettypes.txt",
 		"bin/enginetools.txt",
@@ -75,7 +80,13 @@ internal class UploadBuildArtifacts
 		"core/**/*.meta",
 		"core/debug/**/*.tga",
 		"core/dev/**/*.tga",
-		"core/materials/**/*.png",
+		// Keep directly loaded gizmo and editor tool PNGs; exclude material compiler inputs.
+		"core/materials/default/**/*.png",
+		"core/materials/dev/**/*.png",
+		"core/materials/editor/**/*.png",
+		"core/materials/models/**/*.png",
+		"core/materials/postprocess/**/*.png",
+		"core/materials/tools/new/**/*.png",
 		"core/textures/**/*.png",
 
 		// core/sounds - allow core/sounds/editor/*.wav, strip the rest of the raws
@@ -209,6 +220,8 @@ internal class UploadBuildArtifacts
 				Utility.SetGitHubEnv( "BUILD_ARTIFACT_BYTES", zipSize.ToString() );
 
 				Log.Info( $"Build artifact available at {R2.PublicBaseUrl}/builds/{commit}.zip" );
+				GitHubActions.AddLink( "Build", $"{R2.PublicBaseUrl}/builds/{commit}.zip" );
+				GitHubActions.Note( Utility.FormatSize( zipSize ) );
 
 				return ExitCode.Success;
 			}
@@ -250,17 +263,19 @@ internal class UploadBuildArtifacts
 		return files;
 	}
 
-	private static void CreateArchive( IReadOnlyCollection<(string EntryPath, string AbsolutePath)> files, string zipPath )
+	internal static void CreateArchive( IReadOnlyCollection<(string EntryPath, string AbsolutePath)> files, string zipPath )
 	{
 		if ( File.Exists( zipPath ) )
 			File.Delete( zipPath );
 
 		Log.Info( $"Creating build archive ({files.Count} file(s))..." );
 
-		using var archive = ZipFile.Open( zipPath, ZipArchiveMode.Create );
-		foreach ( var (entryPath, absolutePath) in files )
+		using ( var archive = ZipFile.Open( zipPath, ZipArchiveMode.Create ) )
 		{
-			archive.CreateEntryFromFile( absolutePath, entryPath, CompressionLevel.Fastest );
+			foreach ( var (entryPath, absolutePath) in files )
+			{
+				archive.CreateEntryFromFile( absolutePath, entryPath, CompressionLevel.Fastest );
+			}
 		}
 	}
 

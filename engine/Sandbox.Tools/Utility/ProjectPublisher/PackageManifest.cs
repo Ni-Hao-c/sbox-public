@@ -90,20 +90,6 @@ public partial class ProjectPublisher
 			await Task.Delay( 10 );
 			cancel.ThrowIfCancellationRequested();
 
-			//
-			// If we're a game, include content from /addons/base/code/
-			// This versions things like the styles and dev ui, which is only
-			// going to work with the shipped base code.
-			//
-			if ( project.Config.Type == "game" )
-			{
-				progress?.SetProgressMessage( "Collecting base code assets" );
-				await IncludeFiles( FileSystem.Root.GetFullPath( "/addons/base/code/" ), "*", cancel );
-			}
-
-			await Task.Delay( 10 );
-			cancel.ThrowIfCancellationRequested();
-
 
 			//
 			// Search the code path for files
@@ -301,8 +287,9 @@ public partial class ProjectPublisher
 
 				while ( tasks.Count > 8 )
 				{
-					await Task.WhenAny( tasks.ToArray() );
-					tasks.RemoveAll( x => x.IsCompleted );
+					var completed = await Task.WhenAny( tasks );
+					await completed;
+					tasks.Remove( completed );
 				}
 			}
 
@@ -418,6 +405,9 @@ public partial class ProjectPublisher
 				}
 			} );
 
+			if ( Assets.Any( x => string.Equals( x.Name, relativePath, StringComparison.OrdinalIgnoreCase ) ) )
+				return;
+
 			scannedBytes += (ulong)e.Size;
 
 			Assets.Add( e );
@@ -532,6 +522,9 @@ public partial class ProjectPublisher
 					e.Hash = (await Sandbox.Utility.Crc64.FromStreamAsync( stream )).ToString( "x" );
 				}
 			} );
+
+			if ( Assets.Any( x => string.Equals( x.Name, relativePath, StringComparison.OrdinalIgnoreCase ) ) )
+				return;
 
 			scannedBytes += (ulong)e.Size;
 			Assets.Add( e );

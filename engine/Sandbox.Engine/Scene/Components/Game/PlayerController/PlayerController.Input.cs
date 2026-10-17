@@ -32,6 +32,12 @@ public sealed partial class PlayerController : Component
 	[Property, Feature( "Input" ), Category( "Running" )] public bool RunByDefault { get; set; }
 
 	/// <summary>
+	/// How many seconds after leaving the ground the player can still jump. Set to 0 to disable.
+	/// </summary>
+	[Property, Feature( "Input" ), Category( "Jumping" ), Range( 0f, 1f )]
+	public float CoyoteTime { get; set; } = 0.33f;
+
+	/// <summary>
 	/// Allows to player to interact with things by "use"ing them. 
 	/// Usually by pressing the "use" button.
 	/// </summary>
@@ -90,13 +96,13 @@ public sealed partial class PlayerController : Component
 
 	void InputJump()
 	{
-		if ( TimeSinceGrounded > 0.33f ) return; // been off the ground for this many seconds, don't jump
+		if ( !IsOnGround && (CoyoteTime <= 0 || TimeSinceGrounded > CoyoteTime) ) return;
 		if ( !Input.Pressed( "Jump" ) ) return; // not pressing jump
 		if ( timeSinceJump < 0.5f ) return; // don't jump too often
 		if ( JumpSpeed <= 0 ) return;
 
 		timeSinceJump = 0;
-		Jump( Vector3.Up * JumpSpeed );
+		Jump( UpDirection * JumpSpeed );
 		OnJumped();
 
 		IEvents.PostToGameObject( GameObject, x => x.OnJumped() );
@@ -144,9 +150,9 @@ public sealed partial class PlayerController : Component
 		// if we're in the air, keep our head in the same position
 		if ( wantsDuck && IsAirborne )
 		{
-			WorldPosition += Vector3.Up * unduckDelta;
+			WorldPosition += UpDirection * unduckDelta;
 			Transform.ClearInterpolation();
-			bodyDuckOffset = Vector3.Up * -unduckDelta;
+			bodyDuckOffset = UpDirection * -unduckDelta;
 		}
 	}
 }

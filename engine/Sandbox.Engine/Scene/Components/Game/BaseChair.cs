@@ -4,7 +4,7 @@ namespace Sandbox;
 
 [Expose]
 [Icon( "event_seat" ), Group( "Game" ), Title( "Chair" )]
-public partial class BaseChair : Component, Component.IPressable, ISitTarget
+public partial class BaseChair : Component, Component.IPressable, Component.IDamageable, ISitTarget
 {
 	[Expose]
 	public enum AnimatorSitPose
@@ -235,7 +235,6 @@ public partial class BaseChair : Component, Component.IPressable, ISitTarget
 		renderer.Set( "sit", (int)SitPose );
 		renderer.Set( "sit_offset_height", SitHeight * 12.0f );
 		renderer.Set( "b_grounded", true );
-		renderer.Set( "b_climbing", false );
 		renderer.Set( "b_swim", false );
 		renderer.Set( "duck", false );
 
@@ -291,12 +290,11 @@ public partial class BaseChair : Component, Component.IPressable, ISitTarget
 		var seatPos = (SeatPosition ?? GameObject).WorldTransform;
 		var localSeatPos = GameObject.WorldTransform.ToLocal( seatPos );
 
-		var so = Gizmo.Draw.Model( "models/citizen/citizen.vmdl", localSeatPos.WithScale( 1 ) );
+		var so = Gizmo.Draw.Model( "models/citizen_human/human.vmdl", localSeatPos.WithScale( 1 ) );
 		so.ColorTint = Color.White.WithAlpha( 0.6f );
 		so.SetAnimParameter( "sit", (int)SitPose );
 		so.SetAnimParameter( "sit_offset_height", SitHeight * 12.0f );
 		so.SetAnimParameter( "b_grounded", true );
-		so.SetAnimParameter( "b_climbing", false );
 		so.SetAnimParameter( "b_swim", false );
 		so.SetAnimParameter( "duck", false );
 		so.Update( RealTime.Delta * 10.0f );
@@ -329,6 +327,18 @@ public partial class BaseChair : Component, Component.IPressable, ISitTarget
 			return default;
 
 		return new IPressable.Tooltip( TooltipTitle, TooltipIcon, TooltipDescription );
+	}
+
+	public virtual void OnDamage( in DamageInfo damage )
+	{
+		if ( !IsOccupied )
+			return;
+
+		if ( !damage.Tags.Has( "explosion" ) )
+			return;
+
+		// forward the damage to the player
+		GetOccupant()?.GetComponent<IDamageable>()?.OnDamage( damage );
 	}
 }
 

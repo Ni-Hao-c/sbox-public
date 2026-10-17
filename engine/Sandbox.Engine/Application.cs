@@ -62,6 +62,12 @@ public static class Application
 	internal static int LocalInstanceId { get; private set; }
 
 	/// <summary>
+	/// Number of engine frames since startup. Increments once at the start of every frame.
+	/// Starts at 1, so a default frame stamp of 0 always reads as a frame that has passed.
+	/// </summary>
+	public static ulong FrameCount { get; internal set; } = 1;
+
+	/// <summary>
 	/// The engine's version string
 	/// </summary>
 	public static string Version { get; internal set; }
@@ -132,7 +138,7 @@ public static class Application
 			var split = text.Split( "\n" );
 
 			Version = split[0].Trim();
-			VersionDate = DateTime.ParseExact( split[4], "dd/MM/yyyy HH:mm:ss", null, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal );
+			VersionDate = DateTime.ParseExact( split[4], "dd/MM/yyyy HH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal );
 		}
 	}
 
@@ -178,7 +184,7 @@ public static class Application
 	/// <summary>
 	/// Is the game window in focus?
 	/// </summary>
-	public static bool IsFocused => NativeEngine.EngineGlobal.IsWindowFocused();
+	public static bool IsFocused => WindowInput.HasMouseFocus();
 
 	internal static bool WantsExit { get; set; }
 
@@ -192,6 +198,7 @@ public static class Application
 
 	internal static void ClearGame()
 	{
+		TextureWebStreaming.ClearPrefetch();
 		GameIdent = default;
 		GamePackage = default;
 		ExceptionCount = default;

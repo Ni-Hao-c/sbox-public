@@ -16,6 +16,8 @@ public class AppSystem
 {
 	protected Logger log = new Logger( "AppSystem" );
 	internal CMaterialSystem2AppSystemDict _appSystem { get; set; }
+	GameWindow gameWindow;
+	GameStartupWindow startupWindow;
 
 	[DllImport( "user32.dll", CharSet = CharSet.Unicode )]
 	private static extern int MessageBox( IntPtr hWnd, string text, string caption, uint type );
@@ -38,13 +40,34 @@ public class AppSystem
 		// check core count, ram, os?
 		// rendersystemvulkan ends up checking gpu, driver, vram later on
 
-		MissingDependancyDiagnosis.Run();
 	}
 
 	public virtual void Init()
 	{
+		InstallRenderers();
+
 		GCSettings.LatencyMode = GCLatencyMode.SustainedLowLatency;
-		NetCore.InitializeInterop( Environment.CurrentDirectory );
+		try
+		{
+			NetCore.InitializeInterop( Environment.CurrentDirectory );
+		}
+		catch
+		{
+			if ( OperatingSystem.IsWindows() )
+			{
+				MissingDependancyDiagnosis.Run();
+			}
+			throw;
+		}
+	}
+
+	/// <summary>
+	/// Native's rendering pipeline gets its layers from Sandbox.SceneRenderer, which also renders cameras when
+	/// <c>r_managed_scene</c> is on. It references the engine, so it's registered with it here.
+	/// </summary>
+	protected static void InstallRenderers()
+	{
+		SceneRenderer.EngineHooks.Install();
 	}
 
 	void SetupEnvironment()
@@ -105,9 +128,11 @@ public class AppSystem
 
 			NativeEngine.EngineGlobal.Plat_SetCurrentFrame( 0 );
 
+			// Made once, the loop would otherwise allocate a closure every frame
+			Action pumpFrame = () => RunFrame();
 			while ( RunFrame() )
 			{
-				BlockingLoopPumper.Run( () => RunFrame() );
+				BlockingLoopPumper.Run( pumpFrame );
 			}
 
 			Shutdown();
@@ -140,9 +165,12 @@ public class AppSystem
 		// Best effort to sve and flush things.
 		// Might now work because we are in an unstable state.
 
+		try { startupWindow?.Dispose(); } catch { }
 		try { ConVarSystem.SaveAll(); } catch { }
 
 		try { ErrorReporter.Flush(); } catch { }
+
+		try { Api.Activity.SetExitReason( "crash" ); } catch { }
 
 		try { Api.Shutdown(); } catch { }
 
@@ -153,8 +181,15 @@ public class AppSystem
 
 	public virtual void Shutdown()
 	{
+		startupWindow?.Dispose();
+		startupWindow = null;
+
+		Editor.Mcp.McpPipeServer.Stop();
+
 		// Tag crash reports during shutdown so they can be filtered in Sentry
 		NativeErrorReporter.SetTag( "shutdown_crash", "true" );
+
+		Api.Activity.SetExitReason( "quit" );
 
 		// Make sure game instance is closed
 		IGameInstanceDll.Current?.CloseGame();
@@ -175,6 +210,7 @@ public class AppSystem
 		IToolsDll.Current?.Exiting();
 		IMenuDll.Current?.Exiting();
 		IGameInstanceDll.Current?.Exiting();
+		TextureWebStreaming.ClearPrefetch();
 
 		// Flush API
 		Api.Shutdown();
@@ -195,6 +231,7 @@ public class AppSystem
 		// Flush mount utility preview cache — holds strong refs to textures
 		Mounting.MountUtility.FlushCache();
 
+		ConsoleConfig.Shutdown();
 		ConVarSystem.ClearNativeCommands();
 
 		// Whatever package still exists needs to fuck off
@@ -238,6 +275,9 @@ public class AppSystem
 		// Renderpipeline may hold onto native resources, clear them out
 		RenderPipeline.Shutdown();
 
+		// So may the managed scene renderer, if r_managed_scene loaded it
+		Rendering.ManagedSceneRendering.Shutdown();
+
 		// Destroy all cached render targets immediately — must happen before
 		// GlobalContext.Shutdown() so ResourceSystem is still alive for Unregister calls.
 		RenderTarget.Shutdown();
@@ -278,8 +318,15 @@ public class AppSystem
 			log.Warning( $"Leaked scene {leakedScene.Id} during shutdown." );
 		}
 
-		// Shut the engine down (close window etc)
+		// Stop rendering before disposing the game window and its swap chain.
+		Graphics.Shutdown();
+		WindowInput.Shutdown();
+		SdlGamepads.Shutdown();
 		NativeEngine.EngineGlobal.SourceEngineShutdown( _appSystem, false );
+		// Qt window destruction during PreShutdown can enqueue more frame-end cleanup.
+		EngineLoop.DrainFrameEndDisposables();
+		gameWindow?.Dispose();
+		gameWindow = null;
 
 		if ( _appSystem.IsValid )
 		{
@@ -316,6 +363,8 @@ public class AppSystem
 
 	protected void InitGame( AppSystemCreateInfo createInfo, string commandLine = null )
 	{
+		InstallRenderers();
+
 		commandLine ??= System.Environment.CommandLine;
 		commandLine = commandLine.Replace( ".dll", ".exe" ); // uck
 
@@ -342,13 +391,38 @@ public class AppSystem
 		}
 
 		_appSystem.SetSteamAppId( (uint)Application.AppId );
-
-		if ( !NativeEngine.EngineGlobal.SourceEnginePreInit( commandLine, _appSystem ) )
+		if ( createInfo.WantsGameWindow && !Utility.CommandLine.HasSwitch( "-nowindow" ) )
 		{
-			throw new System.Exception( "SourceEnginePreInit failed" );
+			if ( !NativeEngine.EngineGlobal.SourceEngineInitStartupWindow( _appSystem ) )
+				throw new System.Exception( $"Couldn't initialize startup window: {NativeEngine.Sdl.GetError()}" );
+
+			Bootstrap.InitApplication( _appSystem, Environment.CurrentDirectory );
+			startupWindow = new GameStartupWindow( createInfo.WindowTitle );
 		}
 
-		Bootstrap.PreInit( _appSystem );
+
+		startupWindow?.UpdateProgress( 0.02f, "Initializing Vulkan" );
+		if ( !NativeEngine.EngineGlobal.SourceEnginePreInit( commandLine, _appSystem ) )
+		{
+			startupWindow?.Dispose();
+			throw new System.Exception( "SourceEnginePreInit failed" );
+		}
+		if ( !Application.IsInitialized ) Bootstrap.InitApplication( _appSystem );
+		startupWindow?.UpdateProgress( 0.04f, "Creating game window" );
+
+		Bootstrap.PreInit( () =>
+		{
+			WindowInput.Initialize();
+			if ( createInfo.WantsGameWindow )
+			{
+				gameWindow = new GameWindow( createInfo.WindowTitle, startupWindow );
+				startupWindow = null;
+			}
+
+			// Show the startup image before services initialize, and overlap their work with pipeline-cache loading.
+			_appSystem.StartBackgroundSystems();
+			SdlGamepads.Initialize();
+		} );
 
 		if ( createInfo.Flags.HasFlag( AppSystemFlags.IsStandaloneGame ) )
 		{
@@ -360,12 +434,15 @@ public class AppSystem
 			throw new System.Exception( "SourceEngineInit returned false" );
 		}
 
+		gameWindow?.InitializeRendering();
+		gameWindow?.UpdateStartupProgress( 0.5f, "Loading materials" );
 		Bootstrap.Init();
+		gameWindow?.UpdateStartupProgress( 1.0f, "Ready" );
 	}
 
 	protected void SetWindowTitle( string title )
 	{
-		_appSystem.SetAppWindowTitle( title );
+		gameWindow?.Title = title;
 	}
 
 	IntPtr steamApiDll = IntPtr.Zero;
