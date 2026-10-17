@@ -14,6 +14,7 @@ public partial class Titanfall2Mount : BaseGameMount
 	readonly Dictionary<string, MountedAssetSource> _materialSources = new( StringComparer.OrdinalIgnoreCase );
 	readonly Dictionary<string, ITitanfall2AssetSource> _legacyMaterialSources = new( StringComparer.OrdinalIgnoreCase );
 	readonly Dictionary<string, ITitanfall2AssetSource> _legacyTextureSources = new( StringComparer.OrdinalIgnoreCase );
+	readonly Dictionary<string, ITitanfall2AssetSource> _modelSources = new( StringComparer.OrdinalIgnoreCase );
 	readonly Dictionary<string, Titanfall2VmtDefinition> _legacyMaterialDefinitions = new( StringComparer.OrdinalIgnoreCase );
 	readonly Dictionary<string, string> _legacyMaterialErrors = new( StringComparer.OrdinalIgnoreCase );
 	readonly Dictionary<string, string> _legacyAnimatedTexturePaths = new( StringComparer.OrdinalIgnoreCase );
@@ -66,6 +67,7 @@ public partial class Titanfall2Mount : BaseGameMount
 	{
 		ReleaseSceneResources();
 		ResetParticleCatalog();
+		_modelSources.Clear();
 		MaterialLoader.ShutdownSharedResources();
 		StarPakIndex.Clear();
 		lock ( _materialDescriptorLock )
@@ -155,6 +157,7 @@ public partial class Titanfall2Mount : BaseGameMount
 		_legacyMaterialDefinitions.Clear();
 		_legacyMaterialErrors.Clear();
 		_legacyAnimatedTexturePaths.Clear();
+		_modelSources.Clear();
 		ResetParticleCatalog();
 		var archives = new List<VpkArchive>();
 		foreach ( var directoryFile in System.IO.Directory.EnumerateFiles( vpkDirectory, "*_dir.vpk", SearchOption.TopDirectoryOnly )
@@ -262,6 +265,7 @@ public partial class Titanfall2Mount : BaseGameMount
 						break;
 					case ".mdl":
 					case ".rmdl":
+						_modelSources.TryAdd( NormalizeModelSourcePath( entry.Path ), source );
 						context.Add( ResourceType.Model, entry.Path, new ModelLoader( source ) );
 						for ( var lod = 0; lod < ModelLoader.StaticInstanceLodCount; lod++ )
 						{
