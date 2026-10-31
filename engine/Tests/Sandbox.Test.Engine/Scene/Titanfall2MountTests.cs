@@ -370,7 +370,7 @@ public class Titanfall2MountTests : SceneTest
 		using var scope = scene.Push();
 		var original = scene.NavMesh.IncludedBodies;
 		var builder = CreateBuilder( scene );
-		builder.Configure( false, true, 2048f, 0, new BBox( -1000, 1000 ) );
+		builder.Configure( false, true, 2048f, 0, BBox.FromPositionAndSize( -1000, 1000 ) );
 		Assert.IsFalse( scene.NavMesh.IsEnabled );
 		Assert.IsFalse( scene.NavMesh.DeferGeneration );
 		Assert.AreSame( original, scene.NavMesh.IncludedBodies );
@@ -385,7 +385,7 @@ public class Titanfall2MountTests : SceneTest
 		scene.NavMesh.DeferGeneration = false;
 		scene.NavMesh.IsEnabled = true;
 		var builder = CreateBuilder( scene );
-		builder.Configure( false, true, 2048f, 0, new BBox( -1000, 1000 ) );
+		builder.Configure( false, true, 2048f, 0, BBox.FromPositionAndSize( -1000, 1000 ) );
 		Assert.IsTrue( scene.NavMesh.IsEnabled );
 		// The engine's whole-map load pass is skipped and only mounted world collision is used.
 		Assert.IsTrue( scene.NavMesh.DeferGeneration );

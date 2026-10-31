@@ -490,7 +490,7 @@ public static partial class AssetSystem
 
 			var asset = new MountAsset( _freeIndex++, file, source );
 			allAssets[asset.AssetId] = asset;
-			UpdateAsset( asset, compileImmediately: false );
+			UpdateAsset( asset );
 			return asset;
 		}
 	}
