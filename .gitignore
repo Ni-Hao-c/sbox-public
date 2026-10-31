@@ -105,5 +105,11 @@ engine/TestResults/
 /game/screenshots
 /game/tools
 /game/aftermath_dumps
+
+# Generated content and build output (restored by Setup/SboxBuild, never committed)
+/game/addons/**/Transients/
+/game/bin/managed/skills/
+/game/*.runtimeconfig.json
+
 # Local test projects, scripts and logs
 /.tmp/
