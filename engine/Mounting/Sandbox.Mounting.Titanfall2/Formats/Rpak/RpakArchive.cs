@@ -21,7 +21,8 @@ sealed class RpakArchive
 	static long BufferEvictions;
 	static long IndexCacheHits;
 	static long IndexCacheMisses;
-	static long StrongBufferCacheLimit => (long)Titanfall2StreamingSettings.RpakBufferBudgetMb * 1024 * 1024;
+	// Decompressed RPAK buffers kept strongly referenced (LRU) before falling back to weak references.
+	const long StrongBufferCacheLimit = 512L * 1024 * 1024;
 
 	readonly object _bufferLock = new();
 	WeakReference<byte[]> _bufferCache;

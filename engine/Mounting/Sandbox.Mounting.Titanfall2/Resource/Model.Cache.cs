@@ -3,11 +3,7 @@ using static Titanfall2ProcessedCache;
 partial class ModelLoader
 {
 	sealed record StaticMeshGeometry( int Index, string MaterialName, TitanfallVertex[] Vertices, int[] Indices, BBox Bounds );
-	sealed record StaticLodGeometry( StaticMeshGeometry[] Meshes, float Radius )
-	{
-		public int VertexCount => Meshes.Sum( mesh => mesh.Vertices.Length );
-		public int TriangleCount => Meshes.Sum( mesh => mesh.Indices.Length / 3 );
-	}
+	sealed record StaticLodGeometry( StaticMeshGeometry[] Meshes, float Radius );
 
 	bool TryReadStaticCache( string identity, out StaticLodGeometry[] levels )
 	{
@@ -15,7 +11,7 @@ partial class ModelLoader
 		var hit = Titanfall2ProcessedCache.TryRead( "model", identity, reader =>
 		{
 			var count = reader.Count( StaticInstanceBandCount );
-			if ( count != (_allLods ? StaticInstanceBandCount : 1) ) throw new InvalidDataException( "Cached LOD count mismatch." );
+			if ( count != StaticInstanceBandCount ) throw new InvalidDataException( "Cached LOD count mismatch." );
 			result = new StaticLodGeometry[count];
 			for ( var level = 0; level < count; level++ )
 			{

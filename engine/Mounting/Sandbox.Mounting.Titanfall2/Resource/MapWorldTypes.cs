@@ -65,12 +65,11 @@ readonly record struct WorldRenderCell( int X, int Y, int Z )
 sealed record WorldRenderChunk( WorldRenderCell Cell, Model Model );
 
 /// <summary>
-/// Aggregated world geometry (one model per material, one fragment per spatial cell).
-/// The shape and the building logic live in <see cref="MountedAggregateBuilder"/>, so the
-/// mount only carries the result; see that type for why the grouping beats per-cell models.
+/// Built world geometry. Opaque world surfaces are aggregated (one model per material, one
+/// fragment per spatial cell, see <see cref="MountedAggregateBuilder"/>); translucent, decal,
+/// Godray, water and shadow-only surfaces keep one model per spatial cell.
 /// </summary>
 sealed record WorldBuildResult(
-	IReadOnlyList<WorldRenderChunk> WorldChunks,
 	IReadOnlyList<WorldRenderChunk> TranslucentChunks,
 	IReadOnlyList<WorldRenderChunk> DecalChunks,
 	IReadOnlyList<WorldRenderChunk> GodrayChunks,

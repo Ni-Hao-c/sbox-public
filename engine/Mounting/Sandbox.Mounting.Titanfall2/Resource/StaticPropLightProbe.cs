@@ -85,7 +85,6 @@ public sealed class Titanfall2ProbeInstanceBatch : MountedInstanceBatch
 	const int IndexTableCacheSize = 8;
 	readonly GpuBuffer<Titanfall2ProbeData> _probes;
 	readonly GpuBuffer<int> _identityIndices;
-	GpuBuffer<int> _drawIndices;
 	// Created lazily: most batches only ever draw the identity order.
 	readonly IndexTable[] _indexTables = new IndexTable[IndexTableCacheSize];
 	readonly object _indexTableLock = new();
@@ -101,10 +100,6 @@ public sealed class Titanfall2ProbeInstanceBatch : MountedInstanceBatch
 	static readonly StringToken ProbeIndicesAttribute = "T2ProbeIndices";
 	static readonly StringToken ProbeSkyColorAttribute = "T2ProbeSkyColor";
 	static readonly StringToken LocalLightCountAttribute = "T2LocalLightCount";
-	/// <summary>Diagnostic A/B; keeps the previous per-draw upload path available.</summary>
-	public bool ReuseIdentityIndices { get; set; } = true;
-	/// <summary>Reuse bounded, exact subset tables; false restores per-draw uploads for A/B.</summary>
-	public bool ReuseSubsetIndices { get; set; } = true;
 	/// <summary>Opt in for depth shaders which consume coverage/normals, but no lighting probes.</summary>
 	public bool SkipDepthProbeBindings { get; set; }
 	public static long SkippedDepthDraws => System.Threading.Interlocked.Read( ref _depthDraws );
@@ -155,7 +150,7 @@ public sealed class Titanfall2ProbeInstanceBatch : MountedInstanceBatch
 			base.DrawInstances( transforms, sourceIndices, lodLevel );
 			return;
 		}
-		var identity = ReuseIdentityIndices;
+		var identity = true;
 		for ( var i = 0; identity && i < sourceIndices.Length; ++i ) identity = sourceIndices[i] == i;
 		GpuBuffer<int> indices;
 		if ( identity )
@@ -187,13 +182,6 @@ public sealed class Titanfall2ProbeInstanceBatch : MountedInstanceBatch
 		lock ( _indexTableLock )
 		{
 			if ( _deleted || sourceIndices.Length > _instanceCapacity ) return null;
-			if ( !ReuseSubsetIndices )
-			{
-				_drawIndices ??= new GpuBuffer<int>( _instanceCapacity );
-				_drawIndices.SetData( sourceIndices );
-				System.Threading.Interlocked.Increment( ref _indexUploads );
-				return _drawIndices;
-			}
 			var clock = ++_indexTableClock;
 			var slot = 0;
 			var oldest = long.MaxValue;
@@ -230,7 +218,6 @@ public sealed class Titanfall2ProbeInstanceBatch : MountedInstanceBatch
 		lock ( _indexTableLock )
 		{
 			_deleted = true;
-			_drawIndices?.Dispose();
 			for ( var i = 0; i < _indexTables.Length; ++i )
 			{
 				_indexTables[i]?.Buffer.Dispose();

@@ -2,6 +2,9 @@ using Titanfall2;
 
 partial class MapLoader
 {
+	// Multiplier for authored _ambient sky colour when no compiled sky light exists.
+	const float AmbientScale = 1.35f;
+
 	void CreateEnvironment( Titanfall2BspReader.ParsedBsp parsed )
 	{
 		var entities = ReadEntities( _environmentEntitySource );
@@ -21,11 +24,10 @@ partial class MapLoader
 			out var lightColor ) ? lightColor : new Color( 0.78f, 0.74f, 0.68f );
 		light.SkyColor = TryParseSourceLightColor( lightValues?.GetValueOrDefault( "_ambient" ), 0.30f,
 			out var skyColor ) ? skyColor : new Color( 0.22f, 0.28f, 0.36f );
-		// Baked lightmaps are off by default, so the ambient term is the only fill light on
+		// Without baked lightmaps the ambient term is the only fill light on
 		// surfaces the sun does not reach. The raw _ambient value reads as too dark without
 		// Titanfall's exposure, hence the explicit multiplier.
-		if ( !MathF.Equals( Titanfall2StreamingSettings.AmbientScale, 1f ) )
-			light.SkyColor *= Titanfall2StreamingSettings.AmbientScale;
+		light.SkyColor *= AmbientScale;
 		if ( Titanfall2StreamingSettings.UseBspLightmaps )
 		{
 			// WORLD_LIGHTS contains the compiler's linear HDR values. Entity RGB
@@ -56,8 +58,7 @@ partial class MapLoader
 
 		var fogEntities = ReferenceEquals( entities, parsed.Entities ) ? entities.ToArray()
 			: entities.Concat( parsed.Entities.Where( e => e.GetValueOrDefault( "classname" ) == "fog_volume" ) ).ToArray();
-		var fogValues = Titanfall2StreamingSettings.MapFog
-			? new Titanfall2FogEnvironment( fogEntities ).Select( System.Numerics.Vector3.Zero ) : null;
+		var fogValues = new Titanfall2FogEnvironment( fogEntities ).Select( System.Numerics.Vector3.Zero );
 		if ( fogValues is not null )
 		{
 			var fogObject = new GameObject( true, "titanfall2_environment_fog" );
@@ -65,75 +66,45 @@ partial class MapLoader
 			Log.Info( $"Titanfall 2 height/directional fog: {fogValues.GetValueOrDefault( "targetname" )} ({Path})." );
 		}
 
-		// The imported 3D skybox only covers the panorama the map authored; every other direction
-		// otherwise shows the engine's flat procedural sky. A 2D sky behind it gives the map a
-		// real background in all directions (and optionally sky IBL for the unlit side of geometry).
-		var skyLoaded = false;
-		if ( Titanfall2StreamingSettings.Sky2D && !Application.IsHeadless
-			&& !gameObject.Scene.GetAllComponents<SkyBox2D>().Any( static sky => sky.Active ) )
+		// Post-process effects only apply on a camera or a volume. A standalone
+		// root effect is ignored by PostProcessSystem. Keep this map baseline
+		// below game-authored volumes. Retail exposure owns its camera history.
+		var postProcess = new GameObject( true, "titanfall2_map_display" );
+		var volume = postProcess.AddComponent<PostProcessVolume>();
+		volume.SceneVolume = new Sandbox.Volumes.SceneVolume { Type = Sandbox.Volumes.SceneVolume.VolumeTypes.Infinite };
+		volume.Priority = -100;
+		if ( Titanfall2StreamingSettings.UseBspLightmaps )
 		{
-			var skyMaterial = Material.Load( Titanfall2StreamingSettings.SkyMaterial );
-			if ( skyMaterial is not null && skyMaterial.IsValid )
+			var tone = postProcess.AddComponent<Titanfall2Tonemapping>();
+			// Retail display and exposure are distinct from Source 2's Hable.
+			// Defaults come from the original client cvars; script overrides
+			// and local controller volumes still need their own entity/IO path.
+			tone.ExposureCompensation = Titanfall2StreamingSettings.BakedExposureCompensation;
+		}
+		// Global enabled correction entities are explicit authored map data.
+		// Local volumes and scripted fades need their own spatial/IO handling.
+		var correction = entities.FirstOrDefault( values => values.GetValueOrDefault( "classname" ) == "color_correction"
+			&& !IsEntityTrue( values.GetValueOrDefault( "StartDisabled" ) )
+			&& GetEntityFloat( values, "minfalloff", -1 ) < 0 && GetEntityFloat( values, "maxfalloff", -1 ) < 0 );
+		if ( correction?.TryGetValue( "filename", out var lookupPath ) == true )
+		{
+			if ( (_environmentEntitySource ?? _source) is ITitanfall2PathAssetSource resolver
+				&& resolver.TryReadPath( lookupPath, out var lookup, out _ ) && lookup.Length == 32 * 32 * 32 * 3 )
 			{
-				var sky = new GameObject( true, "titanfall2_2d_sky" ).AddComponent<SkyBox2D>();
-				sky.SkyMaterial = skyMaterial;
-				sky.SkyIndirectLighting = Titanfall2StreamingSettings.SkyIndirectLighting;
-				// The cubemap and authored vista materials already contain their
-				// sky colour. A second blue tint biases fog, reflections and LUTs.
-				sky.Tint = Color.White;
-				skyLoaded = true;
+				var weight = GetEntityFloat( correction, "maxweight", 1 );
+				postProcess.AddComponent<Titanfall2ColorCorrection>().Configure( lookup, lookupPath, weight );
+				Log.Info( $"Titanfall 2 map color correction: {lookupPath}, weight {weight} ({Path})." );
 			}
 			else
 			{
-				Log.Warning( $"Unable to load Titanfall 2 2D sky material '{Titanfall2StreamingSettings.SkyMaterial}'." );
-			}
-		}
-
-		var useBakedDisplay = Titanfall2StreamingSettings.UseBspLightmaps && Titanfall2StreamingSettings.BakedTonemapping;
-		if ( useBakedDisplay || Titanfall2StreamingSettings.BakedColorCorrection )
-		{
-			// Post-process effects only apply on a camera or a volume. A standalone
-			// root effect is ignored by PostProcessSystem. Keep this map baseline
-			// below game-authored volumes. Retail exposure owns its camera history.
-			var postProcess = new GameObject( true, "titanfall2_map_display" );
-			var volume = postProcess.AddComponent<PostProcessVolume>();
-			volume.SceneVolume = new Sandbox.Volumes.SceneVolume { Type = Sandbox.Volumes.SceneVolume.VolumeTypes.Infinite };
-			volume.Priority = -100;
-			if ( useBakedDisplay )
-			{
-				var tone = postProcess.AddComponent<Titanfall2Tonemapping>();
-				// Retail display and exposure are distinct from Source 2's Hable.
-				// Defaults come from the original client cvars; script overrides
-				// and local controller volumes still need their own entity/IO path.
-				tone.ExposureCompensation = Titanfall2StreamingSettings.BakedExposureCompensation;
-			}
-			// Global enabled correction entities are explicit authored map data.
-			// Local volumes and scripted fades need their own spatial/IO handling.
-			var correction = entities.FirstOrDefault( values => values.GetValueOrDefault( "classname" ) == "color_correction"
-				&& !IsEntityTrue( values.GetValueOrDefault( "StartDisabled" ) )
-				&& GetEntityFloat( values, "minfalloff", -1 ) < 0 && GetEntityFloat( values, "maxfalloff", -1 ) < 0 );
-			if ( Titanfall2StreamingSettings.BakedColorCorrection && correction?.TryGetValue( "filename", out var lookupPath ) == true )
-			{
-				if ( (_environmentEntitySource ?? _source) is ITitanfall2PathAssetSource resolver
-					&& resolver.TryReadPath( lookupPath, out var lookup, out _ ) && lookup.Length == 32 * 32 * 32 * 3 )
-				{
-					var weight = GetEntityFloat( correction, "maxweight", 1 );
-					postProcess.AddComponent<Titanfall2ColorCorrection>().Configure( lookup, lookupPath, weight );
-					Log.Info( $"Titanfall 2 map color correction: {lookupPath}, weight {weight} ({Path})." );
-				}
-				else
-				{
-					Log.Warning( $"Unable to read Titanfall 2 map color correction '{lookupPath}' as a 32-cubed RGB table ({Path})." );
-				}
+				Log.Warning( $"Unable to read Titanfall 2 map color correction '{lookupPath}' as a 32-cubed RGB table ({Path})." );
 			}
 		}
 
 		Log.Info( $"Titanfall 2 environment created from map entities: "
 			+ $"{(lightValues is null ? "fallback light" : "light_environment")}, "
-			+ $"{(!Titanfall2StreamingSettings.MapFog ? "fog disabled" : fogValues is null ? "no fog entity" : "env_fog_controller")}, "
-			+ $"{light.ShadowCascadeCount} shadow cascade(s), contact shadows {light.ContactShadows}, "
-			+ $"2D sky {(skyLoaded ? Titanfall2StreamingSettings.SkyMaterial : "disabled")} "
-			+ $"(IBL {Titanfall2StreamingSettings.SkyIndirectLighting}) ({Path})." );
+			+ $"{(fogValues is null ? "no fog entity" : "env_fog_controller")}, "
+			+ $"{light.ShadowCascadeCount} shadow cascade(s), contact shadows {light.ContactShadows} ({Path})." );
 	}
 
 	/// <summary>
@@ -199,24 +170,11 @@ partial class MapLoader
 		if ( fogValues.TryGetValue( "fogenable", out var fogEnabled ) && IsEntityFalse( fogEnabled ) )
 			return Titanfall2SkyboxFog.Disabled with { UseWorldFog = useWorldFog };
 
-		var start = MathF.Max( 0f, GetEntityFloat( fogValues, "fogdistoffset",
-			GetEntityFloat( fogValues, "fogstart", 80f ) ) );
-		var end = GetEntityFloat( fogValues, "foghalfdistbottom",
-			GetEntityFloat( fogValues, "fogend", 6000f ) );
-		if ( end <= start ) end = start + 4096f;
-
 		var opacity = Math.Clamp( GetEntityFloat( fogValues, "fogdensity",
 			GetEntityFloat( fogValues, "fogmaxdensity", 0.25f ) ), 0f, 0.65f );
 		if ( opacity <= 0.001f ) return Titanfall2SkyboxFog.Disabled with { UseWorldFog = useWorldFog };
 
-		var color = TryParseRgbColor( fogValues.GetValueOrDefault( "fogcolor" ), 1f, out var parsedColor )
-			? parsedColor.WithAlpha( 1f )
-			: new Color( 0.74f, 0.85f, 1f );
-		return new Titanfall2SkyboxFog( true, color, start, end, opacity )
-		{
-			Parameters = Titanfall2FogParameters.FromEntity( fogValues ),
-			UseWorldFog = useWorldFog
-		};
+		return new Titanfall2SkyboxFog( Titanfall2FogParameters.FromEntity( fogValues ), useWorldFog );
 	}
 
 	static bool TryParseSourceLightColor( string value, float maximumIntensity, out Color result )
@@ -229,18 +187,6 @@ partial class MapLoader
 			Math.Clamp( components[0] / 255f, 0f, 1f ) * intensity,
 			Math.Clamp( components[1] / 255f, 0f, 1f ) * intensity,
 			Math.Clamp( components[2] / 255f, 0f, 1f ) * intensity );
-		return true;
-	}
-
-	static bool TryParseRgbColor( string value, float alpha, out Color result )
-	{
-		result = default;
-		if ( !TryParseFloatComponents( value, out var components ) || components.Length < 3 ) return false;
-		result = new Color(
-			Math.Clamp( components[0] / 255f, 0f, 1f ),
-			Math.Clamp( components[1] / 255f, 0f, 1f ),
-			Math.Clamp( components[2] / 255f, 0f, 1f ),
-			Math.Clamp( alpha, 0f, 1f ) );
 		return true;
 	}
 

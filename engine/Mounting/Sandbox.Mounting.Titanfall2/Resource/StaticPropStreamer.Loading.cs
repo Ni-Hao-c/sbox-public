@@ -144,21 +144,18 @@ public sealed partial class Titanfall2StaticPropStreamer
 		if ( _initialized ) return;
 		_initialized = true;
 		EnsureVisibility();
-		for ( var i = 0; i < Math.Min( AggregatedModelPaths?.Length ?? 0, AggregatedModelRadii?.Length ?? 0 ); i++ )
-			_aggregatedModels[AggregatedModelPaths[i]] = AggregatedModelRadii[i];
 		if ( string.IsNullOrWhiteSpace( EncodedProps ) ) return;
 
 		try
 		{
 			_localLights = Titanfall2LocalLightBuffer.Restore( EncodedLocalLights );
 			_propsWithPvsCells = 0;
-			var clusterSize = Titanfall2StreamingSettings.PropBatchClusterCells;
 			foreach ( var prop in Decode( EncodedProps ) )
 			{
-				var coordinate = CellCoordinate.FromPosition( prop.Position, Titanfall2StreamingSettings.PropCellSize );
+				var coordinate = CellCoordinate.FromPosition( prop.Position, CellSize );
 				if ( !_cells.TryGetValue( coordinate, out var cell ) )
 				{
-					var clusterCoordinate = ClusterCoordinate.FromCell( coordinate, clusterSize );
+					var clusterCoordinate = ClusterCoordinate.FromCell( coordinate, BatchClusterCells );
 					if ( !_clusters.TryGetValue( clusterCoordinate, out var cluster ) )
 					{
 						cluster = new PropCluster( clusterCoordinate );
@@ -176,20 +173,13 @@ public sealed partial class Titanfall2StaticPropStreamer
 
 			_refreshTimer.Start();
 			_statusTimer.Start();
-			Log.Info( $"Titanfall 2 prop LOD mode: {DescribeLodMode( Titanfall2StreamingSettings.PropLodMode )} "
-				+ $"(SBOX_TITANFALL2_PROP_LOD_MODE; SBOX_TITANFALL2_PROP_LODS={Titanfall2StreamingSettings.PropLods}) ({MapPath})." );
 			Log.Info( $"Titanfall 2 prop streamer ready: {_totalProps} props in "
-				+ $"{_cells.Count} cells; prioritize within {Titanfall2StreamingSettings.PropLoadRadius:0}, "
+				+ $"{_cells.Count} cells; prioritize within {LoadRadius:0}, "
 				+ "then load the full map and retain all loaded props until scene teardown, "
-				+ $"{Titanfall2StreamingSettings.PropsPerFrame} props/frame, "
-				+ $"{Titanfall2StreamingSettings.PropFrameBudgetMilliseconds:0.0} ms budget ({MapPath})." );
-			// Only reported when clustering actually groups cells, so a default run keeps the
-			// exact log it had before this feature existed.
-			if ( clusterSize > 1 )
-			{
-				Log.Info( $"Titanfall 2 prop batch clustering: {_cells.Count} prop cells grouped into "
-					+ $"{_clusters.Count} clusters of up to {clusterSize}x{clusterSize} cells each ({MapPath})." );
-			}
+				+ $"{PropsPerFrame} props/frame, "
+				+ $"{FrameBudgetMilliseconds:0.0} ms budget ({MapPath})." );
+			Log.Info( $"Titanfall 2 prop batch clustering: {_cells.Count} prop cells grouped into "
+				+ $"{_clusters.Count} clusters of up to {BatchClusterCells}x{BatchClusterCells} cells each ({MapPath})." );
 		}
 		catch ( Exception exception )
 		{
@@ -206,7 +196,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 		_lastAnchor = anchor;
 		_hasAnchor = true;
 		_refreshTimer.Restart();
-		var loadDistanceSquared = Titanfall2StreamingSettings.PropLoadRadius * Titanfall2StreamingSettings.PropLoadRadius;
+		var loadDistanceSquared = LoadRadius * LoadRadius;
 		_visiblePvsCells = ResolveVisiblePvsCells( anchor );
 
 		// Distance culling is applied per instance and per batch (UpdateClusterVisibilityState),
@@ -217,7 +207,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 
 		foreach ( var cell in _cells.Values )
 		{
-			cell.DistanceSquared = cell.Coordinate.DistanceSquaredToCell( anchor, Titanfall2StreamingSettings.PropCellSize );
+			cell.DistanceSquared = cell.Coordinate.DistanceSquaredToCell( anchor, CellSize );
 			cell.Wanted = cell.DistanceSquared <= loadDistanceSquared;
 
 			var cluster = cell.Cluster;
@@ -247,8 +237,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 	void RebuildRuntimeClusterQueue()
 	{
 		_runtimeClusterQueue.Clear();
-		// Built in cell order before sorting, so with one cell per cluster the list is
-		// exactly the cell list, in the same order, that the pass used before clustering.
+		// Built in cell order before sorting, so each cluster appears once.
 		foreach ( var cell in _cells.Values )
 		{
 			var cluster = cell.Cluster;
@@ -414,7 +403,6 @@ public sealed partial class Titanfall2StaticPropStreamer
 		UpdatePvsStatistics();
 		Log.Info( $"Titanfall 2 prop streaming complete: {_liveProps}/{_totalProps} retained in "
 			+ $"{_activeCells}/{_cells.Count} cells, {_instancedProps} GPU-instanced in {_batchCount} batches, "
-			+ $"{_aggregatedProps} baked into world geometry, "
 			+ $"{_skinnedProps} frozen-skinned fallbacks, {_plainProps} individual rigid, "
 			+ $"{_renderingProps} rendering, {_shadowCastingProps} casting shadows, "
 			+ $"{_collidersCreated}/{_collidableProps} colliders active "
@@ -427,6 +415,43 @@ public sealed partial class Titanfall2StaticPropStreamer
 	}
 
 	/// <summary>
+	/// Loads a mounted model and remembers failures. The resource loader does not cache
+	/// a failed load, so without this every retry re-reads and re-parses the model: a
+	/// model referenced by many instances paid that cost once per instance, and again on
+	/// every cell refresh. Failures back off for a while instead of being written off
+	/// permanently, so a transient problem can recover.
+	/// </summary>
+	Model LoadModelWithRetryCache( string resourcePath, int skin = 0, bool collisionOnly = false )
+	{
+		var failureKey = $"{resourcePath}|{skin}|{collisionOnly}";
+		if ( _modelFailureRetryAfter.TryGetValue( failureKey, out var retryAfter ) )
+		{
+			if ( Titanfall2Log.ElapsedSeconds < retryAfter ) return null;
+			_modelFailureRetryAfter.Remove( failureKey );
+		}
+
+		Model model;
+		try
+		{
+			model = Sandbox.Mounting.Directory.Get( MountIdent ) is Titanfall2Mount mount
+				? mount.LoadModelVariant( resourcePath, skin, collisionOnly: collisionOnly ) : null;
+		}
+		catch ( Exception exception )
+		{
+			Log.Warning( exception, $"Unable to load Titanfall 2 prop model '{resourcePath}'." );
+			model = null;
+		}
+
+		if ( !ModelLoader.IsUsableModel( model ) )
+		{
+			_modelFailureRetryAfter[failureKey] = Titanfall2Log.ElapsedSeconds + ModelLoader.FailureRetrySeconds;
+			return null;
+		}
+
+		return model;
+	}
+
+	/// <summary>
 	/// Reports how many model paths are being skipped because they failed recently.
 	/// Without this the only visible symptom of the retry cache is a shorter log.
 	/// </summary>
@@ -434,6 +459,6 @@ public sealed partial class Titanfall2StaticPropStreamer
 	{
 		if ( _modelFailureRetryAfter.Count == 0 ) return;
 		Log.Info( $"Titanfall 2 model load retry cache: {_modelFailureRetryAfter.Count} distinct paths failed and are "
-			+ $"skipped for {Titanfall2StreamingSettings.ModelFailureRetrySeconds:0}s each ({MapPath})." );
+			+ $"skipped for {ModelLoader.FailureRetrySeconds:0}s each ({MapPath})." );
 	}
 }

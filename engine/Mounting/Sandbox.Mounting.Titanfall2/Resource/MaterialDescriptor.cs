@@ -294,13 +294,9 @@ sealed class Titanfall2MaterialDescriptor
 			if ( Metadata.IsWater ) material.Set( "g_vT2WaterFlow", Vector4.Zero );
 		}
 		// The retail atmosphere program includes engine fog/exposure terms we do
-		// not yet reproduce. Calibrate only these overlapping unlit fog sheets;
-		// lamps, glass, decals and additive shafts retain their authored opacity.
-		if ( IsAtmosphereSheet )
-		{
-			material.Set( "g_flT2AtmosphereOpacityScale", Titanfall2StreamingSettings.AtmosphereOpacityScale );
-			material.Set( "g_flT2AtmosphereDepthFeather", 96f );
-		}
+		// not yet reproduce. Depth-feather only these overlapping unlit fog sheets;
+		// lamps, glass, decals and additive shafts keep hard depth intersections.
+		if ( IsAtmosphereSheet ) material.Set( "g_flT2AtmosphereDepthFeather", 96f );
 		foreach ( var constant in Constants ) ApplyConstant( material, constant );
 		material.Set( "g_flT2Layered", UsesLayeredSurface ? 1f : 0f );
 		material.Set( "g_flT2SpecularWorkflow", SourceKind == Titanfall2MaterialSourceKind.Rpak ? 1f : 0f );

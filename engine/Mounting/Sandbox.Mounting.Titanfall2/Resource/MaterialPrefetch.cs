@@ -11,6 +11,8 @@ sealed class Titanfall2MaterialPrefetch : IDisposable
 {
 	static readonly Sandbox.Diagnostics.Logger Log = new( "Titanfall2Prefetch" );
 	const long Budget = 128L * 1024 * 1024;
+	// Number of materials whose textures are prepared ahead of consumption.
+	const int Window = 4;
 	readonly Titanfall2Mount _host;
 	readonly Queue<string> _pending;
 	readonly Dictionary<string, Task> _jobs = new( StringComparer.OrdinalIgnoreCase );
@@ -27,7 +29,7 @@ sealed class Titanfall2MaterialPrefetch : IDisposable
 	{
 		_host = host;
 		_pending = new Queue<string>( materials.Distinct( StringComparer.OrdinalIgnoreCase ) );
-		for ( var i = 0; i < Titanfall2StreamingSettings.MaterialPrefetchWindow; i++ ) StartNext();
+		for ( var i = 0; i < Window; i++ ) StartNext();
 	}
 
 	void StartNext()

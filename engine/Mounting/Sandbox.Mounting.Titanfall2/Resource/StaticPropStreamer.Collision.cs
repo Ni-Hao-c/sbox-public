@@ -15,10 +15,9 @@ public sealed partial class Titanfall2StaticPropStreamer
 		if ( _collisionCellCursor >= _collisionCellQueue.Count ) return;
 		_collisionQueueTimer.Restart();
 		_collisionInstancesThisFrame = 0;
-		var frameBudget = CollisionFrameBudgetMilliseconds();
 		while ( _collisionCellCursor < _collisionCellQueue.Count )
 		{
-			if ( _collisionInstancesThisFrame >= Titanfall2StreamingSettings.PropCollisionInstancesPerFrame ) break;
+			if ( _collisionInstancesThisFrame >= CollisionInstancesPerFrame ) break;
 			var cell = _collisionCellQueue[_collisionCellCursor];
 			if ( !UpdateCellCollisionState( cell, _lastAnchor, _collisionQueueTimer ) )
 			{
@@ -29,22 +28,12 @@ public sealed partial class Titanfall2StaticPropStreamer
 			}
 
 			_collisionCellCursor++;
-			if ( _collisionQueueTimer.Elapsed.TotalMilliseconds >= frameBudget ) break;
+			if ( _collisionQueueTimer.Elapsed.TotalMilliseconds >= CollisionFrameBudgetMilliseconds ) break;
 		}
 
 		if ( _collisionCellCursor < _collisionCellQueue.Count ) return;
 		_collisionCellQueue.Clear();
 		_collisionCellCursor = 0;
-	}
-
-	/// <summary>
-	/// The collision pass budget: the dedicated per-frame budget, or the historical shared cell
-	/// budget when it is set to 0, so the change can be reverted from the environment.
-	/// </summary>
-	static float CollisionFrameBudgetMilliseconds()
-	{
-		var budget = Titanfall2StreamingSettings.PropCollisionFrameBudgetMilliseconds;
-		return budget > 0f ? budget : Titanfall2StreamingSettings.PropRuntimeCellBudgetMilliseconds;
 	}
 
 	/// <summary>
@@ -62,10 +51,10 @@ public sealed partial class Titanfall2StaticPropStreamer
 		// settings; the runtime pass keeps the churn caps.
 		var frameBudget = _collisionBudgetOverrideMilliseconds > 0f
 			? _collisionBudgetOverrideMilliseconds
-			: CollisionFrameBudgetMilliseconds();
+			: CollisionFrameBudgetMilliseconds;
 		var instanceLimit = _collisionInstanceLimitOverride > 0
 			? _collisionInstanceLimitOverride
-			: Titanfall2StreamingSettings.PropCollisionInstancesPerFrame;
+			: CollisionInstancesPerFrame;
 
 		// Resume from this cell's own cursor. Restarting the scan from the first
 		// instance every frame would re-spend the whole per-frame cap on the same
@@ -101,7 +90,6 @@ public sealed partial class Titanfall2StaticPropStreamer
 	bool EnsureCollisionState( PropInstance instance, Vector3 anchor, Model fallbackModel )
 	{
 		if ( !instance.Source.Collidable
-			|| !WantsPropCollisions
 			|| instance.CollisionUnavailable || instance.CollisionFiltered )
 			return false;
 
@@ -203,10 +191,8 @@ public sealed partial class Titanfall2StaticPropStreamer
 
 	static bool ShouldKeepCollision( Vector3 position, float radius, Vector3 anchor, bool currentlyActive )
 	{
-		if ( Titanfall2StreamingSettings.NavMeshStaticProps || !Titanfall2StreamingSettings.StreamPropCollisions ) return true;
-		var configuredDistance = currentlyActive
-			? Math.Max( Titanfall2StreamingSettings.PropCollisionEnableDistance, Titanfall2StreamingSettings.PropCollisionDisableDistance )
-			: Titanfall2StreamingSettings.PropCollisionEnableDistance;
+		if ( Titanfall2StreamingSettings.NavMeshStaticProps ) return true;
+		var configuredDistance = currentlyActive ? CollisionDisableDistance : CollisionEnableDistance;
 		var distance = configuredDistance + radius;
 		return position.DistanceSquared( anchor ) <= distance * distance;
 	}

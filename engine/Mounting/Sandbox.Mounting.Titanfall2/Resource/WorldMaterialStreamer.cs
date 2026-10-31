@@ -7,17 +7,16 @@ using Sandbox.Mounting;
 /// hostage by synchronous STARPAK reads and GPU texture creation.
 /// </summary>
 /// <remarks>
-/// Not currently installed: nothing adds this component to a scene, so
-/// <c>Titanfall2StreamingSettings.WorldMaterialsPerFrame</c> and
-/// <c>WorldMaterialFrameBudgetMilliseconds</c> are declared but have no effect. World
-/// materials are created synchronously while the map is built. Install this component
-/// (and read those two budgets) only as part of moving that creation out of the load
-/// path; until then, do not treat either budget as active.
+/// Not currently installed: nothing adds this component to a scene. World materials
+/// are created synchronously while the map is built.
 /// </remarks>
 [Library]
 public sealed class Titanfall2WorldMaterialStreamer : Component, Component.DontExecuteOnServer, Sandbox.Internal.IUpdateSubscriber
 {
 	static readonly Sandbox.Diagnostics.Logger Log = new( "Titanfall2WorldMaterials" );
+	// Per-frame material budget: at most this many materials and this many milliseconds.
+	const int MaterialsPerFrame = 1;
+	const double FrameBudgetMilliseconds = 2.0;
 
 	[Property, Hide]
 	public string MountIdent { get; set; }
@@ -57,8 +56,8 @@ public sealed class Titanfall2WorldMaterialStreamer : Component, Component.DontE
 		_budgetTimer.Restart();
 		var processed = 0;
 		while ( _nextMaterial < MaterialPaths.Length
-			&& processed < Titanfall2StreamingSettings.WorldMaterialsPerFrame
-			&& _budgetTimer.Elapsed.TotalMilliseconds < Titanfall2StreamingSettings.WorldMaterialFrameBudgetMilliseconds )
+			&& processed < MaterialsPerFrame
+			&& _budgetTimer.Elapsed.TotalMilliseconds < FrameBudgetMilliseconds )
 		{
 			var materialIndex = _nextMaterial++;
 			var materialName = MaterialPaths[materialIndex];

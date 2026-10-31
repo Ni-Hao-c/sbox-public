@@ -3,23 +3,31 @@ using System.Runtime.InteropServices;
 using Titanfall2.Formats;
 
 /// <summary>Loads an embedded Titanfall 2 MDL53/RMDL as a runtime model.</summary>
-partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false, int staticLod = 0, bool allLods = false, Titanfall2Mount variantHost = null, string variantPath = null, int skin = 0, int body = 0, bool collisionOnly = false ) : ResourceLoader<Titanfall2Mount>
+partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false, Titanfall2Mount variantHost = null, string variantPath = null, int skin = 0, int body = 0, bool collisionOnly = false ) : ResourceLoader<Titanfall2Mount>
 {
 	internal const string StaticInstanceSuffix = ".t2static";
-	// The native path builds one Model that already holds every decoded LOD, so it needs a
-	// resource path of its own. Sharing the legacy ".t2static" name would make the two
-	// loaders fight over a single resource entry, and a runtime A/B between them would hand
-	// out whichever loader happened to be registered, not the one the mode selected.
+	// Resource path suffix of the static-instance model, which holds every decoded LOD.
 	internal const string StaticInstanceAllLodsSuffix = StaticInstanceSuffix + ".all";
 	internal const int StaticInstanceLodCount = Titanfall2Mdl53Constants.MaxLods;
 	// StaticInstanceLodCount is the MDL format's ceiling; this is how many bands the streamer
-	// actually uses. Legacy has exactly four distance bands (the nearest one plus
-	// PropLod1/2/3Distance) and neither SelectLod nor SelectLodByDistance ever returns a level
-	// above 3, so only these four are decoded and only these four carry their own geometry.
+	// actually uses. There are exactly four distance bands (the nearest one plus
+	// Lod1/2/3Distance) and SelectLodByDistance never returns a level above 3, so only
+	// these four are decoded and only these four carry their own geometry.
 	// Levels 4..7 register an alias of the deepest resolved band instead of being left empty: an
 	// empty level could be selected by the engine's own distance calculation (the props that pass
 	// no explicit level) and would then draw nothing at all. See BuildStaticInstanceAllLodsModel.
 	internal const int StaticInstanceBandCount = 4;
+	// World distances at which a static instance switches to LOD1, LOD2 and LOD3.
+	const float Lod1Distance = 1536f;
+	const float Lod2Distance = 4096f;
+	const float Lod3Distance = 8192f;
+	// Horizontal focal length in pixels used to turn LOD distances into screen-size thresholds
+	// (viewportWidth / (2 * tan(fov/2)); 960 is 1920 px at 90 degrees).
+	const float LodFocalPixels = 960f;
+	// Render meshes above this triangle count are replaced by one bounds hull for collision.
+	const int CollisionMeshMaxTriangles = 8192;
+	// How long a model (or sound) that failed to load is skipped before it is retried.
+	internal const float FailureRetrySeconds = 30f;
 	const float DecalNormalOffset = 0.05f;
 	sealed class StaticInstanceEligibilityValue( bool eligible )
 	{
@@ -39,9 +47,6 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 	static long _fallbackTriangleCount;
 	readonly ITitanfall2AssetSource _source = source;
 	readonly bool _staticInstance = staticInstance;
-	readonly int _staticLod = Math.Clamp( staticLod, 0, StaticInstanceLodCount - 1 );
-	readonly bool _allLods = allLods;
-	bool ImportAllBodyGroups => variantHost is null && Titanfall2StreamingSettings.ImportAllBodyGroupChoices;
 	Titanfall2Mount ImportHost => variantHost ?? Host;
 	string ImportPath => variantPath ?? Path;
 	readonly Dictionary<(int Skin, int Body, bool Collision), WeakReference<Model>> _variants = new();
@@ -54,7 +59,7 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 		lock ( _variants )
 		{
 			if ( _variants.TryGetValue( key, out var weak ) && weak.TryGetTarget( out var cached ) && IsUsableModel( cached ) ) return cached;
-			var loader = new ModelLoader( _source, _staticInstance && !onlyCollision, _staticLod, _allLods,
+			var loader = new ModelLoader( _source, _staticInstance && !onlyCollision,
 				ImportHost, $"{ImportPath}/skin{requestedSkin}_body{requestedBody}{(onlyCollision ? "_physics" : "")}", requestedSkin, requestedBody, onlyCollision );
 			var model = loader.Load() as Model;
 			if ( IsUsableModel( model ) ) _variants[key] = new WeakReference<Model>( model );
@@ -115,11 +120,13 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 
 	protected override object Load()
 	{
+		// The "True:0" and trailing "False" fields are kept from the earlier key layout so
+		// processed-cache entries written before it remain valid.
 		var cacheIdentity = _staticInstance && !collisionOnly && Titanfall2StreamingSettings.ProcessedCache
-			? $"{ImportHost.ContentFingerprint}|{_source.CacheIdentity}|static:{_allLods}:{_staticLod}:{skin}:{body}:{ImportAllBodyGroups}"
+			? $"{ImportHost.ContentFingerprint}|{_source.CacheIdentity}|static:True:0:{skin}:{body}:False"
 			: null;
 		if ( cacheIdentity is not null && TryReadStaticCache( cacheIdentity, out var cachedLevels ) )
-			return _allLods ? BuildStaticInstanceAllLodsModel( cachedLevels ) : BuildStaticInstanceModel( cachedLevels[0] );
+			return BuildStaticInstanceAllLodsModel( cachedLevels );
 		if ( !_source.TryReadAllBytes( out var data, out var error ) )
 		{
 			Titanfall2Log.Warning( $"Failed to read Titanfall 2 model '{ImportPath}': {error}" );
@@ -129,25 +136,16 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 		try
 		{
 			var parsed = Titanfall2Mdl53Reader.Parse( data );
-			if ( _staticInstance && _allLods )
+			if ( _staticInstance )
 			{
 				var levels = Enumerable.Range( 0, StaticInstanceBandCount ).Select( level => PrepareStaticGeometry(
-					Titanfall2MeshExtractor.ExtractLod( parsed, level, ImportAllBodyGroups, body, skin ) ) ).ToArray();
+					Titanfall2MeshExtractor.ExtractLod( parsed, level, false, body, skin ) ) ).ToArray();
 				if ( cacheIdentity is not null ) WriteStaticCache( cacheIdentity, levels );
 				return BuildStaticInstanceAllLodsModel( levels );
 			}
-			var lod = Titanfall2MeshExtractor.ExtractLod( parsed, _staticInstance ? _staticLod : 0, ImportAllBodyGroups, body, skin );
-			if ( _staticInstance && lod.Meshes.Length == 0 && _staticLod != 0 )
-			{
-				// Some static props only ship LOD0.  Their virtual LOD resource still
-				// resolves safely instead of becoming an error model at range.
-				lod = Titanfall2MeshExtractor.ExtractLod( parsed, 0, ImportAllBodyGroups, body, skin );
-			}
+			var lod = Titanfall2MeshExtractor.ExtractLod( parsed, 0, false, body, skin );
 			if ( collisionOnly ) return BuildCollisionOnly( parsed, lod, data );
-			if ( !_staticInstance ) return BuildModel( parsed, lod, data );
-			var geometry = PrepareStaticGeometry( lod );
-			if ( cacheIdentity is not null ) WriteStaticCache( cacheIdentity, new[] { geometry } );
-			return BuildStaticInstanceModel( geometry );
+			return BuildModel( parsed, lod, data );
 		}
 		catch ( Exception exception )
 		{
@@ -156,66 +154,29 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 		}
 	}
 
-	// CPU-only source for baking infrequent rigid props into the world's spatial
-	// material groups. Keep models with useful LODs instanced so baking cannot
-	// silently replace their inexpensive distant geometry with permanent LOD0.
-	internal bool TryReadAggregateGeometry( out Titanfall2MeshExtractor.ExtractedLod lod )
-	{
-		lod = null;
-		if ( !_source.TryReadAllBytes( out var data, out _ ) ) return false;
-		try
-		{
-			var parsed = Titanfall2Mdl53Reader.Parse( data );
-			if ( parsed.Bones.Length > 1 ) return false;
-			var first = Titanfall2MeshExtractor.ExtractLod( parsed, 0, ImportAllBodyGroups, body, skin );
-			if ( first.VertexCount == 0 || first.VertexCount > 32768 ) return false;
-			for ( var level = 1; level < StaticInstanceBandCount; level++ )
-			{
-				var lower = Titanfall2MeshExtractor.ExtractLod( parsed, level, ImportAllBodyGroups, body, skin );
-				if ( lower.TriangleCount > 0 && lower.TriangleCount < first.TriangleCount ) return false;
-			}
-			lod = first;
-			return true;
-		}
-		catch ( Exception ) { return false; }
-	}
-
-	internal static string GetStaticInstancePath( string sourceModelPath, int lod = 0 )
-		=> lod <= 0
-			? sourceModelPath + StaticInstanceSuffix
-			: sourceModelPath + StaticInstanceSuffix + $".lod{Math.Clamp( lod, 1, StaticInstanceLodCount - 1 )}";
-
-	/// <summary>
-	/// Resource path of the single model that carries every decoded LOD. It is deliberately a
-	/// different resource from <see cref="GetStaticInstancePath"/>, because the legacy per-LOD
-	/// resources stay registered: the LOD mode is a runtime switch and both sides have to be
-	/// loadable in the same session.
-	/// </summary>
+	/// <summary>Resource path of the static-instance model that carries every decoded LOD.</summary>
 	internal static string GetStaticInstanceAllLodsPath( string sourceModelPath )
 		=> sourceModelPath + StaticInstanceAllLodsSuffix;
 
 	/// <summary>
-	/// The native path's draw-time level choice. It uses the same thresholds the legacy streamer
-	/// used as distance bands, but without the legacy hysteresis: that hysteresis only exists to
-	/// keep the legacy swap queue from churning while a batch sits on a threshold, and the native
-	/// path has no queue and no per-batch level state - the level is recomputed from the batch
-	/// bounds on every draw. The result is capped at the last band the model registers.
+	/// The draw-time level choice for a static-instance batch. There is no hysteresis: the
+	/// batch has no per-batch level state, the level is recomputed on every draw. The result
+	/// is capped at the last band the model registers.
 	/// </summary>
 	internal static int SelectLodByDistance( float distance )
 	{
-		if ( !Titanfall2StreamingSettings.PropLods ) return 0;
-		var lod = distance > Titanfall2StreamingSettings.PropLod3Distance ? 3
-			: distance > Titanfall2StreamingSettings.PropLod2Distance ? 2
-			: distance > Titanfall2StreamingSettings.PropLod1Distance ? 1
+		var lod = distance > Lod3Distance ? 3
+			: distance > Lod2Distance ? 2
+			: distance > Lod1Distance ? 1
 			: 0;
 		return Math.Clamp( lod, 0, StaticInstanceBandCount - 1 );
 	}
 
 	/// <summary>
-	/// The engine's own LOD switch distance for one band, taken from the numbers the legacy
-	/// streamer used as distance bands. A draw that does not pass an explicit level (an
+	/// The engine's own LOD switch distance for one band, taken from the same distance bands as
+	/// <see cref="SelectLodByDistance"/>. A draw that does not pass an explicit level (an
 	/// individual non-instanceable prop, a batch fallback object, an editor preview) therefore
-	/// resolves to the level the legacy streamer would have swapped in for that distance.
+	/// resolves to the same level an instanced draw would pick at that distance.
 	/// Bands 4..7 carry band 3's geometry as an alias, and they are written to band 3's distance
 	/// rather than left at the builder's 50-unit defaults, because the engine walks the whole
 	/// switch distance array before it clamps to the bands the model uses: a small threshold at a
@@ -224,9 +185,9 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 	/// </summary>
 	internal static float GetLodSwitchDistance( int lod ) => lod switch
 	{
-		1 => Titanfall2StreamingSettings.PropLod1Distance,
-		2 => Titanfall2StreamingSettings.PropLod2Distance,
-		>= 3 => Titanfall2StreamingSettings.PropLod3Distance,
+		1 => Lod1Distance,
+		2 => Lod2Distance,
+		>= 3 => Lod3Distance,
 		_ => 0f
 	};
 
@@ -264,11 +225,7 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 		return any ? (max - min).Length() * 0.5f : 0f;
 	}
 
-	/// <summary>
-	/// Builds the drawable meshes of one extracted LOD. Both assemblers below share it so the
-	/// legacy per-LOD model and the native all-LOD model cannot drift apart: a mesh that draws
-	/// in one has to draw in the other, or an A/B between them would compare different geometry.
-	/// </summary>
+	/// <summary>Builds the drawable meshes of one extracted LOD (also the processed-cache payload).</summary>
 	StaticLodGeometry PrepareStaticGeometry( Titanfall2MeshExtractor.ExtractedLod lod )
 	{
 		var meshes = new List<StaticMeshGeometry>();
@@ -328,43 +285,10 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 	}
 
 	/// <summary>
-	/// The legacy per-LOD model: one level's geometry, registered so that the engine's own LOD
-	/// selection cannot pick a level this model does not contain. The streamer keeps a model
-	/// like this resident per distance band and swaps the whole batch when the band changes.
-	/// </summary>
-	Model BuildStaticInstanceModel( StaticLodGeometry lod )
-	{
-		var isVista = IsVistaModelPath( ImportPath );
-		var builder = Model.Builder.WithName( ImportPath );
-		var canInstance = true;
-		var meshes = CreateStaticInstanceMeshes( lod, isVista, ref canInstance );
-
-		if ( meshes.Count == 0 )
-		{
-			Titanfall2Log.Warning( $"Titanfall 2 static instance model contains no LOD{_staticLod} geometry: {ImportPath}" );
-			return null;
-		}
-
-		// Every mesh is visible at every level, which is what the legacy per-LOD model always
-		// did: the model only holds one band's geometry, so which level the engine picks for it
-		// is not this path's business.
-		foreach ( var mesh in meshes )
-			builder.AddMesh( mesh );
-
-		var model = builder.Create();
-		StaticInstanceEligibility.Add( model, new StaticInstanceEligibilityValue( canInstance ) );
-		Titanfall2Log.Trace( $"Titanfall 2 static instance model loaded: {ImportPath} "
-			+ $"({lod.Meshes.Length} meshes, {lod.VertexCount} vertices, "
-			+ $"{lod.TriangleCount} triangles, GPU instancing {(canInstance ? "enabled" : "disabled for special materials")})" );
-		return model;
-	}
-
-	/// <summary>
-	/// The native model: every LOD the streamer can ask for (bands 0..3) as one resource, one
-	/// instanced draw and one transform array, with the level passed explicitly to
-	/// <c>Graphics.DrawModelInstanced</c> instead of a whole model being swapped per band.
-	/// That removes the main-thread model load and the batch rebuild from movement entirely:
-	/// crossing a threshold only changes a draw argument. Levels 4..7 are registered too, as an
+	/// The static-instance model: every LOD the streamer can ask for (bands 0..3) as one resource,
+	/// one instanced draw and one transform array, with the level passed explicitly to
+	/// <c>Graphics.DrawModelInstanced</c>. No model is loaded and no batch is rebuilt while the
+	/// camera moves: crossing a threshold only changes a draw argument. Levels 4..7 are registered too, as an
 	/// alias of the deepest resolved band, so that no level of this model can be empty - see the
 	/// AddMesh loop below for why that matters. One visible consequence of registering them: an
 	/// explicit LOD override is clamped to the model's highest used level
@@ -372,11 +296,7 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 	/// so that clamp now reaches 7 instead of 3. It draws the aliased band 3 geometry, not nothing.
 	///
 	/// The cost is paid once, when the prop's model is first loaded: every band that has
-	/// geometry is decoded and uploaded then, instead of one band's geometry per cold load.
-	/// That is also why the decode is not conditioned on PropLods: PropLods is a runtime A/B
-	/// switch, and a model that was built without the higher bands could not gain them later,
-	/// so PropLods=0 keeps paying the load-time decode of all bands while every draw is
-	/// guaranteed to be LOD0 (SelectLodByDistance returns 0 before it looks at any distance).
+	/// geometry is decoded and uploaded then.
 	/// </summary>
 	Model BuildStaticInstanceAllLodsModel( StaticLodGeometry[] levelLods )
 	{
@@ -391,9 +311,8 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 
 		if ( levelMeshes[0].Count == 0 )
 		{
-			// The legacy loader treated a model without LOD0 as unusable too: its band 0
-			// resource failed to load and the streamer fell back to the full model, which
-			// carries collision and animations. Keeping that outcome here means a malformed
+			// A model without LOD0 is unusable as a static instance: the streamer then falls
+			// back to the full model, which carries collision and animations, so a malformed
 			// model still gets one working object instead of a model with a hole at close range.
 			Titanfall2Log.Warning( $"Titanfall 2 static instance model contains no LOD0 geometry: {ImportPath}" );
 			return null;
@@ -413,8 +332,7 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 		// than four bands draw its finest geometry at every distance - measured on mp_angel_city:
 		// of 756 distinct prop models, 245 had a farthest band at least as heavy as their nearest
 		// one (colony_fence_a was 324/252/252 then back to 324), so the frame ended up GPU bound
-		// on triangles and PropLods changed nothing at all, because every level held the same
-		// geometry. Carrying the coarsest band forward keeps far distance cheap and still draws
+		// on triangles, because every level held the same geometry. Carrying the coarsest band forward keeps far distance cheap and still draws
 		// real geometry, so no level is ever empty and no level is finer than its neighbour.
 		var coarsestSoFar = 0;
 		for ( var level = 0; level < StaticInstanceBandCount; ++level )
@@ -433,8 +351,7 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 		// counts the eight switch distances we write rather than the mesh masks, automatic
 		// selection (a prop that passes no explicit level, i.e. the non-instanceable special
 		// materials, plus editor previews) can reach 4..7. An empty level there yields no draws
-		// and the prop disappears; an aliased one yields band 3's geometry, which is what legacy
-		// drew past 8192. Cost is four extra registration entries per mesh (levels 4, 5, 6 and 7),
+		// and the prop disappears; an aliased one yields the deepest band's geometry. Cost is four extra registration entries per mesh (levels 4, 5, 6 and 7),
 		// all pointing at Mesh objects that already exist, so no vertices or index buffers are
 		// duplicated.
 		for ( var level = StaticInstanceBandCount; level < StaticInstanceLodCount; ++level )
@@ -447,8 +364,7 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 		// metric = 50 / screenWidthInPixels and takes the first level whose switch distance is below
 		// that metric (Sandbox.SceneRenderer\World\Objects\RenderMesh.cs:282-295). A threshold written
 		// in world units (1536/4096/8192) is therefore above every metric a prop can produce, the walk
-		// never breaks, and the model draws LOD0 at every distance - measured here: 92% of prop models
-		// had no cheaper far level and PropLods changed nothing at all.
+		// never breaks, and the model draws LOD0 at every distance.
 		//
 		// screenWidthInPixels ~= 2 * radius * focal / distance, so the threshold that fires at world
 		// distance D is 25 * D / (radius * focal). radius is this model's own bounding radius, not a
@@ -456,11 +372,8 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 		// and a shared radius puts small props' switch distances far too late (a 32-unit radius on an
 		// 8-unit prop makes every threshold 4x too far), which showed up as triangle counts well
 		// above what the instanced path draws for the same instances.
-		var nominalRadius = Titanfall2StreamingSettings.PropLodNominalRadius;
-		var modelRadius = nominalRadius > 0f
-			? nominalRadius
-			: MathF.Max( levelLods[0].Radius, 0.25f );
-		var lodScale = 25f / (modelRadius * Titanfall2StreamingSettings.PropLodFocalPixels);
+		var modelRadius = MathF.Max( levelLods[0].Radius, 0.25f );
+		var lodScale = 25f / (modelRadius * LodFocalPixels);
 		for ( var level = 1; level < StaticInstanceLodCount; ++level )
 			builder.WithLodDistance( level, GetLodSwitchDistance( level ) * lodScale );
 
@@ -497,7 +410,7 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 		// the default mask, so ModelRenderer.SetBodyGroup can switch without another model.
 		// Only the body-0 model gets native groups: choice 0 is the native default, and packed
 		// body variants keep their selected-only geometry for Titanfall2ModelVariant.
-		var bodyGroups = ImportAllBodyGroups || body != 0 ? null : NativeBodyGroupNames( parsed );
+		var bodyGroups = body != 0 ? null : NativeBodyGroupNames( parsed );
 		if ( bodyGroups is not null )
 		{
 			lod = Titanfall2MeshExtractor.ExtractLod( parsed, 0, true, body, skin );
@@ -891,11 +804,10 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 		if ( renderVertices.Count > 0 && renderIndices.Count > 0 )
 		{
 			var triangleCount = renderIndices.Count / 3;
-			if ( triangleCount <= Titanfall2StreamingSettings.ModelCollisionMeshMaxTriangles )
+			if ( triangleCount <= CollisionMeshMaxTriangles )
 			{
 				builder.AddTraceMesh( renderVertices, renderIndices );
-				if ( collisionOnly || Titanfall2StreamingSettings.PropCollisions || Titanfall2StreamingSettings.NavMeshStaticProps )
-					builder.AddCollisionMesh( renderVertices.ToArray(), renderIndices.ToArray() );
+				builder.AddCollisionMesh( renderVertices.ToArray(), renderIndices.ToArray() );
 				return ("render-mesh fallback", 1);
 			}
 
@@ -1380,9 +1292,7 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 		return normalized.Contains( "toolsnodraw", StringComparison.OrdinalIgnoreCase )
 			|| normalized.Contains( "toolsinvisible", StringComparison.OrdinalIgnoreCase )
 			|| normalized.Contains( "toolsskybox", StringComparison.OrdinalIgnoreCase )
-			|| Titanfall2CollisionFilter.IsNonSolidToolName( normalized )
-			|| (!Titanfall2StreamingSettings.AtmosphericCardEffects
-				&& Titanfall2CollisionFilter.IsAtmosphericCardName( normalized ));
+			|| Titanfall2CollisionFilter.IsNonSolidToolName( normalized );
 	}
 
 	static int[] ReverseWinding( IReadOnlyList<int> source )

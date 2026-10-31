@@ -266,7 +266,7 @@ public sealed class Titanfall2ModelVariant : Component, Sandbox.Internal.IUpdate
 		if ( !ModelLoader.IsUsableModel( model ) )
 		{
 			_applied = key;
-			_retryAt = Titanfall2Log.ElapsedSeconds + Titanfall2StreamingSettings.ModelFailureRetrySeconds;
+			_retryAt = Titanfall2Log.ElapsedSeconds + ModelLoader.FailureRetrySeconds;
 			return false;
 		}
 		Renderer ??= Components.Get<ModelRenderer>();

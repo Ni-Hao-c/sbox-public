@@ -5,26 +5,27 @@ using Titanfall2;
 public sealed partial class Titanfall2StaticPropStreamer
 {
 	/// <summary>
-	/// Creates the instanced draw object for one batch. Which flags to submit with and whether
-	/// the draw passes an explicit LOD are mount settings; the batch itself (bounds, submission
+	/// Creates the instanced draw object for one batch. The batch itself (bounds, submission
 	/// flags, explicit-LOD draw, instance-set replacement) is PerfKit's reusable implementation.
 	/// </summary>
-	MountedInstanceBatch CreateRenderBatch( PendingBatch batch, Model model, bool castShadows, Titanfall2PropLodMode lodMode )
+	MountedInstanceBatch CreateRenderBatch( PendingBatch batch, bool castShadows )
 	{
+		var model = batch.Model;
 		var probeColor = batch.AverageProbeColor;
 		var options = new MountedInstanceBatchOptions
 		{
 			CastShadows = castShadows,
-			Batchable = Titanfall2StreamingSettings.PropBatchable,
-			IncludeInCubemap = Titanfall2StreamingSettings.PropIncludeInCubemap,
-			NeedsEnvironmentMap = Titanfall2StreamingSettings.PropNeedsEnvironmentMap,
+			// Batchable lets the engine merge submissions; the two pass flags keep prop batches
+			// out of the extra cubemap and environment-map passes.
+			Batchable = true,
+			IncludeInCubemap = false,
+			NeedsEnvironmentMap = false,
 			Tint = new Color( probeColor.x, probeColor.y, probeColor.z, 1f ),
-			SelectLod = lodMode == Titanfall2PropLodMode.Native ? ModelLoader.SelectLodByDistance : null,
+			SelectLod = ModelLoader.SelectLodByDistance,
 		};
 		MountedInstanceBatch result = batch.Probes.Any( static probe => probe.Metadata.x > 0 )
 			? new Titanfall2ProbeInstanceBatch( Scene.SceneWorld, model, batch.GetOrBuildTransformArray(), batch.Probes.ToArray(), BakedSkyColor, options, _localLights )
 			: new Titanfall2PlainInstanceBatch( Scene.SceneWorld, model, batch.GetOrBuildTransformArray(), options );
-		result.FrustumCullingEnabled = Titanfall2StreamingSettings.PropInstanceFrustumCulling;
 		// Production opaque/cutout variants return depth normals before reading probes.
 		// Leave arbitrary forward-only diagnostic/custom batch shaders on the full path.
 		if ( result is Titanfall2ProbeInstanceBatch probes ) probes.SkipDepthProbeBindings = true;
@@ -44,8 +45,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 				var castShadows = pendingBatch.ShadowedInstanceCount > 0;
 				try
 				{
-					pendingBatch.RenderBatch = CreateRenderBatch(
-						pendingBatch, pendingBatch.Model, castShadows, pendingBatch.LodMode );
+					pendingBatch.RenderBatch = CreateRenderBatch( pendingBatch, castShadows );
 					pendingBatch.RenderBatch.RenderingEnabled = Active && pendingBatch.RenderingEnabled;
 					_batchCount++;
 
@@ -67,10 +67,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 						var probeColor = pendingBatch.ProbeColors[index];
 						fallback.ColorTint = new Color( probeColor.x, probeColor.y, probeColor.z, 1f );
 						pendingBatch.Probes[index].Apply( fallback, BakedSkyColor );
-						fallback.Flags.CastShadows = ShouldCastShadows(
-							pendingBatch.Transforms[index].Position,
-							pendingBatch.Radii[index],
-							_lastAnchor );
+						fallback.Flags.CastShadows = ShouldCastShadows( pendingBatch.Radii[index] );
 						fallback.RenderingEnabled = Active && pendingBatch.RenderingEnabled;
 						pendingBatch.FallbackObjects.Add( fallback );
 					}
@@ -79,14 +76,8 @@ public sealed partial class Titanfall2StaticPropStreamer
 		}
 	}
 
-	static bool ShouldCastShadows( Vector3 position, float radius, Vector3 anchor )
-	{
-		if ( !Titanfall2StreamingSettings.PropShadows ) return false;
-		if ( radius < Titanfall2StreamingSettings.PropShadowMinimumRadius ) return false;
-		if ( Titanfall2StreamingSettings.PropShadowDistance <= 0f ) return true;
-		var distance = Titanfall2StreamingSettings.PropShadowDistance + radius;
-		return position.DistanceSquared( anchor ) <= distance * distance;
-	}
+	static bool ShouldCastShadows( float radius )
+		=> Titanfall2StreamingSettings.PropShadows && radius >= ShadowMinimumRadius;
 
 	/// <summary>
 	/// Releases the native batches owned by one cluster. This is the only place a batch is

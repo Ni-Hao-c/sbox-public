@@ -13,6 +13,16 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 	const int DataMagic = 0x58465054; // TPFX
 	const int DataVersion = 3;
 	const int MaximumEntityCount = 100_000;
+	// PCF libraries and map effects are created in two bounded stages so hundreds of
+	// small effects never become one long loading or movement stall.
+	const int LibrariesPerFrame = 8;
+	const float LibraryFrameBudgetMilliseconds = 2f;
+	const int InstancesPerFrame = 4;
+	const float InstanceFrameBudgetMilliseconds = 2f;
+	const float ActivationRadius = 4096f;
+	// A suspended looping effect is stepped forward this long on waking so it reappears filled.
+	const float WakeWarmupSeconds = 1f;
+	const float WakeWarmupBudgetMilliseconds = 1.5f;
 
 	[Property, Hide]
 	public string MountIdent { get; set; }
@@ -76,8 +86,8 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 		if ( _pending.Count > 0 && !mount.IsParticleCatalogComplete )
 		{
 			mount.IndexParticleFiles(
-				Titanfall2StreamingSettings.ParticleLibrariesPerFrame,
-				Titanfall2StreamingSettings.ParticleLibraryFrameBudgetMilliseconds );
+				LibrariesPerFrame,
+				LibraryFrameBudgetMilliseconds );
 		}
 
 		SpawnAvailable( mount );
@@ -136,8 +146,8 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 			_pending.Sort( ( left, right ) => left.Position.DistanceSquared( anchor ).CompareTo( right.Position.DistanceSquared( anchor ) ) );
 			_statusTimer.Start();
 			Log.Info( $"Titanfall 2 particle streamer ready: {_pending.Count} active map FX; "
-				+ $"{Titanfall2StreamingSettings.ParticleLibrariesPerFrame} PCFs/frame, "
-				+ $"{Titanfall2StreamingSettings.ParticleInstancesPerFrame} systems/frame ({MapPath})." );
+				+ $"{LibrariesPerFrame} PCFs/frame, "
+				+ $"{InstancesPerFrame} systems/frame ({MapPath})." );
 		}
 		catch ( Exception exception )
 		{
@@ -152,8 +162,8 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 		_spawnTimer.Restart();
 		var created = 0;
 		for ( var index = 0; index < _pending.Count
-			&& created < Titanfall2StreamingSettings.ParticleInstancesPerFrame
-			&& _spawnTimer.Elapsed.TotalMilliseconds < Titanfall2StreamingSettings.ParticleInstanceFrameBudgetMilliseconds; )
+			&& created < InstancesPerFrame
+			&& _spawnTimer.Elapsed.TotalMilliseconds < InstanceFrameBudgetMilliseconds; )
 		{
 			var entity = _pending[index];
 			if ( !mount.TryGetParticleDefinition( entity.EffectName, out var definition ) )
@@ -217,7 +227,7 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 			drawDistance = MathF.Max( drawDistance, system.Definition.MaxDrawDistance * entity.Scale );
 			sleepTime = MathF.Max( sleepTime, system.Definition.SleepWhenNotDrawnTime );
 			var seconds = system.Definition.Looping
-				? MathF.Min( Titanfall2StreamingSettings.ParticleWakeWarmupSeconds,
+				? MathF.Min( WakeWarmupSeconds,
 					MathF.Max( system.Definition.WarmupTime, system.Definition.LifetimeMaximum ) )
 				: 0f;
 			if ( seconds > 0f && system.Effect.IsValid() ) warmup.Add( (system.Effect, seconds) );
@@ -245,7 +255,6 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 	/// </summary>
 	Frustum? GetViewFrustum()
 	{
-		if ( !Titanfall2StreamingSettings.ParticleSleepWhenNotDrawn ) return null;
 		var camera = Scene?.Camera;
 		return camera.IsValid() ? camera.GetFrustum() : null;
 	}
@@ -261,8 +270,8 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 
 	static bool IsWanted( SpawnedEntity entity, Vector3 anchor, Frustum? frustum, float now )
 	{
-		var radius = Titanfall2StreamingSettings.ParticleActivationRadius + entity.InfluenceRadius;
-		if ( Titanfall2StreamingSettings.ParticleDrawDistance ) radius = MathF.Min( radius, entity.DrawDistance );
+		var radius = ActivationRadius + entity.InfluenceRadius;
+		radius = MathF.Min( radius, entity.DrawDistance );
 		if ( entity.Position.DistanceSquared( anchor ) > radius * radius ) return false;
 		if ( frustum is not { } view ) return true;
 
@@ -282,7 +291,7 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 	void WarmUp( SpawnedEntity entity )
 	{
 		if ( entity.Warmup.Length == 0 ) return;
-		if ( _warmupMilliseconds >= Titanfall2StreamingSettings.ParticleWakeWarmupBudgetMilliseconds ) return;
+		if ( _warmupMilliseconds >= WakeWarmupBudgetMilliseconds ) return;
 		_warmupProbe.Restart();
 		foreach ( var (effect, seconds) in entity.Warmup )
 		{
@@ -393,12 +402,18 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 
 static class Titanfall2ParticleFactory
 {
+	// Caps keep a malformed or kilometre-sized definition from covering the map.
+	internal const float MaximumRadius = 256f;
+	internal const float AtmosphereMaximumRadius = 8192f;
+	internal const float MaximumEmitterExtent = 2048f;
+	internal const int MaxParticlesPerSystem = 256;
+	internal const float MaximumVelocity = 2048f;
 	const int MaximumChildDepth = 8;
 
 	internal static float GetRadiusLimit( Titanfall2ParticleDefinition definition ) =>
 		definition.MaterialName?.StartsWith( "particle/smoke/", StringComparison.OrdinalIgnoreCase ) == true
-			? MathF.Max( Titanfall2StreamingSettings.ParticleMaximumRadius, Titanfall2StreamingSettings.ParticleAtmosphereMaximumRadius )
-			: Titanfall2StreamingSettings.ParticleMaximumRadius;
+			? MathF.Max( Titanfall2ParticleFactory.MaximumRadius, Titanfall2ParticleFactory.AtmosphereMaximumRadius )
+			: Titanfall2ParticleFactory.MaximumRadius;
 
 	internal static float GetInfluenceRadius( Titanfall2ParticleDefinition definition )
 	{
@@ -408,7 +423,7 @@ static class Titanfall2ParticleFactory
 		foreach ( var remap in definition.DistanceRemaps.Where( remap => remap.Field == 3 && remap.ScaleInitialRange ) )
 			radius *= MathF.Max( 1, MathF.Max( remap.OutputMin, remap.OutputMax ) );
 		var offset = MathF.Max( definition.PositionMinimum.Length, definition.PositionMaximum.Length );
-		return Math.Clamp( radius, 0, GetRadiusLimit( definition ) ) + MathF.Min( Titanfall2StreamingSettings.ParticleMaximumEmitterExtent,
+		return Math.Clamp( radius, 0, GetRadiusLimit( definition ) ) + MathF.Min( Titanfall2ParticleFactory.MaximumEmitterExtent,
 			MathF.Max( offset, definition.ShapeMaximum ) );
 	}
 
@@ -487,10 +502,10 @@ static class Titanfall2ParticleFactory
 
 	static void ConfigureEffect( ParticleEffect effect, Titanfall2ParticleDefinition definition )
 	{
-		effect.MaxParticles = Math.Clamp( definition.MaxParticles, 1, Titanfall2StreamingSettings.ParticleMaxParticlesPerSystem );
+		effect.MaxParticles = Math.Clamp( definition.MaxParticles, 1, Titanfall2ParticleFactory.MaxParticlesPerSystem );
 		effect.Lifetime = definition.EndCapLifetime ? float.MaxValue : Range( definition.LifetimeMinimum, definition.LifetimeMaximum );
 		effect.LocalSpace = definition.LocalPosition || definition.LocalVelocity ? 1f : 0f;
-		var maximumVelocity = Titanfall2StreamingSettings.ParticleMaximumVelocity;
+		var maximumVelocity = Titanfall2ParticleFactory.MaximumVelocity;
 		effect.InitialVelocity = new ParticleVector3
 		{
 			X = Range(
@@ -559,7 +574,7 @@ static class Titanfall2ParticleFactory
 
 	internal static int GetBurstCount( Titanfall2ParticleDefinition definition, Titanfall2ParticleControlPoints points )
 	{
-		var maximum = Math.Clamp( definition.MaxParticles, 1, Titanfall2StreamingSettings.ParticleMaxParticlesPerSystem );
+		var maximum = Math.Clamp( definition.MaxParticles, 1, Titanfall2ParticleFactory.MaxParticlesPerSystem );
 		var count = Math.Clamp( definition.Burst, 0f, maximum );
 		if ( definition.BurstSpacing > 0f && definition.Path is { } path && points.IsValid() )
 		{
@@ -573,7 +588,7 @@ static class Titanfall2ParticleFactory
 	static void ConfigureEmitter( GameObject effectObject, Titanfall2ParticleDefinition definition, Titanfall2ParticleControlPoints points )
 	{
 		var emitterObject = new GameObject( effectObject, true, "emitter" );
-		var maximumExtent = Titanfall2StreamingSettings.ParticleMaximumEmitterExtent;
+		var maximumExtent = Titanfall2ParticleFactory.MaximumEmitterExtent;
 		var minimum = ClampVector( definition.PositionMinimum, maximumExtent );
 		var maximum = ClampVector( definition.PositionMaximum, maximumExtent );
 		var center = (minimum + maximum) * 0.5f;
@@ -734,7 +749,7 @@ static class Titanfall2ParticleFactory
 		{
 			var light = gameObject.AddComponent<ParticleLightRenderer>();
 			light.Ratio = 1f;
-			light.MaximumLights = Math.Min( 4, Titanfall2StreamingSettings.ParticleMaxLightsPerSystem );
+			light.MaximumLights = 4;
 			light.CastShadows = false;
 			light.Scale = definition.LightRadiusScale;
 			light.Brightness = definition.LightColorScale;

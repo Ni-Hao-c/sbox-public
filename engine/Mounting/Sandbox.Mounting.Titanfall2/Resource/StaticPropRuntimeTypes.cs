@@ -3,7 +3,7 @@ using Titanfall2;
 
 /// <summary>
 /// Runtime bookkeeping types for <see cref="Titanfall2StaticPropStreamer"/>: one prop instance,
-/// the per-(cell, model) pending batch, and the cell/cluster coordinates. Split out of the
+/// the per-(cluster, model) pending batch, and the cell/cluster coordinates. Split out of the
 /// streamer body so the streaming logic file stays readable.
 /// </summary>
 public sealed partial class Titanfall2StaticPropStreamer
@@ -47,25 +47,9 @@ public sealed partial class Titanfall2StaticPropStreamer
 		public bool CollisionFiltered { get; set; }
 	}
 
-	sealed class PendingBatch( string modelPath, Model model, int currentLod, bool renderingEnabled, Titanfall2PropLodMode lodMode )
+	sealed class PendingBatch( Model model, bool renderingEnabled )
 	{
-		public string ModelPath { get; } = modelPath;
-		public int Skin { get; init; }
-		public Model Model { get; set; } = model;
-		/// <summary>
-		/// The key this batch is stored under in its cluster's dictionary. A legacy LOD swap
-		/// changes <see cref="Model"/> but not the dictionary entry, so the two can differ;
-		/// only a LOD mode rebuild re-keys the entry, and it must remove this key, not Model.
-		/// </summary>
-		public Model Key { get; set; } = model;
-		public int CurrentLod { get; set; } = currentLod;
-		public int DesiredLod { get; set; } = currentLod;
-		public bool LodSwapQueued { get; set; }
-		/// <summary>
-		/// Which LOD generation this batch's model belongs to. Held per batch rather than read from
-		/// the setting, because the two are only equal once a mode switch has finished rebuilding.
-		/// </summary>
-		public Titanfall2PropLodMode LodMode { get; set; } = lodMode;
+		public Model Model { get; } = model;
 		public bool RenderingEnabled { get; set; } = renderingEnabled;
 		public Titanfall2BspReader.VisibilityCellMask PvsCells { get; private set; }
 		public List<Transform> Transforms { get; } = new();
@@ -73,9 +57,8 @@ public sealed partial class Titanfall2StaticPropStreamer
 		public List<float> Radii { get; } = new();
 		/// <summary>Per-instance <see cref="StreamedProp.FadeDistance"/>, parallel to <see cref="Transforms"/>.</summary>
 		public List<float> FadeDistances { get; } = new();
-		/// <summary>Per-instance keep distances for the culler, rebuilt when <see cref="KeepDistanceKey"/> changes.</summary>
+		/// <summary>Per-instance keep distances for the culler, built once per instance set.</summary>
 		public float[] KeepDistances { get; set; }
-		public (float RenderDistance, float Hysteresis, bool Authored, float Scale) KeepDistanceKey { get; set; }
 		public List<Vector3> ProbeColors { get; } = new();
 		public List<Titanfall2ProbeData> Probes { get; } = new();
 		public List<SceneObject> FallbackObjects { get; } = new();
@@ -90,11 +73,10 @@ public sealed partial class Titanfall2StaticPropStreamer
 
 		/// <summary>
 		/// The transform array this batch's instances are drawn with. It is built once and then
-		/// shared with every later batch built for the same instance set - LOD swaps are the
-		/// common case - which removes the per-swap copy of the whole array. It is only ever
-		/// replaced, never written in place, and Transforms stops growing once the batch is
-		/// built, so a built batch can never observe it change; the length check is a safety net
-		/// that also keeps this correct if a batch were built before loading finished.
+		/// reused by the distance culler. It is only ever replaced, never written in place, and
+		/// Transforms stops growing once the batch is built, so a built batch can never observe it
+		/// change; the length check is a safety net that also keeps this correct if a batch were
+		/// built before loading finished.
 		/// </summary>
 		public Transform[] GetOrBuildTransformArray()
 		{
@@ -113,13 +95,6 @@ public sealed partial class Titanfall2StaticPropStreamer
 			Probes.Add( probe );
 			PvsCells = PvsCells.Union( pvsCells );
 			if ( castShadows ) ShadowedInstanceCount++;
-		}
-
-		public float DistanceToClosestInstance( Vector3 anchor )
-		{
-			var result = float.MaxValue;
-			foreach ( var transform in Transforms ) result = MathF.Min( result, MathF.Sqrt( transform.Position.DistanceSquared( anchor ) ) );
-			return result;
 		}
 	}
 
@@ -141,11 +116,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 		}
 	}
 
-	/// <summary>
-	/// A group of neighbouring BSP prop cells whose batches are shared. With a group size of
-	/// one this is exactly one cell, which is why the default configuration behaves the same
-	/// as it did when every batch was stored on the cell itself.
-	/// </summary>
+	/// <summary>A group of neighbouring BSP prop cells whose batches are shared.</summary>
 	sealed class PropCluster( ClusterCoordinate coordinate )
 	{
 		public ClusterCoordinate Coordinate { get; } = coordinate;
@@ -162,8 +133,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 		/// <summary>
 		/// Groups a block of <paramref name="cellsPerCluster"/> by
 		/// <paramref name="cellsPerCluster"/> prop cells. Floor division keeps negative
-		/// coordinates in the same block as their neighbours, and a size of one maps a cell
-		/// to itself, which is what makes the default configuration identical.
+		/// coordinates in the same block as their neighbours.
 		/// </summary>
 		public static ClusterCoordinate FromCell( CellCoordinate cell, int cellsPerCluster )
 		{

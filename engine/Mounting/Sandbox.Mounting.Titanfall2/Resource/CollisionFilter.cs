@@ -26,17 +26,6 @@ static class Titanfall2CollisionFilter
 		"distortion"
 	];
 
-	static readonly string[] AtmosphericCardTerms =
-	[
-		"/fog",
-		"_fog",
-		"fog_",
-		"smoke",
-		"mist",
-		"steam",
-		"humid"
-	];
-
 	internal static bool ShouldIncludeMaterial( string materialName, Titanfall2MaterialMetadata metadata )
 	{
 		// Retail CM marks liquid volumes 0x20 and block-light tool faces 0x480; neither
@@ -59,18 +48,6 @@ static class Titanfall2CollisionFilter
 		if ( string.IsNullOrWhiteSpace( value ) ) return false;
 		var normalized = value.Replace( '\\', '/' );
 		foreach ( var term in VisualEffectTerms )
-		{
-			if ( normalized.Contains( term, StringComparison.OrdinalIgnoreCase ) )
-				return true;
-		}
-		return false;
-	}
-
-	internal static bool IsAtmosphericCardName( string value )
-	{
-		if ( string.IsNullOrWhiteSpace( value ) ) return false;
-		var normalized = value.Replace( '\\', '/' );
-		foreach ( var term in AtmosphericCardTerms )
 		{
 			if ( normalized.Contains( term, StringComparison.OrdinalIgnoreCase ) )
 				return true;

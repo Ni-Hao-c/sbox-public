@@ -57,7 +57,7 @@ public class Titanfall2FeatureTest
 				{ Bone = 0, Group = 1, CriticalOverride = 7, BoundingBoxMin = -System.Numerics.Vector3.One, BoundingBoxMax = System.Numerics.Vector3.One } }] }]
 		};
 		var type = typeof( Titanfall2Mount ).Assembly.GetType( "ModelLoader" );
-		var loader = Activator.CreateInstance( type, [null, false, 0, false, new Titanfall2Mount(), "test_metadata", 1, 0, false] );
+		var loader = Activator.CreateInstance( type, [null, false, new Titanfall2Mount(), "test_metadata", 1, 0, false] );
 		var builder = Model.Builder.AddCollisionHull( new BBox( -Vector3.One, Vector3.One ).Corners.ToArray() );
 		var mesh = new Mesh( Material.Load( "materials/default/default.vmat" ) );
 		mesh.CreateVertexBuffer( 3, new[] { new Vertex( Vector3.Zero ), new Vertex( Vector3.Forward ), new Vertex( Vector3.Left ) } );
@@ -213,7 +213,7 @@ public class Titanfall2FeatureTest
 	static (Type Type, object Loader) CreateLoader( int skin )
 	{
 		var type = typeof( Titanfall2Mount ).Assembly.GetType( "ModelLoader" );
-		return (type, Activator.CreateInstance( type, [null, false, 0, false, new Titanfall2Mount(), "test_metadata", skin, 0, false] ));
+		return (type, Activator.CreateInstance( type, [null, false, new Titanfall2Mount(), "test_metadata", skin, 0, false] ));
 	}
 
 	static Mesh CreateTriangle( Material material = null )

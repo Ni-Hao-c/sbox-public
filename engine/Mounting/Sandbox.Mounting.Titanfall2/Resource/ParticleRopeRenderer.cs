@@ -93,7 +93,7 @@ public sealed class Titanfall2ParticleRopeRenderer : ParticleController
 				var startColor = particle.Color.WithAlpha( Math.Clamp( particle.Color.a * particle.Alpha, 0f, 1f ) );
 				var endColor = next.Color.WithAlpha( Math.Clamp( next.Color.a * next.Alpha, 0f, 1f ) );
 				var width = Math.Clamp( MathX.Lerp( particle.Size.x, next.Size.x, fraction ) * 2f,
-					0f, Titanfall2StreamingSettings.ParticleMaximumRadius * 2f );
+					0f, Titanfall2ParticleFactory.MaximumRadius * 2f );
 				maximumWidth = MathF.Max( maximumWidth, width );
 				_line.AddLinePoint( position, Color.Lerp( startColor, endColor, fraction ), width, texture );
 			}

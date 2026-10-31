@@ -23,6 +23,38 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	const int NodeBytes = 8;    // plane index + child
 	const int PortalBytes = 8;  // from cell + to cell
 
+	// Edge length of one BSP prop streaming cell, in world units.
+	const float CellSize = 512f;
+	// Cells within this distance of the camera are populated first.
+	const float LoadRadius = 1024f;
+	// Prop cells per axis grouped into one batch cluster; batches are keyed per cluster and model.
+	const int BatchClusterCells = 4;
+	// Props at least this large are never distance culled, so landmarks keep their silhouette.
+	const float LandmarkRadius = 256f;
+	// Extra retention band past a prop's render distance once it is visible.
+	const float RenderDistanceHysteresis = 512f;
+	// Maximum portal hops walked from the camera's PVS cell.
+	const int PvsPortalDepth = 16;
+	// Runtime visibility pass: cells visited and time spent per frame.
+	const int RuntimeCellsPerFrame = 16;
+	const float RuntimeCellBudgetMilliseconds = 1.5f;
+	// Spawn pass after loading: props created and time spent per frame.
+	const int PropsPerFrame = 16;
+	const float FrameBudgetMilliseconds = 3f;
+	// Loading-screen spawn pass: props created and time spent per yield.
+	const int PreloadPerYield = 512;
+	const float PreloadBudgetMilliseconds = 35f;
+	// Colliders the loading pass may start per yield; the rest are left to the runtime pass.
+	const int PreloadCollisionBodiesPerYield = 4;
+	// Runtime collision pass: colliders created or destroyed and time spent per frame.
+	const int CollisionInstancesPerFrame = 2;
+	const float CollisionFrameBudgetMilliseconds = 1f;
+	// Prop colliders activate within this distance and are released past the larger one (hysteresis).
+	const float CollisionEnableDistance = 1536f;
+	const float CollisionDisableDistance = 2560f;
+	// Props smaller than this radius never cast shadows (when prop shadows are enabled).
+	const float ShadowMinimumRadius = 48f;
+
 	[Property, Hide]
 	public string MountIdent { get; set; }
 
@@ -35,7 +67,6 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	public bool ResidentCollisionsReady { get; private set; }
 	/// <summary>Number of resident prop colliders expected in the native physics world.</summary>
 	public int ResidentCollisionCount => _collidersCreated;
-	bool WantsPropCollisions => KeepAllCollisions || Titanfall2StreamingSettings.PropCollisions || Titanfall2StreamingSettings.NavMeshStaticProps;
 
 	[Property, Hide]
 	public Vector3 FallbackAnchor { get; set; }
@@ -47,11 +78,6 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	public Color BakedSkyColor { get; set; }
 	[Property, Hide] public string EncodedLocalLights { get; set; }
 	Titanfall2LocalLightBuffer _localLights;
-
-	[Property, Hide] public string[] AggregatedModelPaths { get; set; } = Array.Empty<string>();
-	[Property, Hide] public float[] AggregatedModelRadii { get; set; } = Array.Empty<float>();
-	readonly Dictionary<string, float> _aggregatedModels = new( StringComparer.OrdinalIgnoreCase );
-	int _aggregatedProps;
 
 	/// <summary>
 	/// The CellBSP tree and its portals, encoded so they survive the component being
@@ -72,7 +98,6 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	// Collision activation has its own list, cursor and budgets. It is the one pass that is
 	// allowed to stop early, so it must not share a loop with the state pass.
 	readonly List<PropCell> _collisionCellQueue = new();
-	readonly Queue<PendingBatch> _lodSwapQueue = new();
 	readonly Stopwatch _refreshTimer = new();
 	readonly Stopwatch _statusTimer = new();
 	Vector3 _lastAnchor;
@@ -111,12 +136,10 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	// Diagnostics. The engine overlay reports one hitch number for the whole frame,
 	// so each expensive unit of work reports itself with its own path and duration.
 	readonly Stopwatch _collisionProbe = new();
-	readonly Stopwatch _lodSwapProbe = new();
 	// Reusable budget timers. These paths run every frame, and Stopwatch.StartNew()
 	// allocates, so the timers are created once and restarted in place.
 	readonly Stopwatch _runtimeClusterTimer = new();
 	readonly Stopwatch _collisionQueueTimer = new();
-	readonly Stopwatch _lodSwapTimer = new();
 	readonly Stopwatch _populateTimer = new();
 	readonly Dictionary<string, double> _modelFailureRetryAfter = new( StringComparer.OrdinalIgnoreCase );
 	int _collisionInstancesThisFrame;
@@ -127,21 +150,6 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	// the runtime churn caps: 2 colliders per yield would need collidableProps/2 frames.
 	int _collisionInstanceLimitOverride;
 	float _collisionBudgetOverrideMilliseconds;
-	// Swaps that were actually applied. Probe-able: with an allocation measurement it is what
-	// tells the LOD path apart from the rest of the frame. There is no "dropped swaps" counter
-	// any more because nothing is dropped: the queue limit is enforced by skipping evaluation.
-	int _lodSwapsApplied;
-	// The LOD mode the batches are being brought onto. It is read when a batch is created and
-	// moved by ProcessLodModeTransition when the setting changes, because a batch cannot change
-	// mode on its own: a legacy batch holds a model with one band's geometry and a native batch
-	// holds the model with every level, so the model has to be replaced.
-	Titanfall2PropLodMode _appliedLodMode = Titanfall2StreamingSettings.PropLodMode;
-	readonly List<(PropCluster Cluster, PendingBatch Batch)> _lodModeRebuildQueue = new();
-	readonly Stopwatch _lodModeRebuildTimer = new();
-	readonly Stopwatch _lodModeProbe = new();
-	int _lodModeRebuildCursor;
-	int _lodModeRebuildsApplied;
-	int _lodModeRebuildsSkipped;
 	/// <summary>Budget of the populate pass currently running; SpawnProp needs it to decide whether starting another collider fits.</summary>
 	float _populateBudgetMilliseconds;
 	bool _pvsDiagnosticsLogged;
@@ -149,8 +157,7 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 
 	public void Configure( string mountIdent, string mapPath, Vector3 fallbackAnchor,
 		IReadOnlyList<Titanfall2BspReader.StaticPropInstance> props,
-		Titanfall2BspReader.BspVisibility visibility, IReadOnlyDictionary<string, float> aggregatedModels = null,
-		Color bakedSkyColor = default, IReadOnlyList<Titanfall2WorldLight> localLights = null,
+		Titanfall2BspReader.BspVisibility visibility, Color bakedSkyColor = default, IReadOnlyList<Titanfall2WorldLight> localLights = null,
 		IReadOnlyList<float> fadeDistances = null )
 	{
 		// AddComponent can awaken with no data before this first configuration.
@@ -168,8 +175,6 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		BakedSkyColor = bakedSkyColor;
 		EncodedLocalLights = Titanfall2LocalLightBuffer.Encode( localLights );
 		EncodedVisibility = EncodeVisibility( visibility );
-		AggregatedModelPaths = aggregatedModels?.Keys.ToArray() ?? Array.Empty<string>();
-		AggregatedModelRadii = AggregatedModelPaths.Select( path => aggregatedModels[path] ).ToArray();
 	}
 
 	protected override void OnAwake()
@@ -225,9 +230,7 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		while ( _liveProps + _failedProps < _totalProps )
 		{
 			if ( !this.IsValid() || !GameObject.IsValid() ) return;
-			PopulateCells(
-				Titanfall2StreamingSettings.PropPreloadPerYield,
-				Titanfall2StreamingSettings.PropPreloadBudgetMilliseconds );
+			PopulateCells( PreloadPerYield, PreloadBudgetMilliseconds );
 			var processed = _liveProps + _failedProps;
 			context.Title = $"Loading Titanfall 2 static props ({processed}/{_totalProps})";
 			if ( processed < _totalProps ) await Task.Yield();
@@ -238,10 +241,9 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 			// Readiness must arrive in a bounded number of yields. At the runtime churn cap
 			// (2 colliders per frame) a map with thousands of solid props would take
 			// thousands of frames after the prop pass, so the load pass uses the preload
-			// count/budget instead. A configured value of 0 would defer everything and
-			// never become ready, so at least one collider per yield is forced here.
-			_collisionInstanceLimitOverride = Math.Max( 1, Titanfall2StreamingSettings.PropPreloadCollisionBodiesPerYield );
-			_collisionBudgetOverrideMilliseconds = Titanfall2StreamingSettings.PropPreloadBudgetMilliseconds;
+			// count/budget instead.
+			_collisionInstanceLimitOverride = PreloadCollisionBodiesPerYield;
+			_collisionBudgetOverrideMilliseconds = PreloadBudgetMilliseconds;
 			try
 			{
 				foreach ( var cell in _cells.Values )
@@ -293,7 +295,7 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		var anchor = Scene?.Camera.IsValid() == true
 			? Scene.Camera.WorldPosition
 			: FallbackAnchor;
-		var refreshDistance = Titanfall2StreamingSettings.PropCellSize * 0.25f;
+		var refreshDistance = CellSize * 0.25f;
 		var pvsCellChanged = TryFindPvsCell( anchor, out var pvsCell ) && pvsCell != _pvsCameraCell;
 		if ( !_hasAnchor
 			|| pvsCellChanged
@@ -302,13 +304,7 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 			RefreshCells( anchor );
 		}
 
-		// Runs before PopulateCells so a mode change is applied to this frame's spawns as well:
-		// a batch created after the switch must be built for the mode it switched to, and the
-		// transition's snapshot then covers exactly the batches that still belong to the old mode.
-		ProcessLodModeTransition();
-		PopulateCells(
-			Titanfall2StreamingSettings.PropsPerFrame,
-			Titanfall2StreamingSettings.PropFrameBudgetMilliseconds );
+		PopulateCells( PropsPerFrame, FrameBudgetMilliseconds );
 		ProcessRuntimeClusterQueue();
 		ProcessCollisionQueue();
 		// A collision model that failed to load during the loading pass is retried by the
@@ -320,7 +316,6 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 			Titanfall2Log.Info( $"Titanfall 2 resident prop collision became ready after the loading pass: "
 				+ $"{_collidersCreated}/{_collidableProps} colliders ({MapPath})." );
 		}
-		ProcessLodSwaps();
 		LogCompletion();
 		if ( !_completionLogged && _statusTimer.Elapsed.TotalSeconds >= 5.0 )
 		{
@@ -350,13 +345,8 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		_workQueue.Clear();
 		_runtimeClusterQueue.Clear();
 		_collisionCellQueue.Clear();
-		_lodSwapQueue.Clear();
-		_lodModeRebuildQueue.Clear();
-		_lodModeRebuildCursor = 0;
 		Log.Info( $"Titanfall 2 static prop scene resources released: {releasedProps} props, "
-			+ $"{releasedBatches} instance batches, {_lodSwapsApplied} LOD swaps applied, "
-			+ $"{_lodModeRebuildsApplied} batches rebuilt for a LOD mode change "
-			+ $"({_lodModeRebuildsSkipped} left on their previous model) ({MapPath})." );
+			+ $"{releasedBatches} instance batches ({MapPath})." );
 	}
 
 	void QueueRuntimeCellRefresh()
@@ -370,7 +360,7 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	}
 
 	/// <summary>
-	/// Applies visibility, LOD and shadow state to every cluster in finite time. This pass
+	/// Applies visibility state to every cluster in finite time. This pass
 	/// is unconditional: it advances by at least one cluster per frame and is never rewound
 	/// while running, so one sweep completes in at most one frame per cluster regardless of
 	/// whether the player ever stops moving. Collision activation used to share this loop and
@@ -382,19 +372,17 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		if ( _runtimeClusterCursor >= _runtimeClusterQueue.Count ) return;
 		_runtimeClusterTimer.Restart();
 		var processedCells = 0;
-		while ( processedCells < Titanfall2StreamingSettings.PropRuntimeCellsPerFrame
+		while ( processedCells < RuntimeCellsPerFrame
 			&& _runtimeClusterCursor < _runtimeClusterQueue.Count )
 		{
 			var cluster = _runtimeClusterQueue[_runtimeClusterCursor];
 			if ( _runtimePvsUpdatePending ) UpdateClusterVisibilityState( cluster );
-			UpdateClusterLodState( cluster, _lastAnchor );
-			UpdateClusterShadowState( cluster, _lastAnchor );
 
 			_runtimeClusterCursor++;
 			// The cap counts cells rather than clusters, so a larger cluster cannot multiply
 			// how much of the map a single frame is allowed to touch.
 			processedCells += cluster.Cells.Count;
-			if ( _runtimeClusterTimer.Elapsed.TotalMilliseconds >= Titanfall2StreamingSettings.PropRuntimeCellBudgetMilliseconds ) break;
+			if ( _runtimeClusterTimer.Elapsed.TotalMilliseconds >= RuntimeCellBudgetMilliseconds ) break;
 		}
 
 		if ( _runtimeClusterCursor < _runtimeClusterQueue.Count ) return;
@@ -471,36 +459,10 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 			if ( prop.Collidable ) _collidableProps++;
 			return true;
 		}
-		if ( prop.Skin == 0 && _aggregatedModels.TryGetValue( prop.ModelPath, out var bakedRadius ) )
-		{
-			// Geometry already lives in the world's buffers. Keep this lightweight
-			// record for distance-activated collision; do not load a second render model.
-			var baked = new PropInstance( prop, null, bakedRadius * MathF.Max( prop.Scale, 0.001f ), true, false, true );
-			if ( prop.Collidable && WantsPropCollisions )
-			{
-				_collidableProps++;
-				if ( _collisionBodiesThisYield < Titanfall2StreamingSettings.PropPreloadCollisionBodiesPerYield
-					&& _populateTimer.Elapsed.TotalMilliseconds < _populateBudgetMilliseconds )
-				{
-					_collisionBodiesThisYield++;
-					EnsureCollisionState( baked, _lastAnchor, null );
-				}
-				else _collidersDeferred++;
-			}
-			cell.Instances.Add( baked );
-			_aggregatedProps++;
-			return true;
-		}
 		var resourcePath = $"mount://{MountIdent}/{prop.ModelPath}.vmdl";
-		// Native loads the one model that already contains every LOD, so there is no starting band
-		// to pick: every instance of the prop can share it. Legacy keeps starting a batch in the
-		// band its cell distance selects and converges it through the swap queue, exactly as it
-		// did before the mode existed.
-		var useNativeLods = _appliedLodMode == Titanfall2PropLodMode.Native;
-		var initialLod = useNativeLods ? 0 : SelectLod( MathF.Sqrt( cell.DistanceSquared ), 0 );
-		var staticResourcePath = useNativeLods
-			? $"mount://{MountIdent}/{ModelLoader.GetStaticInstanceAllLodsPath( prop.ModelPath )}.vmdl"
-			: $"mount://{MountIdent}/{ModelLoader.GetStaticInstancePath( prop.ModelPath, initialLod )}.vmdl";
+		// The static-instance model already contains every LOD, so there is no starting band
+		// to pick: every instance of the prop can share it.
+		var staticResourcePath = $"mount://{MountIdent}/{ModelLoader.GetStaticInstanceAllLodsPath( prop.ModelPath )}.vmdl";
 		var staticModel = LoadModelWithRetryCache( staticResourcePath, prop.Skin );
 		var model = ModelLoader.IsUsableModel( staticModel )
 			? staticModel
@@ -513,14 +475,11 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 
 		var scale = MathF.Max( prop.Scale, 0.001f );
 		var radius = model.Bounds.Size.Length * 0.5f * scale;
-		var castShadows = ShouldCastShadows( prop.Position, radius, _lastAnchor );
-		// Individual objects keep the exact per-cell distance/PVS decision they have always
-		// used; only a shared batch, which has one flag for every member cell, has to fall
-		// back to the cluster aggregate. Reading the state here rather than the raw mask
-		// means a prop spawned out of the render list is created hidden instead of rendering
-		// until the next visibility pass. With instance culling disabled (PropRenderDistance=0) this
-		// is identical to reading the mask alone, and with one cell per cluster the two values
-		// are identical by construction.
+		var castShadows = ShouldCastShadows( radius );
+		// Individual objects keep the exact per-cell distance/PVS decision; only a shared
+		// batch, which has one flag for every member cell, has to fall back to the cluster
+		// aggregate. Reading the state here rather than the raw mask means a prop spawned out
+		// of the render list is created hidden instead of rendering until the next visibility pass.
 		var instanceVisible = IsRenderVisible( prop.PvsCells ) && IsWithinRenderDistance( prop.Position, radius, false, prop.FadeDistance );
 		var batchVisible = IsRenderVisible( prop.PvsCells );
 		var worldTransform = new Transform( prop.Position, prop.Rotation.ToRotation(), scale );
@@ -531,17 +490,15 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		// skeleton, so identical models can share one instanced draw inside their
 		// permanent BSP cell. Special transparent/decal/water models stay as
 		// individual native objects to preserve material pass ordering.
-		// The batch key is the cluster and the model: with the default cluster size of one
-		// cell this is the historical per cell dictionary, and a larger cluster lets one
-		// model repeated in neighbouring cells share a single instanced draw. In native mode
-		// the model is the prop's one all-LOD model, which is what removes the LOD component
-		// from the key: every band of every instance in the cluster shares this one batch.
+		// The batch key is the cluster and the model, so one model repeated in neighbouring
+		// cells shares a single instanced draw. The model is the prop's one all-LOD model, so
+		// every band of every instance in the cluster shares this one batch.
 		if ( isBatched )
 		{
 			var cluster = cell.Cluster;
 			if ( !cluster.Batches.TryGetValue( staticModel, out var pendingBatch ) )
 			{
-				pendingBatch = new PendingBatch( prop.ModelPath, staticModel, initialLod, batchVisible, _appliedLodMode ) { Skin = prop.Skin };
+				pendingBatch = new PendingBatch( staticModel, batchVisible );
 				cluster.Batches.Add( staticModel, pendingBatch );
 			}
 			pendingBatch.Add( worldTransform, radius, castShadows, prop.ProbeColor, prop.Probe, prop.PvsCells, prop.FadeDistance );
@@ -582,14 +539,14 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		if ( instanceVisible ) _renderingProps++;
 		if ( castShadows ) _shadowCastingProps++;
 		var instance = new PropInstance( prop, renderObject, radius, instanceVisible, castShadows, isBatched );
-		if ( prop.Collidable && WantsPropCollisions )
+		if ( prop.Collidable )
 		{
 			_collidableProps++;
 			// A collider costs 2-22 ms, so the loading pass is not allowed to start an
 			// unbounded number of them inside one yield. Anything skipped keeps a null
 			// CollisionObject and is created by the runtime cell pass as the player
 			// approaches, which is where the distance-based activation already lives.
-			var withinYieldCap = _collisionBodiesThisYield < Titanfall2StreamingSettings.PropPreloadCollisionBodiesPerYield;
+			var withinYieldCap = _collisionBodiesThisYield < PreloadCollisionBodiesPerYield;
 			var withinYieldBudget = _populateTimer.Elapsed.TotalMilliseconds < _populateBudgetMilliseconds;
 			if ( withinYieldCap && withinYieldBudget )
 			{

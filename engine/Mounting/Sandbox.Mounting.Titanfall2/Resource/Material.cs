@@ -511,7 +511,7 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 		// Same peak clamp as the retail vista pixel shader (c_maxLightingValue). The HDR sky
 		// panoramas (beacon_sky_hdr_col and other 4096 BC6H _col textures) hold values far
 		// above display white; without the clamp they flood the screen and the bloom.
-		material.Set( "g_flT2VistaHdrLimit", Titanfall2StreamingSettings.VistaMaxLighting );
+		material.Set( "g_flT2VistaHdrLimit", 1f );
 		if ( IsPlanetSunMaterial( sourceMaterialName ) )
 		{
 			// The source is BC6H HDR and Titanfall tone-maps it before bloom. Without

@@ -35,11 +35,6 @@ partial class MapLoader
 	{
 		var vistaProps = parsed.StaticProps.Where( static prop => IsVistaModelPath( prop.ModelPath ) ).ToArray();
 		if ( vistaProps.Length == 0 ) return 0;
-		if ( Titanfall2StreamingSettings.SkyboxMode == 0 )
-		{
-			Log.Info( $"Titanfall 2 3D skybox disabled by switch; keeping the 2D sky only ({Path})." );
-			return 0;
-		}
 
 		// The environment partition is authoritative, but community repacks sometimes drop it;
 		// the rBSP ENTITIES lump still carries sky_camera in that case.
@@ -66,8 +61,6 @@ partial class MapLoader
 				skyScale = parsedSkyScale;
 			else if ( values.TryGetValue( "scale", out var scaleText ) && TryParseFloat( scaleText, out var parsedScale ) && parsedScale > 0f )
 				skyScale = parsedScale;
-			if ( Titanfall2StreamingSettings.SkyboxScale > 0f )
-				skyScale = Titanfall2StreamingSettings.SkyboxScale;
 
 			var matchingProps = vistaProps.Where( prop => DistanceSquared( prop.Origin, origin ) <= 16f * 16f ).ToArray();
 			if ( matchingProps.Length == 0 ) continue;
@@ -114,25 +107,6 @@ partial class MapLoader
 			ToSandbox( prop.Origin ),
 			new Angles( prop.Angles.X, prop.Angles.Y, prop.Angles.Z ),
 			MathF.Max( prop.Scale, 0.001f ) ) ).ToArray();
-		if ( Titanfall2StreamingSettings.SkyboxMode >= 2 )
-		{
-			// Camera-following dome: the painted sphere is re-centred on the viewer every frame, so
-			// the skyline shows in every direction instead of only where the 3D skybox view looks.
-			var domeObject = new GameObject( true, "titanfall2_sky_dome" );
-			domeObject.AddComponent<Titanfall2SkyDome>().Configure(
-				Host.Ident,
-				Path,
-				selected.Origin,
-				Titanfall2StreamingSettings.SkyboxModelScale,
-				selected.Fog,
-				skyboxModels );
-
-			Log.Info( $"Titanfall 2 sky dome selected: {Path} ({selected.Name}, origin {selected.Origin}, "
-				+ $"model scale {Titanfall2StreamingSettings.SkyboxModelScale:0.##}, "
-				+ $"{skyboxModels.Length}/{vistaProps.Length} vista models)" );
-			return skyboxModels.Length;
-		}
-
 		var skyboxObject = new GameObject( true, "titanfall2_3d_skybox" );
 		skyboxObject.AddComponent<Titanfall2Skybox3D>().Configure(
 			Host.Ident,
@@ -190,7 +164,6 @@ partial class MapLoader
 				namedPoints.TryAdd( name, point );
 		}
 		var skyboxEffects = 0;
-		var atmosphericEffects = 0;
 		foreach ( var values in sourceEntities )
 		{
 			if ( !values.TryGetValue( "classname", out var className )
@@ -200,12 +173,6 @@ partial class MapLoader
 					|| startActive.Equals( "false", StringComparison.OrdinalIgnoreCase )) ) continue;
 			if ( !values.TryGetValue( "effect_name", out var effectName ) || string.IsNullOrWhiteSpace( effectName ) ) continue;
 			if ( !values.TryGetValue( "origin", out var originText ) || !TryParseVector3( originText, out var origin ) ) continue;
-			if ( !Titanfall2StreamingSettings.AtmosphericCardEffects
-				&& Titanfall2CollisionFilter.IsAtmosphericCardName( effectName ) )
-			{
-				atmosphericEffects++;
-				continue;
-			}
 			// 3D-skybox particles must be submitted to the isolated skybox SceneWorld.
 			// A regular scene component would render them at their authored sky-camera
 			// coordinates in the main world, so defer these few systems until the
@@ -241,15 +208,16 @@ partial class MapLoader
 
 		if ( skyboxEffects > 0 )
 			Log.Info( $"Titanfall 2 map FX deferred {skyboxEffects} 3D-skybox particle systems: {Path}." );
-		if ( atmosphericEffects > 0 )
-			Log.Info( $"Titanfall 2 map FX temporarily omitted {atmosphericEffects} billboarded "
-				+ $"steam/mist/smoke systems: {Path}." );
 		if ( entities.Count == 0 ) return 0;
 		var streamerObject = new GameObject( true, "titanfall2_particle_streamer" );
 		streamerObject.AddComponent<Titanfall2ParticleStreamer>()
 			.Configure( Host.Ident, Path, streamingAnchor, entities );
 		return entities.Count;
 	}
+
+	// Hearing radius for ambient emitters that author none, and how many play at once.
+	const float MapAudioEmitterRadius = 1024f;
+	const int MapAudioMaxEmitters = 12;
 
 	int CreateMapAudio( Titanfall2BspReader.ParsedBsp parsed, Vector3 streamingAnchor )
 	{
@@ -271,7 +239,7 @@ partial class MapLoader
 				if ( !values.TryGetValue( "soundName", out var soundName ) || string.IsNullOrWhiteSpace( soundName ) ) continue;
 
 				var radius = GetEntityFloat( values, "radius", 0f );
-				if ( radius <= 0f ) radius = Titanfall2StreamingSettings.MapAudioEmitterRadius;
+				if ( radius <= 0f ) radius = MapAudioEmitterRadius;
 				// ambient_generic volume is the Source 0-10 scale (default 10).
 				var volume = Math.Clamp( GetEntityFloat( values, "volume", 10f ) / 10f, 0.05f, 1f );
 				emitters.Add( new Titanfall2MapAudio.Emitter( soundName.Trim(), origin, radius, volume ) );
@@ -282,7 +250,7 @@ partial class MapLoader
 				if ( !values.TryGetValue( "play_event", out var playEvent ) || string.IsNullOrWhiteSpace( playEvent ) ) continue;
 
 				var radius = GetEntityFloat( values, "triggerNearbyRadius", 0f );
-				if ( radius <= 0f ) radius = Titanfall2StreamingSettings.MapAudioEmitterRadius * 2f;
+				if ( radius <= 0f ) radius = MapAudioEmitterRadius * 2f;
 				// Retail references a soundscape by name; the looping sound it declares is the
 				// actual audio, and the soundscape name is used as a fallback sound name.
 				var soundName = Host.ResolveSoundscapeLoop( playEvent.Trim() );
@@ -299,11 +267,11 @@ partial class MapLoader
 			emitters,
 			zones,
 			Titanfall2StreamingSettings.MapAudioVolume,
-			Titanfall2StreamingSettings.MapAudioMaxEmitters );
+			MapAudioMaxEmitters );
 
 		Log.Info( $"Titanfall 2 map audio created: {Path} ({emitters.Count} ambient emitters, {zones.Count} soundscape zones; "
-			+ $"radius {Titanfall2StreamingSettings.MapAudioEmitterRadius:0}, volume {Titanfall2StreamingSettings.MapAudioVolume:0.##}, "
-			+ $"up to {Titanfall2StreamingSettings.MapAudioMaxEmitters} concurrent emitters; "
+			+ $"radius {MapAudioEmitterRadius:0}, volume {Titanfall2StreamingSettings.MapAudioVolume:0.##}, "
+			+ $"up to {MapAudioMaxEmitters} concurrent emitters; "
 			+ $"{Host.MilesSoundCount} bank/{Host.WavSoundCount} wav names indexed)." );
 		return emitters.Count + zones.Count;
 	}

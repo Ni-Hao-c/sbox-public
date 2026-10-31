@@ -2,6 +2,8 @@ using Titanfall2;
 
 partial class MapLoader
 {
+	// World collision is split into XY cells so the broad phase and tile queries touch few triangles.
+	const float CollisionCellSize = 512f;
 	readonly List<Model> _classifiedWorldModels = [];
 
 	ModelCollider[] CreateClassifiedWorldCollision( GameObject world, Titanfall2BspReader.ParsedBsp parsed )
@@ -16,7 +18,7 @@ partial class MapLoader
 				Indices = group.SelectMany( part => parsed.WorldCollision.Indices.AsSpan( part.FirstIndex, part.IndexCount ).ToArray() ).ToArray()
 			};
 			var builder = Model.Builder.WithName( $"titanfall2/map/{parsed.MapName}_contents_{group.Key:x8}" );
-			foreach ( var chunk in BuildCollisionChunks( geometry, Titanfall2StreamingSettings.CollisionCellSize ).Values )
+			foreach ( var chunk in BuildCollisionChunks( geometry, CollisionCellSize ).Values )
 				builder.AddCollisionMesh( chunk.Vertices.ToArray(), chunk.Indices.ToArray() );
 			var model = builder.Create();
 			_classifiedWorldModels.Add( model );
@@ -39,7 +41,7 @@ partial class MapLoader
 	{
 		var collision = parsed.WorldCollision;
 		if ( collision is null || collision.IsEmpty ) return null;
-		var chunks = BuildCollisionChunks( collision, Titanfall2StreamingSettings.CollisionCellSize );
+		var chunks = BuildCollisionChunks( collision, CollisionCellSize );
 		if ( chunks.Count == 0 ) return null;
 		var builder = Model.Builder.WithName( $"titanfall2/map/{parsed.MapName}_collision" );
 		var submittedVertices = 0;
@@ -58,7 +60,7 @@ partial class MapLoader
 			+ $"{collision.NonBlockingPrimitiveCount} non-player-solid primitives skipped, "
 			+ $"{collision.WaterPrimitiveCount} water primitives "
 			+ $"({collision.BlockingWaterPrimitiveCount} player-blocking); "
-			+ $"{chunks.Count} spatial chunks at {Titanfall2StreamingSettings.CollisionCellSize:0} units, "
+			+ $"{chunks.Count} spatial chunks at {CollisionCellSize:0} units, "
 			+ $"{submittedVertices} submitted vertices, {submittedTriangles} triangles)" );
 		return model;
 	}

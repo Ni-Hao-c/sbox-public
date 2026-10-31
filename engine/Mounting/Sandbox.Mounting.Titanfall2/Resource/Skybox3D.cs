@@ -32,20 +32,6 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 	[Property, Hide]
 	public float SkyScale { get; set; } = 1000f;
 
-	[Property, Hide]
-	public bool FogEnabled { get; set; }
-
-	[Property, Hide]
-	public Color FogColor { get; set; } = new( 0.74f, 0.85f, 1f );
-
-	[Property, Hide]
-	public float FogStartDistance { get; set; } = 500f;
-
-	[Property, Hide]
-	public float FogEndDistance { get; set; } = 5000f;
-
-	[Property, Hide]
-	public float FogMaximumOpacity { get; set; } = 0.3f;
 	[Property, Hide] public Vector4 FogDensity { get; set; }
 	[Property, Hide] public Vector4 FogBaseColor { get; set; }
 	[Property, Hide] public Vector4 FogDirectionalColor { get; set; }
@@ -58,9 +44,11 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 	[Property, Hide]
 	public string EncodedModels { get; set; }
 
+	// Distance the vista content is scaled to sit at from the sky camera.
+	const float TargetDistance = 25000f;
+
 	readonly List<SceneModel> _sceneModels = new();
 	SceneWorld _skyboxWorld;
-	SceneSkyBox _skySkyObject;
 	SceneDirectionalLight _skyLight;
 	object _skyboxBridge;
 	Type _skyboxBridgeType;
@@ -85,11 +73,6 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 		CameraOrigin = cameraOrigin;
 		CameraAngles = cameraAngles;
 		SkyScale = Math.Clamp( skyScale, 1f, 100000f );
-		FogEnabled = fog.Enabled;
-		FogColor = fog.Color;
-		FogStartDistance = MathF.Max( 0f, fog.StartDistance );
-		FogEndDistance = MathF.Max( FogStartDistance + 1f, fog.EndDistance );
-		FogMaximumOpacity = Math.Clamp( fog.MaximumOpacity, 0f, 0.85f );
 		FogDensity = fog.Parameters.Density;
 		FogBaseColor = fog.Parameters.Color;
 		FogDirectionalColor = fog.Parameters.DirectionalColor;
@@ -118,9 +101,8 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 		if ( _skyboxBridge is null || _updateBridge is null ) return;
 		// SetData allocates a dynamic constant buffer. Refresh it even when the
 		// camera is stationary; a buffer from scene creation is not frame history.
-		var fog = new Titanfall2FogParameters( Titanfall2StreamingSettings.MapFog ? FogDensity : Vector4.Zero,
-			FogBaseColor, FogDirectionalColor, FogDirection, FogHeight );
-		if ( UseWorldFog && Titanfall2StreamingSettings.MapFog )
+		var fog = new Titanfall2FogParameters( FogDensity, FogBaseColor, FogDirectionalColor, FogDirection, FogHeight );
+		if ( UseWorldFog )
 		{
 			// A map whose fog does not cover the origin has no Titanfall2HeightFog at all
 			// (CreateEnvironment), so an unthrottled search walks the whole scene every frame.
@@ -214,46 +196,6 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 				// the generic Titanfall material from rendering the isolated world black.
 				AmbientLightColor = new Color( 0.85f, 0.9f, 1.0f )
 			};
-			// The authored fog distances belong to the map's own unit scale, but the vista
-			// content is drawn SkyboxModelScale times larger in this isolated world. Applying
-			// the raw values (mp_angel_city authors 0-500) against geometry tens of thousands
-			// of units away saturates the fog everywhere and turns the whole sky into flat
-			// fog colour - which then feeds bloom and auto exposure and reads as a moving glow.
-			var fogScale = MathF.Max( 1f, Titanfall2StreamingSettings.SkyboxModelScale );
-			var fogStart = FogStartDistance * fogScale;
-			var fogEnd = MathF.Max( fogStart + 1f, FogEndDistance * fogScale );
-			if ( FogEnabled && !Titanfall2StreamingSettings.MapFog )
-			{
-				// sky_camera fog belongs to the isolated 3D-skybox world. Applying it
-				// here restores Titanfall's aerial perspective without re-enabling fog
-				// cards or adding fog to the playable BSP world.
-				_skyboxWorld.GradientFog = new GradientFogSetup
-				{
-					Enabled = true,
-					StartDistance = fogStart,
-					EndDistance = fogEnd,
-					StartHeight = -100000f,
-					EndHeight = 100000f,
-					MaximumOpacity = FogMaximumOpacity,
-					Color = FogColor.WithAlpha( 1f ),
-					DistanceFalloffExponent = 1.15f,
-					VerticalFalloffExponent = 0.01f
-				};
-			}
-
-			// The 3D skybox view draws its own 2D sky from THIS world's SceneSkyBox; without one
-			// the directions the vista panorama does not cover fall back to a flat procedural sky.
-			if ( Titanfall2StreamingSettings.Sky2D )
-			{
-				var skyMaterial = Material.Load( Titanfall2StreamingSettings.SkyMaterial );
-				if ( skyMaterial is not null && skyMaterial.IsValid )
-				{
-					_skySkyObject = new SceneSkyBox( _skyboxWorld, skyMaterial )
-					{
-						SkyTint = Color.White
-					};
-				}
-			}
 
 			var scale = ResolveScale( loadedModels );
 			_skyboxBridge = constructor.Invoke( [parentWorld, _skyboxWorld] );
@@ -275,23 +217,22 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 				ShadowsEnabled = false
 			};
 
-			var modelScale = Titanfall2StreamingSettings.SkyboxModelScale;
 			foreach ( var (definition, model) in loadedModels )
 			{
 				var sceneModel = new SceneModel(
 					_skyboxWorld,
 					model,
 					new Transform( definition.Position, definition.Rotation.ToRotation(),
-						MathF.Max( definition.Scale, 0.001f ) * modelScale ) );
+						MathF.Max( definition.Scale, 0.001f ) ) );
 				sceneModel.Flags.IsStatic = true;
 				sceneModel.Flags.CastShadows = false;
 				// Only the isolated vista uses miniature camera planes. Do not change
-				// the player's near plane or normal material previews/dome rendering.
+				// the player's near plane or normal material previews.
 				sceneModel.Attributes.Set( "T2SkyProjectionNear", 0.001f );
 				// Draw attributes override the main view's fog: the sky camera has
 				// its own authored heights, density and directional scattering.
-				new Titanfall2FogParameters( Titanfall2StreamingSettings.MapFog ? FogDensity : Vector4.Zero,
-					FogBaseColor, FogDirectionalColor, FogDirection, FogHeight ).Apply( sceneModel.Attributes );
+				new Titanfall2FogParameters( FogDensity, FogBaseColor, FogDirectionalColor, FogDirection, FogHeight )
+					.Apply( sceneModel.Attributes );
 				// This isolated world has no ModelRenderer to initialize bones/bounds.
 				// An uninitialized SceneModel has a point-sized culling box at its origin,
 				// so turning away from that point incorrectly hides the entire panorama.
@@ -301,10 +242,8 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 			}
 
 			Log.Info( $"Titanfall 2 3D skybox ready: {_sceneModels.Count}/{definitions.Length} vista models, "
-				+ $"camera '{CameraName}', origin {CameraOrigin}, scale {scale:0.####}, model scale {modelScale:0.##}"
-				+ $"({(Titanfall2StreamingSettings.SkyboxScale > 0f ? " override" : string.Empty)}), "
-				+ $"{(FogEnabled ? $"fog {fogStart:0.#}-{fogEnd:0.#} @ {FogMaximumOpacity:0.##} (authored {FogStartDistance:0.#}-{FogEndDistance:0.#})" : "fog disabled")}, "
-				+ $"{failures} failures ({MapPath})." );
+				+ $"camera '{CameraName}', origin {CameraOrigin}, scale {scale:0.####}, "
+				+ $"{(UseWorldFog ? "world fog" : "sky_camera fog")}, {failures} failures ({MapPath})." );
 		}
 		catch ( Exception exception )
 		{
@@ -316,22 +255,19 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 	/// <summary>
 	/// Pushes the authored vista content to a believable distance. Titanfall stores skyscale=1000,
 	/// which the engine would use verbatim - putting its skybox camera inside the sector - so the
-	/// value is derived from the content extent unless it is overridden.
+	/// value is derived from the content extent.
 	/// </summary>
 	float ResolveScale( List<(Titanfall2SkyboxModel Definition, Model Model)> models )
 	{
-		if ( Titanfall2StreamingSettings.SkyboxScale > 0f ) return Titanfall2StreamingSettings.SkyboxScale;
-
 		var extent = 1f;
 		foreach ( var (definition, model) in models )
 		{
 			var offset = (definition.Position - CameraOrigin).Length;
-			var radius = model.Bounds.Size.Length * MathF.Abs( MathF.Max( definition.Scale, 0.001f ) )
-				* Titanfall2StreamingSettings.SkyboxModelScale;
+			var radius = model.Bounds.Size.Length * MathF.Abs( MathF.Max( definition.Scale, 0.001f ) );
 			extent = MathF.Max( extent, offset + radius );
 		}
 
-		return Math.Clamp( Titanfall2StreamingSettings.SkyboxTargetDistance / extent, 0.001f, 4096f );
+		return Math.Clamp( TargetDistance / extent, 0.001f, 4096f );
 	}
 
 	void DestroySkybox()
@@ -341,8 +277,6 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 		_sceneModels.Clear();
 		_skyLight?.Delete();
 		_skyLight = null;
-		_skySkyObject?.Delete();
-		_skySkyObject = null;
 
 		if ( _skyboxBridge is not null )
 		{
@@ -432,14 +366,8 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 
 readonly record struct Titanfall2SkyboxModel( string ModelPath, Vector3 Position, Angles Rotation, float Scale );
 
-readonly record struct Titanfall2SkyboxFog(
-	bool Enabled,
-	Color Color,
-	float StartDistance,
-	float EndDistance,
-	float MaximumOpacity )
+/// <summary>sky_camera fog for the isolated skybox world; <see cref="UseWorldFog"/> follows the map's height fog instead.</summary>
+readonly record struct Titanfall2SkyboxFog( Titanfall2FogParameters Parameters, bool UseWorldFog )
 {
-	public Titanfall2FogParameters Parameters { get; init; }
-	public bool UseWorldFog { get; init; }
-	public static Titanfall2SkyboxFog Disabled => new( false, Color.White, 0f, 1f, 0f );
+	public static Titanfall2SkyboxFog Disabled => default;
 }

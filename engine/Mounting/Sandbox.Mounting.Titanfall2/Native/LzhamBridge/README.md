@@ -7,7 +7,7 @@ The bridge uses the game's fixed `dict_size_log2 = 20` profile and exports only
 `tf2_lzham_decompress`. Build it with:
 
 ```powershell
-.\\build.ps1
+.\build.ps1
 ```
 
 The required Alpha8-compatible `lzham.h` and x64 static library are vendored in

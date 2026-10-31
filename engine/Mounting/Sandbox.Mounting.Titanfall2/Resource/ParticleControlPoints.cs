@@ -87,7 +87,7 @@ public sealed class Titanfall2ParticleGeometry : ParticleController
 			// Source ground dust flattens a sphere before its final position offset.
 			// Preserve that offset: scaling absolute world coordinates moves the
 			// entire collection towards the map origin.
-			var maximumExtent = Titanfall2StreamingSettings.ParticleMaximumEmitterExtent;
+			var maximumExtent = Titanfall2ParticleFactory.MaximumEmitterExtent;
 			Vector3 Offset( Vector3 value ) => new(
 				Math.Clamp( value.x, -maximumExtent, maximumExtent ), Math.Clamp( value.y, -maximumExtent, maximumExtent ),
 				Math.Clamp( value.z, -maximumExtent, maximumExtent ) );

@@ -4,12 +4,14 @@ using System.Threading;
 using Sandbox.Mounting.PerfKit;
 
 /// <summary>
-/// 把 Titanfall 2 的 BSP 世界几何接到可复用 PerfKit 的聚合构建器上。
+/// Feeds Titanfall 2 BSP world geometry into the reusable PerfKit aggregate builder.
 ///
-/// TF2 的 BSP 在解析阶段已经把所有顶点读进内存，所以这里能并行化的不是“读文件”，而是
-/// “按材质把各分区的顶点/索引拼成聚合体”。这一段是纯托管计算，放到后台线程用有界队列
-/// 预先生成，主线程只负责创建 Material/Mesh/Model（引擎对象必须在主线程碰）。
-/// 这样材质解析/贴图 IO 与顶点拼接可以重叠，同时把预生成的几何数量限制在固定窗口内。
+/// The BSP parse already holds every vertex in memory, so the parallel work is merging each
+/// material's per-cell vertices/indices into aggregates, not file reading. That merge is purely
+/// managed and runs ahead on background threads through a bounded queue, while the main thread
+/// only creates Material/Mesh/Model (engine objects must be touched on the main thread). Material
+/// resolution and texture IO therefore overlap the vertex merging, and the amount of prepared
+/// geometry stays within a fixed window.
 /// </summary>
 static class Titanfall2WorldAggregator
 {
@@ -28,9 +30,9 @@ static class Titanfall2WorldAggregator
 		MountedAggregateGeometry<TitanfallMapVertex> Geometry );
 
 	/// <summary>
-	/// 每个材质一个模型、每个空间分区一个 fragment。返回的列表可直接交给
-	/// <see cref="MountedAggregateBuilder.Attach"/> 挂到场景里；<paramref name="totalMeshCount"/>
-	/// 保留原来的语义（模型数，含切片）。
+	/// One model per material, one fragment per spatial cell. The returned list can be passed
+	/// straight to <see cref="MountedAggregateBuilder.Attach"/>; <paramref name="totalMeshCount"/>
+	/// is the number of models, including split slices.
 	/// </summary>
 	public static List<MountedAggregate> Build(
 		Dictionary<WorldRenderCell, Dictionary<WorldMaterialKey, MapMeshGroup>> chunks,
@@ -87,30 +89,13 @@ static class Titanfall2WorldAggregator
 		}
 
 		var result = new List<MountedAggregate>( slices.Count );
-		if ( !Titanfall2StreamingSettings.ParallelAggregateBuild )
-		{
-			var sequentialTimer = Stopwatch.StartNew();
-			for ( var index = 0; index < slices.Count; index++ )
-			{
-				var slice = slices[index];
-				var material = materialFactory( slice.Key, index );
-				var geometry = MountedAggregateBuilder.PrepareGeometry( slice.Parts, slice.Start, slice.Count );
-				var name = $"{BuildResourceNamePrefix( mapName, category )}_aggregate_{index}";
-				result.Add( MountedAggregateBuilder.CreateAggregate( material, geometry, name ) );
-			}
-			totalMeshCount = result.Count;
-			log.Info( $"Titanfall 2 world aggregates: {resourcePath} ({result.Count} models/{totalMeshCount} meshes, "
-				+ $"{sourceVertexCount} vertices; sequential build {sequentialTimer.Elapsed.TotalSeconds:0.00}s; "
-				+ "set SBOX_TITANFALL2_PARALLEL_AGGREGATE=1 to A/B the bounded pipeline)" );
-			return result;
-		}
-
 		var prepareTimer = new Stopwatch();
 		var producerError = default( Exception );
 		var wallTimer = Stopwatch.StartNew();
 
-		// 预生成窗口：一个 chunk 的几何 + 队列里最多两个 chunk。队列有界，所以主线程慢时
-		// 后台线程会等待，而不是把所有材质的合并数组一次性铺满内存。
+		// Prepare-ahead window: one chunk being merged plus at most two queued slices. The queue is
+		// bounded, so a slow main thread makes the producer wait instead of filling memory with
+		// every material's merged arrays.
 		var chunkSize = Math.Max( 1, Environment.ProcessorCount / 2 );
 		var prepareOptions = new ParallelOptions
 		{

@@ -4,33 +4,37 @@
 // materials it has already decoded. Copy this whole file into the next Sandbox.Mounting.*
 // project (or keep it in the mount assembly) and call it from the streamer/loader.
 //
-// 三个可独立使用的单元：
-//   1. MountedAggregateBuilder — 世界几何按材质聚合成 AggregateRenderer（提交对象数下降，
-//      draw 数不变；每个空间分区仍是独立 fragment，可单独剔除）
-//   2. MountedInstanceBatch    — 显式 LOD + 可替换绘制子集的 instanced 静态批次
-//   3. MountedInstanceCull     — 实例级距离剔除，零分配快路径，只在绘制集变化时重建
+// Three independent units:
+//   1. MountedAggregateBuilder - aggregates world geometry per material into AggregateRenderers
+//      (fewer submitted objects, same draw count; each spatial cell stays a separate fragment
+//      that is culled on its own).
+//   2. MountedInstanceBatch    - instanced static batch with per-instance LOD selection and a
+//      replaceable draw subset.
+//   3. MountedInstanceCull     - per-instance distance culling with an allocation-free fast path;
+//      it rebuilds only when the draw set changes.
 //
-// 设计约定（都是实机踩过的坑，别改）：
-//   - 合并进同一个顶点缓冲后，AddSubMesh 的 startVertex 必须传 0：索引已经重基过，
-//     再传偏移会叠两次，表现为材质错乱/缺失。
-//   - 一个 aggregate 最多 AggregateRenderer.MaxFragments 个 fragment；超过就切片，绝不丢弃
-//     （丢掉等于该材质整片几何不可见）。
-//   - 实例数组视为不可变：渲染线程每帧读取，替换引用而不是原地写。
+// Design rules (each one fixed a real bug; do not change):
+//   - After merging into one vertex buffer, AddSubMesh must get startVertex 0. The indices are
+//     already rebased, so an offset is applied twice and shows up as wrong or missing materials.
+//   - An aggregate holds at most AggregateRenderer.MaxFragments fragments. Split into more
+//     aggregates beyond that; never drop fragments (that hides the material's geometry).
+//   - Instance arrays are immutable: the render thread reads them every frame, so replace the
+//     reference instead of writing in place.
 using System;
 using System.Collections.Generic;
 
 namespace Sandbox.Mounting.PerfKit;
 
 /// <summary>
-/// 一段几何：同一个材质、同一个空间分区（cell）里的顶点与索引。
-/// <typeparamref name="TVertex"/> 是调用方自己的顶点结构（必须 unmanaged）。
+/// One piece of geometry: the vertices and indices of one material in one spatial cell.
+/// <typeparamref name="TVertex"/> is the caller's own (unmanaged) vertex struct.
 /// </summary>
 public readonly record struct MountedGeometryPart<TVertex>(
 	List<TVertex> Vertices,
 	List<int> Indices,
 	BBox Bounds ) where TVertex : unmanaged;
 
-/// <summary>一个材质在若干空间分区里的全部几何。</summary>
+/// <summary>All geometry of one material across its spatial cells.</summary>
 public sealed class MountedGeometryGroup<TVertex> where TVertex : unmanaged
 {
 	public Material Material { get; }
@@ -50,13 +54,13 @@ public sealed class MountedGeometryGroup<TVertex> where TVertex : unmanaged
 }
 
 /// <summary>
-/// 一个 fragment 的 CPU 侧数据：bound，以及它在合并后的顶点/索引缓冲里占多少。
+/// CPU-side data of one fragment: its bounds and its share of the merged vertex/index buffers.
 /// </summary>
 public readonly record struct MountedAggregateFragment( BBox Bounds, int VertexCount, int IndexCount );
 
 /// <summary>
-/// 已经拼接好的聚合体几何。主线程只负责把它变成 <see cref="Mesh"/>/<see cref="Model"/>，
-/// 所以顶点拼接可以放到后台线程/有界流水线里做。
+/// Merged aggregate geometry. The main thread only turns it into a <see cref="Mesh"/>/<see cref="Model"/>,
+/// so the vertex merging can run on a background thread or a bounded pipeline.
 /// </summary>
 public sealed class MountedAggregateGeometry<TVertex> where TVertex : unmanaged
 {
@@ -67,7 +71,8 @@ public sealed class MountedAggregateGeometry<TVertex> where TVertex : unmanaged
 }
 
 /// <summary>
-/// 聚合结果：一个材质一个模型，每个空间分区一个 fragment（= 一次 draw、一个独立剔除边界）。
+/// Aggregate result: one model per material, one fragment per spatial cell (one draw and one
+/// culling bound each).
 /// </summary>
 public sealed record MountedAggregate(
 	Material Material,
@@ -75,20 +80,20 @@ public sealed record MountedAggregate(
 	List<AggregateFragmentInfo> Fragments );
 
 /// <summary>
-/// 把“按 (空间分区, 材质) 分组的几何”重组成“每个材质一个模型、每个分区一个 draw”。
+/// Regroups geometry grouped by (spatial cell, material) into one model per material with one
+/// draw per cell.
 ///
-/// 为什么要聚合：场景主线程的渲染成本几乎完全由提交对象数决定，而不是 draw 数或三角形数。
-/// 实测等价写法（Titanfall 2 / mp_angel_city）：774 个 ModelRenderer / 4444 draws 聚合成
-/// 334 个 AggregateRenderer / 1091 draws，主线程 Render 17.4ms → 13.1ms，画面一致。
+/// Aggregation pays off because the scene main thread's render cost is driven by the number of
+/// submitted objects, not by draw or triangle counts.
 /// </summary>
 public static class MountedAggregateBuilder
 {
-	/// <summary>每个 aggregate 允许的最大 fragment 数；0 表示取引擎上限。</summary>
+	/// <summary>Maximum fragments per aggregate (the engine limit); a maxFragments of 0 uses this.</summary>
 	public static int DefaultMaxFragments => AggregateRenderer.MaxFragments;
 
 	/// <summary>
-	/// 构建 aggregate 列表。<paramref name="resourceNamePrefix"/> 是资源名前缀（例如
-	/// <c>titanfall2/map/mp_angel_city_world</c>），生成的名字是 <c>..._aggregate_N</c>。
+	/// Builds the aggregate list. <paramref name="resourceNamePrefix"/> is the resource name prefix
+	/// (for example <c>titanfall2/map/mp_angel_city_world</c>); models are named <c>..._aggregate_N</c>.
 	/// </summary>
 	public static List<MountedAggregate> Build<TVertex>(
 		IEnumerable<MountedGeometryGroup<TVertex>> groups,
@@ -106,7 +111,8 @@ public static class MountedAggregateBuilder
 		{
 			if ( group?.Material is null || group.Parts.Count == 0 ) continue;
 
-			// 表面上看每个材质一个模型；分区数超上限时切成多个模型，但一个都不丢。
+			// Normally one model per material. Above the fragment limit, split into several models
+			// rather than dropping any cell.
 			for ( var start = 0; start < group.Parts.Count; start += maxFragments )
 			{
 				var count = Math.Min( maxFragments, group.Parts.Count - start );
@@ -122,8 +128,9 @@ public static class MountedAggregateBuilder
 	}
 
 	/// <summary>
-	/// 把若干段同材质、同分区的几何拼成一份 CPU 侧数据。纯托管、不碰引擎对象，可以放到
-	/// 后台线程；调用方负责在数量上做有界流水线（见 Titanfall 2 的 world 聚合器）。
+	/// Merges geometry parts of one material into one CPU-side buffer. Purely managed and free of
+	/// engine objects, so it can run on a background thread; the caller bounds how much is prepared
+	/// ahead (see the Titanfall 2 world aggregator).
 	/// </summary>
 	public static MountedAggregateGeometry<TVertex> PrepareGeometry<TVertex>(
 		IReadOnlyList<MountedGeometryPart<TVertex>> parts,
@@ -134,7 +141,7 @@ public static class MountedAggregateBuilder
 		if ( count <= 0 || start < 0 || start + count > parts.Count )
 			throw new ArgumentOutOfRangeException( nameof( start ) );
 
-		// 先算总量再分配：一次载入会拼几百 MB 顶点，List 反复扩容的拷贝是真实成本。
+		// Size the lists up front: a load merges hundreds of MB of vertices, and repeated List growth copies are a real cost.
 		var vertexTotal = 0;
 		var indexTotal = 0;
 		for ( var index = start; index < start + count; index++ )
@@ -155,7 +162,7 @@ public static class MountedAggregateBuilder
 			vertices.AddRange( part.Vertices );
 
 			var partIndices = part.Indices;
-			// 预分配后这里只是加法；仍然逐项重基，不能整段拷贝（每个分区的索引都从 0 开始）。
+			// Rebase each index; a block copy is wrong because every cell's indices start at 0.
 			for ( var i = 0; i < partIndices.Count; i++ )
 				indices.Add( partIndices[i] + vertexOffset );
 
@@ -173,7 +180,7 @@ public static class MountedAggregateBuilder
 	}
 
 	/// <summary>
-	/// 把一份已经拼好的 CPU 几何变成 <see cref="Mesh"/>/<see cref="Model"/>。必须在主线程调用。
+	/// Turns merged CPU geometry into a <see cref="Mesh"/>/<see cref="Model"/>. Must be called on the main thread.
 	/// </summary>
 	public static MountedAggregate CreateAggregate<TVertex>(
 		Material material,
@@ -197,17 +204,17 @@ public static class MountedAggregateBuilder
 			var fragment = geometry.Fragments[index];
 			if ( index == 0 )
 			{
-				// 第一个 fragment 用整段范围；后续 fragment 依次追加 sub mesh。
+				// The first fragment uses the mesh's own range; later fragments are appended as sub meshes.
 				mesh.SetVertexRange( 0, fragment.VertexCount );
 				mesh.SetIndexRange( 0, fragment.IndexCount );
 			}
 			else
 			{
-				// base vertex 必须为 0 - 索引已经重基到合并后的顶点缓冲，再传偏移会叠两次。
+				// Base vertex must be 0: the indices are already rebased to the merged buffer, so an offset would apply twice.
 				mesh.AddSubMesh( material, indexCursor, fragment.IndexCount );
 			}
 
-			// 世界几何已经是世界空间，fragment 只需要自己的 bound（identity transform）。
+			// World geometry is already in world space, so a fragment only needs its bounds (identity transform).
 			fragments.Add( new AggregateFragmentInfo( fragment.Bounds ) );
 			indexCursor += fragment.IndexCount;
 		}
@@ -216,7 +223,7 @@ public static class MountedAggregateBuilder
 		return new MountedAggregate( material, model, fragments );
 	}
 
-	/// <summary>给一个 GameObject 挂上 aggregate 渲染器（子对象、IsStatic）。</summary>
+	/// <summary>Attaches an aggregate renderer to a static child of <paramref name="parent"/>.</summary>
 	public static AggregateRenderer Attach( GameObject parent, string name, MountedAggregate aggregate, bool castShadows )
 	{
 		if ( parent is null || !parent.IsValid() ) throw new ArgumentNullException( nameof( parent ) );
@@ -235,11 +242,11 @@ public static class MountedAggregateBuilder
 }
 
 /// <summary>
-/// 一条 instanced 静态批次：一次 DrawModelInstanced 画多个永久实例，
-/// 可选显式 LOD（模型里已含全部 LOD 时用），并允许运行期替换“实际绘制的实例子集”。
+/// An instanced static batch: DrawModelInstanced draws many permanent instances at once, and the
+/// subset of instances actually drawn can be replaced at runtime.
 ///
-/// 关键行为：显式 LOD 用“离相机最近的实例原点”而不是批次 bounds 来选级。bounds 是全体成员的并集，
-/// 最近点通常落在最近实例内部，用 bounds 会系统性地选到更精细的一级，让 A/B 失真。
+/// LOD is chosen per instance from the distance between its own origin and the camera (not from
+/// the batch bounds), and instances are drawn grouped by level.
 /// </summary>
 public interface IMountedInstanceBatch : IValid
 {
@@ -252,7 +259,7 @@ public interface IMountedInstanceBatch : IValid
 	void Delete();
 }
 
-/// <summary>实例批次的提交/绘制开关。默认值 = 静态挂载地图的常用组合。</summary>
+/// <summary>Submission and draw flags for an instance batch. Defaults suit static mounted maps.</summary>
 public sealed class MountedInstanceBatchOptions
 {
 	public bool CastShadows { get; init; } = true;
@@ -261,7 +268,7 @@ public sealed class MountedInstanceBatchOptions
 	public bool NeedsEnvironmentMap { get; init; }
 	public bool NeedsLightProbe { get; init; } = true;
 	public Color? Tint { get; init; }
-	/// <summary>给定时按“最近实例距离”选 LOD；为 null 时不传显式级别（单级模型 / 引擎自动选级）。</summary>
+	/// <summary>Maps an instance's camera distance to its LOD level. When null, no explicit level is passed to the draw.</summary>
 	public Func<float, int> SelectLod { get; init; }
 }
 
@@ -272,13 +279,9 @@ public class MountedInstanceBatch : SceneCustomObject, IMountedInstanceBatch
 	readonly Func<float, int> _selectLod;
 	sealed record DrawSet( Transform[] Transforms, int[] SourceIndices );
 	DrawSet _drawSet;
-	static long _submittedInstances, _frustumRejectedInstances, _instanceDraws;
-	// Native object culling remains active. Extra per-instance CPU frustum tests
-	// are opt-in: small, dense batches did not improve total frame time in A/B.
-	public bool FrustumCullingEnabled { get; set; }
-	public bool PerInstanceLodEnabled { get; set; } = true;
-	public static (long Submitted, long FrustumRejected, long Draws) GetStatistics() =>
-		(System.Threading.Interlocked.Read( ref _submittedInstances ), System.Threading.Interlocked.Read( ref _frustumRejectedInstances ), System.Threading.Interlocked.Read( ref _instanceDraws ));
+	static long _submittedInstances, _instanceDraws;
+	public static (long Submitted, long Draws) GetStatistics() =>
+		(System.Threading.Interlocked.Read( ref _submittedInstances ), System.Threading.Interlocked.Read( ref _instanceDraws ));
 
 	public int InstanceCount => _drawSet.Transforms.Length;
 	public Transform[] DrawTransforms => _drawSet.Transforms;
@@ -290,8 +293,9 @@ public class MountedInstanceBatch : SceneCustomObject, IMountedInstanceBatch
 	}
 
 	/// <summary>
-	/// 创建一个 instanced 批次。<paramref name="transforms"/> 交给批次后必须视为不可变：
-	/// 渲染线程每帧读取，替换引用而不是原地修改。空数组或无效模型会抛异常，调用方负责回退。
+	/// Creates an instanced batch. Treat <paramref name="transforms"/> as immutable once passed in:
+	/// the render thread reads it every frame, so replace the reference instead of editing it. An empty
+	/// array or invalid model throws; the caller handles the fallback.
 	/// </summary>
 	public MountedInstanceBatch(
 		SceneWorld world,
@@ -326,7 +330,7 @@ public class MountedInstanceBatch : SceneCustomObject, IMountedInstanceBatch
 		if ( options.Tint is { } tint ) ColorTint = tint;
 	}
 
-	/// <summary>替换绘制实例集。数组被视为不可变（渲染线程每帧读取）。</summary>
+	/// <summary>Replaces the drawn instance set. The array is treated as immutable (the render thread reads it every frame).</summary>
 	public void SetDrawTransforms( Transform[] transforms ) => SetDrawInstances( transforms, null );
 
 	/// <summary>Keep caller-owned per-instance data associated through subset changes.</summary>
@@ -357,38 +361,24 @@ public class MountedInstanceBatch : SceneCustomObject, IMountedInstanceBatch
 		var drawSet = _drawSet; // One immutable snapshot for both arrays in this view/pass.
 		var all = drawSet.Transforms;
 		if ( !_model.IsValid() || all.Length == 0 ) return;
-		if ( FrustumCullingEnabled || (_selectLod is not null && PerInstanceLodEnabled) )
+		if ( _selectLod is not null )
 		{
-			DrawVisibleInstances( drawSet );
+			DrawPerInstanceLods( drawSet );
 			return;
 		}
 		System.Threading.Interlocked.Add( ref _submittedInstances, all.Length );
 		System.Threading.Interlocked.Increment( ref _instanceDraws );
-
-		if ( _selectLod is null )
-		{
-			DrawInstances( all, drawSet.SourceIndices, -1 );
-			return;
-		}
-
-		var camera = Graphics.CameraPosition;
-		var nearest = float.MaxValue;
-		foreach ( var transform in all )
-			nearest = MathF.Min( nearest, camera.Distance( transform.Position ) );
-		// 非有限值只可能来自非有限 transform；当作最近一级，保持可见。
-		if ( !float.IsFinite( nearest ) ) nearest = 0f;
-		DrawInstances( all, drawSet.SourceIndices, _selectLod( nearest ) );
+		DrawInstances( all, drawSet.SourceIndices, -1 );
 	}
 
-	void DrawVisibleInstances( DrawSet drawSet )
+	/// <summary>Groups the instances by their own LOD level and issues one draw per level.</summary>
+	void DrawPerInstanceLods( DrawSet drawSet )
 	{
 		var all = drawSet.Transforms;
-		// A single-instance scene object's native bounds already cover exactly that
-		// instance. Avoid fetching six frustum planes and allocating scratch spans.
+		// A single instance needs no grouping and no scratch spans.
 		if ( all.Length == 1 )
 		{
-			DrawInstances( all, drawSet.SourceIndices,
-				_selectLod is null ? -1 : _selectLod( Graphics.CameraPosition.Distance( all[0].Position ) ) );
+			DrawInstances( all, drawSet.SourceIndices, _selectLod( Graphics.CameraPosition.Distance( all[0].Position ) ) );
 			System.Threading.Interlocked.Increment( ref _submittedInstances );
 			System.Threading.Interlocked.Increment( ref _instanceDraws );
 			return;
@@ -398,7 +388,7 @@ public class MountedInstanceBatch : SceneCustomObject, IMountedInstanceBatch
 		Transform[] rentedTransforms = null;
 		byte[] rentedLods = null;
 		int[] rentedSourceIndices = null;
-		Span<Transform> visible = all.Length <= 64 ? stackalloc Transform[all.Length]
+		Span<Transform> grouped = all.Length <= 64 ? stackalloc Transform[all.Length]
 			: (rentedTransforms = System.Buffers.ArrayPool<Transform>.Shared.Rent( all.Length )).AsSpan( 0, all.Length );
 		Span<byte> levels = all.Length <= 64 ? stackalloc byte[all.Length]
 			: (rentedLods = System.Buffers.ArrayPool<byte>.Shared.Rent( all.Length )).AsSpan( 0, all.Length );
@@ -406,36 +396,16 @@ public class MountedInstanceBatch : SceneCustomObject, IMountedInstanceBatch
 			: (rentedSourceIndices = System.Buffers.ArrayPool<int>.Shared.Rent( all.Length )).AsSpan( 0, all.Length );
 		try
 		{
-			var frustum = FrustumCullingEnabled ? Graphics.Frustum : default;
 			var camera = Graphics.CameraPosition;
-			var bounds = _model.Bounds;
-			var radius = bounds.Size.Length * 0.5f;
 			Span<int> counts = stackalloc int[4];
 			counts.Clear();
-			var total = 0;
-			var sharedLod = 0;
-			if ( _selectLod is not null && !PerInstanceLodEnabled )
-			{
-				var nearest = float.MaxValue;
-				foreach ( var tx in all ) nearest = MathF.Min( nearest, camera.Distance( tx.Position ) );
-				sharedLod = Math.Clamp( _selectLod( nearest ), 0, 3 );
-			}
 			for ( var i = 0; i < all.Length; i++ )
 			{
-				var tx = all[i];
-				var scale = MathF.Max( MathF.Abs( tx.Scale.x ), MathF.Max( MathF.Abs( tx.Scale.y ), MathF.Abs( tx.Scale.z ) ) );
-				if ( FrustumCullingEnabled && !frustum.IsInside( tx.PointToWorld( bounds.Center ), radius * scale, partially: true ) )
-				{
-					levels[i] = byte.MaxValue;
-					continue;
-				}
-				var lod = _selectLod is null ? 0 : PerInstanceLodEnabled ? Math.Clamp( _selectLod( camera.Distance( tx.Position ) ), 0, 3 ) : sharedLod;
+				var lod = Math.Clamp( _selectLod( camera.Distance( all[i].Position ) ), 0, 3 );
 				levels[i] = (byte)lod;
 				counts[lod]++;
-				total++;
 			}
-			System.Threading.Interlocked.Add( ref _frustumRejectedInstances, all.Length - total );
-			System.Threading.Interlocked.Add( ref _submittedInstances, total );
+			System.Threading.Interlocked.Add( ref _submittedInstances, all.Length );
 			Span<int> offsets = stackalloc int[4];
 			offsets[0] = 0;
 			for ( var i = 1; i < 4; i++ ) offsets[i] = offsets[i - 1] + counts[i - 1];
@@ -443,16 +413,15 @@ public class MountedInstanceBatch : SceneCustomObject, IMountedInstanceBatch
 			offsets.CopyTo( writes );
 			for ( var i = 0; i < all.Length; i++ )
 			{
-				if ( levels[i] == byte.MaxValue ) continue;
 				var write = writes[levels[i]]++;
-				visible[write] = all[i];
+				grouped[write] = all[i];
 				sourceIndices[write] = drawSet.SourceIndices[i];
 			}
 			for ( var lod = 0; lod < 4; lod++ )
 			{
 				if ( counts[lod] == 0 ) continue;
-				var group = visible.Slice( offsets[lod], counts[lod] );
-				DrawInstances( group, sourceIndices.Slice( offsets[lod], counts[lod] ), _selectLod is null ? -1 : lod );
+				var group = grouped.Slice( offsets[lod], counts[lod] );
+				DrawInstances( group, sourceIndices.Slice( offsets[lod], counts[lod] ), lod );
 				System.Threading.Interlocked.Increment( ref _instanceDraws );
 			}
 		}
@@ -466,13 +435,14 @@ public class MountedInstanceBatch : SceneCustomObject, IMountedInstanceBatch
 }
 
 /// <summary>
-/// 实例级距离剔除：只保留半径内的实例。
+/// Per-instance distance culling: keeps only the instances within range.
 ///
-/// 为什么不是按批次/按 cell 剔除：一个批次覆盖一个 cell（2048 单位）时，整批一起消失会
-/// 看到成片 props 突然没了；逐实例剔除减少整片同时消失，但并不提供透明淡出。
+/// Culling per batch or per cell would make whole patches of props vanish at once; culling per
+/// instance avoids that, but it does not fade instances out.
 ///
-/// 全部保留时直接复用完整数组；部分保留时，只有成员或输入数组改变才重建子集。
-/// 调用方只在 <see cref="Update"/> 返回 true 时替换绘制集。
+/// When every instance is kept the full array is reused; otherwise the subset is rebuilt only when
+/// its membership or the input array changes. Callers replace the draw set only when
+/// <see cref="Update"/> returns true.
 /// </summary>
 public sealed class MountedInstanceCull
 {
@@ -485,15 +455,16 @@ public sealed class MountedInstanceCull
 	public int[] SubsetIndices => _subsetIndices;
 	public int KeptCount => _kept;
 
-	/// <summary>是否已经执行过一次 <see cref="Update"/>；批次重建后用它决定要不要恢复子集。</summary>
+	/// <summary>Whether <see cref="Update"/> has run at least once.</summary>
 	public bool IsInitialized { get; private set; }
 
 	/// <summary>
-	/// 重新计算应绘制的实例集。返回 true 表示绘制集发生变化，调用方应把
-	/// <see cref="Subset"/> 交给批次；<see cref="KeptCount"/> 为 0 时整批可以隐藏。
+	/// Recomputes the instances to draw. Returns true when the draw set changed, in which case the
+	/// caller passes <see cref="Subset"/> to the batch; when <see cref="KeptCount"/> is 0 the whole batch can be hidden.
 	/// </summary>
 	/// <remarks>
-	/// 可选的 keepDistances 是逐实例保留距离；提供时覆盖 keepDistance，无穷大表示永不按距离剔除。
+	/// The optional keepDistances holds per-instance keep distances that override keepDistance;
+	/// infinity means the instance is never distance-culled.
 	/// </remarks>
 	public bool Update( Transform[] all, Vector3 anchor, float keepDistance, IReadOnlyList<float> radii = null, float landmarkRadius = float.MaxValue,
 		IReadOnlyList<float> keepDistances = null )
@@ -541,7 +512,7 @@ public sealed class MountedInstanceCull
 			return changed;
 		}
 
-		// 数量相同不代表成员相同；观察点移动后必须比较实际成员。
+		// The same count does not mean the same members; after the anchor moves, compare actual membership.
 		var rebuild = !ReferenceEquals( _source, all ) || _kept != kept || membershipChanged;
 		_source = all;
 		_kept = kept;
@@ -574,7 +545,7 @@ public sealed class MountedInstanceCull
 		return float.IsPositiveInfinity( distance ) || anchor.DistanceSquared( transform.Position ) <= distance * distance;
 	}
 
-	/// <summary>把当前子集应用到刚重建的批次上（LOD 换模型时用，避免闪一帧全量实例）。</summary>
+	/// <summary>Applies the current subset to a batch.</summary>
 	public void ApplyTo( IMountedInstanceBatch batch )
 	{
 		if ( batch is null || !IsInitialized ) return;
@@ -582,22 +553,13 @@ public sealed class MountedInstanceCull
 	}
 
 	/// <summary>
-	/// 强制下一次 <see cref="Update"/> 重建子集，即使保留数量没变。批次被隐藏一段时间后重新可见时用：
-	/// 缓存的子集是按旧 anchor 算的，可能含半径外实例、也可能缺刚进入半径的实例。
+	/// Forces the next <see cref="Update"/> to rebuild the subset even if the kept count is unchanged.
+	/// Use it when a batch becomes visible again after being hidden: the cached subset was computed
+	/// for an old anchor and may include out-of-range instances or miss ones that came into range.
 	/// </summary>
 	public void Invalidate()
 	{
 		_source = null;
 		_kept = -1;
-	}
-
-	/// <summary>清空状态；下次 <see cref="Update"/> 会重新扫描。剔除被运行时关闭时用。</summary>
-	public void Reset()
-	{
-		IsInitialized = false;
-		_source = null;
-		_subset = Array.Empty<Transform>();
-		_subsetIndices = Array.Empty<int>();
-		_kept = 0;
 	}
 }

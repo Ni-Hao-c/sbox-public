@@ -12,6 +12,8 @@ partial class MapLoader(
 	bool pureWorld = false ) : SceneLoader<Titanfall2Mount>
 {
 	const float DecalNormalOffset = 0.25f;
+	// Seconds after load before the deferred navmesh build starts.
+	const float NavMeshStartDelaySeconds = 3f;
 	readonly ITitanfall2AssetSource _source = source;
 	readonly ITitanfall2AssetSource _spawnEntitySource = spawnEntitySource;
 	readonly ITitanfall2AssetSource _environmentEntitySource = environmentEntitySource;
@@ -30,33 +32,22 @@ partial class MapLoader(
 		// against the current instance before custom components are added/serialized.
 		Host.EnsureRuntimeTypesRegistered();
 		var timer = System.Diagnostics.Stopwatch.StartNew();
-		// Physics import is independent of navigation generation. Keep the stable
-		// render-geometry fallback unless authoritative collision is requested.
+		// Authoritative rBSP collision is always parsed. The render-geometry fallback is
+		// only built when that collision is missing or incomplete.
 		var server = Application.IsDedicatedServer;
-		var parseOriginalWorldCollision = server || Titanfall2StreamingSettings.UseOriginalWorldCollision;
-		var cacheable = Titanfall2StreamingSettings.ProcessedCache && !parseOriginalWorldCollision && !Titanfall2StreamingSettings.UseBspLightmaps;
-		var cacheIdentity = cacheable ? Titanfall2MapCache.Identity( Host, _source ) : null;
-		Titanfall2BspReader.ParsedBsp parsed = null;
-		var cached = cacheable && Titanfall2MapCache.TryRead( cacheIdentity, out parsed );
-		if ( !cached )
+		if ( !_source.TryReadAllBytes( out var bytes, out var readError ) )
 		{
-			if ( !_source.TryReadAllBytes( out var bytes, out var readError ) )
-			{
-				Log.Warning( $"Failed to read Titanfall 2 BSP '{Path}': {readError}" );
-				return;
-			}
-			var collisionLumps = parseOriginalWorldCollision ? ReadCollisionLumpOverrides() : new Dictionary<int, byte[]>();
-			if ( !Titanfall2BspReader.TryRead( bytes, System.IO.Path.GetFileNameWithoutExtension( _source.Description ), collisionLumps,
-				parseWorldCollision: parseOriginalWorldCollision, parseLightmaps: !server && Titanfall2StreamingSettings.UseBspLightmaps,
-				parseStaticPropLightProbes: !server && Titanfall2StreamingSettings.UseBspLightmaps, out parsed, out var parseError, allCollisionContents: true ) )
-			{
-				Log.Warning( $"Failed to parse Titanfall 2 BSP '{Path}': {parseError}" );
-				return;
-			}
-			if ( cacheable ) Titanfall2MapCache.Write( cacheIdentity, parsed );
+			Log.Warning( $"Failed to read Titanfall 2 BSP '{Path}': {readError}" );
+			return;
 		}
-		Log.Info( $"Titanfall 2 map processed cache: {(cached ? "hit" : cacheable ? "miss/rebuilt" : "disabled for this import mode")}; "
-			+ $"BSP read/parse/cache {timer.Elapsed.TotalSeconds:0.00}s ({Path})." );
+		if ( !Titanfall2BspReader.TryRead( bytes, System.IO.Path.GetFileNameWithoutExtension( _source.Description ), ReadCollisionLumpOverrides(),
+			parseWorldCollision: true, parseLightmaps: !server && Titanfall2StreamingSettings.UseBspLightmaps,
+			parseStaticPropLightProbes: !server && Titanfall2StreamingSettings.UseBspLightmaps, out var parsed, out var parseError, allCollisionContents: true ) )
+		{
+			Log.Warning( $"Failed to parse Titanfall 2 BSP '{Path}': {parseError}" );
+			return;
+		}
+		Log.Info( $"Titanfall 2 BSP read/parse {timer.Elapsed.TotalSeconds:0.00}s ({Path})." );
 		var collisionSummary = parsed.WorldCollision.SourcePrimitiveCount > 0
 			? $"{parsed.WorldCollision.PrimitiveCount}/{parsed.WorldCollision.SourcePrimitiveCount} player-solid primitives, "
 				+ $"{parsed.WorldCollision.WaterPrimitiveCount} water "
@@ -72,10 +63,9 @@ partial class MapLoader(
 			+ $"{timer.Elapsed.TotalSeconds:0.00}s)" );
 
 		LogBspEntities( parsed );
-		var hasOriginalWorldCollision = parseOriginalWorldCollision
-			&& parsed.WorldCollision is { IsEmpty: false, RejectedPrimitiveCount: 0 };
+		var hasOriginalWorldCollision = parsed.WorldCollision is { IsEmpty: false, RejectedPrimitiveCount: 0 };
 		if ( server && !hasOriginalWorldCollision ) throw new InvalidDataException( $"Dedicated server requires complete rBSP CM collision: {Path}" );
-		_cachedWorldBuild = server ? new WorldBuildResult( [], [], [], [], [], [], null, [] )
+		_cachedWorldBuild = server ? new WorldBuildResult( [], [], [], [], [], null, [] )
 			: BuildWorldModel( parsed, createFallbackCollision: !hasOriginalWorldCollision );
 		var worldBuild = _cachedWorldBuild;
 		if ( worldBuild is null )
@@ -90,25 +80,13 @@ partial class MapLoader(
 		// Lightmap textures belong to the cached generated scene, not an individual
 		// editor/play clone. The retained build owns them until the mount is released.
 		world.AddComponent<Titanfall2SceneResourceOwner>().Configure( Host.Ident );
-		foreach ( var model in worldBuild.WorldChunks.Concat( worldBuild.TranslucentChunks )
+		foreach ( var model in worldBuild.TranslucentChunks
 			.Concat( worldBuild.DecalChunks ).Concat( worldBuild.GodrayChunks ).Concat( worldBuild.WaterChunks ).Select( static chunk => chunk.Model ) )
 		{
 			// Retain the managed material wrappers too: VMT proxy registrations are
 			// weak, and a cached generated model does not rerun its material loader.
 			_ = model.Materials;
 		}
-		foreach ( var chunk in worldBuild.WorldChunks )
-		{
-			var chunkObject = new GameObject( world, true, $"world_{chunk.Cell}" );
-			chunkObject.IsStatic = true;
-			var renderer = chunkObject.AddComponent<ModelRenderer>();
-			renderer.Model = chunk.Model;
-			renderer.RenderType = Titanfall2StreamingSettings.MapShadows
-				? ModelRenderer.ShadowRenderType.On
-				: ModelRenderer.ShadowRenderType.Off;
-		}
-		if ( Titanfall2StreamingSettings.MapShadows && Titanfall2StreamingSettings.WorldShadowEnableDistance > 0f )
-			world.AddComponent<Titanfall2WorldShadowController>();
 		var aggregateIndex = 0;
 		foreach ( var chunk in worldBuild.TranslucentChunks )
 		{
@@ -120,8 +98,8 @@ partial class MapLoader(
 		}
 		foreach ( var aggregate in worldBuild.WorldAggregates )
 		{
-			// 接线细节（子对象 / IsStatic / AggregateRenderer）复用 PerfKit，避免每个挂载项目
-			// 再写一份同样的挂接代码。
+			// PerfKit owns the wiring (child object, IsStatic, AggregateRenderer) so each mount
+			// does not repeat it.
 			MountedAggregateBuilder.Attach( world, $"world_aggregate_{aggregateIndex}", aggregate, Titanfall2StreamingSettings.MapShadows );
 			aggregateIndex++;
 		}
@@ -141,8 +119,7 @@ partial class MapLoader(
 			godrayRenderer.Model = chunk.Model;
 			godrayRenderer.RenderType = ModelRenderer.ShadowRenderType.Off;
 		}
-		// Light blockers: shadow casters the camera never draws. Not named world_*, so the
-		// distance shadow gate cannot switch them to a visible ShadowRenderType.On.
+		// Light blockers: shadow casters the camera never draws.
 		foreach ( var chunk in worldBuild.ShadowOnlyChunks ?? [] )
 		{
 			var blocker = new GameObject( world, true, $"titanfall2_light_blocker_{chunk.Cell}" );
@@ -192,7 +169,7 @@ partial class MapLoader(
 		// navigation on (DeferredNavMesh) stays limited to full mounted scenes.
 		world.AddComponent<Titanfall2DeferredNavMeshBuilder>()
 			.Configure( !_pureWorld && Titanfall2StreamingSettings.DeferredNavMesh, Titanfall2StreamingSettings.NavMeshOnDemand,
-				Titanfall2StreamingSettings.NavMeshOnDemandRadius, Titanfall2StreamingSettings.NavMeshStartDelaySeconds,
+				Titanfall2StreamingSettings.NavMeshOnDemandRadius, NavMeshStartDelaySeconds,
 				new BBox( ToSandbox( parsed.World.Mins ), ToSandbox( parsed.World.Maxs ) ) );
 		if ( !server ) CreateEnvironment( parsed );
 		if ( !server && Titanfall2StreamingSettings.UseBspLightmaps )
@@ -221,7 +198,7 @@ partial class MapLoader(
 		var streamerObject = new GameObject( true, "titanfall2_static_prop_streamer" );
 		var propStreamer = streamerObject.AddComponent<Titanfall2StaticPropStreamer>();
 		propStreamer.KeepAllCollisions = _pureWorld || server;
-		propStreamer.Configure( Host.Ident, Path, streamingAnchor, worldProps, parsed.Visibility, _aggregatedPropRadii, ReadBakedSkyColor( parsed ),
+		propStreamer.Configure( Host.Ident, Path, streamingAnchor, worldProps, parsed.Visibility, ReadBakedSkyColor( parsed ),
 				Titanfall2StreamingSettings.UseBspLightmaps ? parsed.WorldLights : null,
 				server ? null : ResolvePropFadeDistances( worldProps ) );
 		if ( _pureWorld || server )

@@ -3,6 +3,9 @@ using Titanfall2;
 
 partial class MapLoader
 {
+	// Edge length of the spatial cells world triangles are grouped into.
+	const float WorldRenderCellSize = 2048f;
+
 	Titanfall2MaterialPrefetch _materialPrefetch;
 	WorldBuildResult BuildWorldModel( Titanfall2BspReader.ParsedBsp parsed, bool createFallbackCollision )
 	{
@@ -89,7 +92,7 @@ partial class MapLoader
 				var vertex2 = CreateWorldVertex( sourceMesh.Vertices[sourceIndex2], isDecal );
 				var cell = WorldRenderCell.FromTriangle(
 					vertex0.Position, vertex1.Position, vertex2.Position,
-					Titanfall2StreamingSettings.WorldRenderCellSize );
+					WorldRenderCellSize );
 				// Native s&box lighting does not need one material/draw group per
 				// Respawn lightmap page. Merge those pages when the experimental
 				// lightmap path is disabled to reduce both memory and draw calls.
@@ -122,7 +125,6 @@ partial class MapLoader
 				visualEffectCollisionMeshCount++;
 		}
 
-		AddStaticPropsToWorld( parsed, groups, worldMaterials );
 		if ( groups.Count == 0 && translucentGroups.Count == 0 && waterGroups.Count == 0 ) return null;
 		var worldGroupCount = groups.Values.Sum( static cell => cell.Count );
 		var decalGroupCount = decalGroups.Values.Sum( static cell => cell.Count );
@@ -141,42 +143,21 @@ partial class MapLoader
 		var renderTimer = System.Diagnostics.Stopwatch.StartNew();
 		// Match consumption order. A queued water material held until the end must
 		// not occupy every look-ahead slot while opaque materials load synchronously.
-		var worldOrder = Titanfall2StreamingSettings.WorldAggregate
-			? worldMaterials.Except( waterMaterials, StringComparer.OrdinalIgnoreCase )
-				.Except( translucentMaterials, StringComparer.OrdinalIgnoreCase ).OrderBy( static name => name, StringComparer.OrdinalIgnoreCase )
-			: EnumerateChunkMaterials( groups );
+		var worldOrder = worldMaterials.Except( waterMaterials, StringComparer.OrdinalIgnoreCase )
+			.Except( translucentMaterials, StringComparer.OrdinalIgnoreCase ).OrderBy( static name => name, StringComparer.OrdinalIgnoreCase );
 		using var prefetch = new Titanfall2MaterialPrefetch( Host,
 			worldOrder.Concat( EnumerateChunkMaterials( translucentGroups ) ).Concat( EnumerateChunkMaterials( decalGroups ) )
 				.Concat( EnumerateChunkMaterials( godrayGroups ) ).Concat( EnumerateChunkMaterials( waterGroups ) )
 				.Select( name => Host.TryGetMaterialPath( name, out var registered ) ? registered : name ) );
 		_materialPrefetch = prefetch;
-		var worldAggregates = new List<MountedAggregate>();
-		var worldChunks = new List<WorldRenderChunk>();
-		int worldRenderMeshCount;
-		if ( Titanfall2StreamingSettings.WorldAggregate )
-		{
-			worldAggregates = Titanfall2WorldAggregator.Build(
-				groups, parsed.MapName, "world", Path, Log,
-				( materialKey, meshIndex ) => CreateWorldLightmappedMaterial(
-					materialKey,
-					meshIndex,
-					lightmaps ),
-				out worldRenderMeshCount );
-		}
-		else
-		{
-			worldChunks = BuildRenderChunks(
-				groups, parsed.MapName, "world",
-				( materialKey, meshIndex ) => CreateWorldLightmappedMaterial(
-					materialKey,
-					meshIndex,
-					lightmaps ),
-				out worldRenderMeshCount );
-		}
-		// The phase split is logged because this number is the mount's whole load time and it swings by
-		// 4x between identical runs (12.50s to 53.20s observed on the same build). Comparing a single
-		// reading from one run with a single reading from another therefore proves nothing - the split
-		// below is what tells us whether a change moved world geometry, decals or Godrays.
+		var worldAggregates = Titanfall2WorldAggregator.Build(
+			groups, parsed.MapName, "world", Path, Log,
+			( materialKey, meshIndex ) => CreateWorldLightmappedMaterial(
+				materialKey,
+				meshIndex,
+				lightmaps ),
+			out var worldRenderMeshCount );
+		// Per-phase timings show whether world geometry, decals or Godrays moved the load time.
 		var worldPhase = renderTimer.Elapsed;
 		var translucentChunks = BuildRenderChunks( translucentGroups, parsed.MapName, "translucent",
 			( materialKey, meshIndex ) => LoadWorldMaterial( materialKey.MaterialName )
@@ -204,14 +185,9 @@ partial class MapLoader
 		var shadowOnlyChunks = BuildRenderChunks( shadowOnlyGroups, parsed.MapName, "shadow_only",
 			( materialKey, meshIndex ) => MaterialLoader.CreateRuntimeMaterial( $"{Path}/shadow_only_{meshIndex}", GetMaterialMetadata( materialKey.MaterialName ) ),
 			out var shadowOnlyRenderMeshCount );
-		if ( worldChunks.Count == 0 && worldAggregates.Count == 0 && translucentChunks.Count == 0 && waterChunks.Count == 0 ) return null;
-		// Exactly one of the two paths produced the world geometry; printing both would report the
-		// same mesh count twice, once under a zero-object label.
-		var worldSummary = worldAggregates.Count > 0
-			? $"{worldAggregates.Count} world aggregates/{worldRenderMeshCount} meshes"
-			: $"{worldChunks.Count} world chunks/{worldRenderMeshCount} meshes";
+		if ( worldAggregates.Count == 0 && translucentChunks.Count == 0 && waterChunks.Count == 0 ) return null;
 		Log.Info( $"Titanfall 2 spatial render models created: {Path} "
-			+ $"({worldSummary}, "
+			+ $"({worldAggregates.Count} world aggregates/{worldRenderMeshCount} meshes, "
 			+ $"{translucentChunks.Count} translucent chunks/{translucentRenderMeshCount} meshes, "
 			+ $"{decalChunks.Count} decal chunks/{decalRenderMeshCount} meshes, "
 			+ $"{godrayChunks.Count} Godray chunks/{godrayRenderMeshCount} meshes; "
@@ -233,7 +209,7 @@ partial class MapLoader
 			collisionModel = collisionBuilder.Create();
 			Log.Info( $"Titanfall 2 fallback render collision submitted: {Path} ({collisionIndices.Count / 3} triangles)" );
 		}
-		return new WorldBuildResult( worldChunks, translucentChunks, decalChunks, godrayChunks, waterChunks, worldAggregates, collisionModel,
+		return new WorldBuildResult( translucentChunks, decalChunks, godrayChunks, waterChunks, worldAggregates, collisionModel,
 			lightmaps?.OwnedResources ?? Array.Empty<IDisposable>(), shadowOnlyChunks );
 	}
 
@@ -428,7 +404,7 @@ partial class MapLoader
 		if ( compiled is not null ) return new Color( compiled.Intensity.X, compiled.Intensity.Y, compiled.Intensity.Z );
 		var color = TryParseSourceLightColor( lightValues?.GetValueOrDefault( "_ambient" ), 0.30f, out var authored )
 			? authored : new Color( 0.22f, 0.28f, 0.36f );
-		return color * Titanfall2StreamingSettings.AmbientScale;
+		return color * AmbientScale;
 	}
 
 	Material LoadWorldMaterial( string materialName )
@@ -467,9 +443,7 @@ partial class MapLoader
 		if ( string.IsNullOrWhiteSpace( materialName ) ) return false;
 		return materialName.Contains( "toolsskybox", StringComparison.OrdinalIgnoreCase )
 			|| materialName.Contains( "toolsnodraw", StringComparison.OrdinalIgnoreCase )
-			|| materialName.Contains( "toolsinvisible", StringComparison.OrdinalIgnoreCase )
-			|| (!Titanfall2StreamingSettings.AtmosphericCardEffects
-				&& Titanfall2CollisionFilter.IsAtmosphericCardName( materialName ));
+			|| materialName.Contains( "toolsinvisible", StringComparison.OrdinalIgnoreCase );
 	}
 
 	static float DistanceSquared( System.Numerics.Vector3 source, Vector3 target )

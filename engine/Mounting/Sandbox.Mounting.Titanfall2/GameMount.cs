@@ -79,7 +79,6 @@ public partial class Titanfall2Mount : BaseGameMount
 			context.Add( ResourceType.Material, "skies/skycube", new Titanfall2SkyMaterialLoader() );
 		MountMilesSounds( context, registered );
 		IsMounted = true;
-		if ( Environment.GetEnvironmentVariable( "SBOX_TITANFALL2_SELFTEST" ) == "1" ) _ = RunSelfTest();
 		return Task.CompletedTask;
 	}
 
@@ -199,7 +198,7 @@ public partial class Titanfall2Mount : BaseGameMount
 				}
 				else
 				{
-					_soundFailureRetryAfter[cacheKey] = Titanfall2Log.ElapsedSeconds + Titanfall2StreamingSettings.ModelFailureRetrySeconds;
+					_soundFailureRetryAfter[cacheKey] = Titanfall2Log.ElapsedSeconds + ModelLoader.FailureRetrySeconds;
 				}
 			}
 			soundFile = created;
@@ -631,23 +630,10 @@ public partial class Titanfall2Mount : BaseGameMount
 					case ".rmdl":
 						_modelSources.TryAdd( NormalizeModelSourcePath( entry.Path ), source );
 						context.Add( ResourceType.Model, entry.Path, new ModelLoader( source ) );
-						// The native resource is one .t2static model that carries every LOD.
+						// The static-instance resource is one .t2static model that carries every LOD.
 						var allLodsPath = ModelLoader.GetStaticInstanceAllLodsPath( entry.Path );
 						if ( registered.Add( allLodsPath ) )
-							context.Add( ResourceType.Model, allLodsPath, new ModelLoader( source, staticInstance: true, allLods: true ) );
-						// The per-LOD resources stay registered as well, whichever mode is active
-						// when the map mounts. A resource that was not registered here cannot be
-						// loaded later, and the LOD mode is a runtime A/B switch: registering only
-						// the active mode's paths would make the switch one-way and silently fall
-						// back to the full non-instanced model for every band of the other mode.
-						// Both sets are lazy, so the unused one costs a loader entry per model and
-						// no read until something asks for it.
-						for ( var lod = 0; lod < ModelLoader.StaticInstanceLodCount; lod++ )
-						{
-							var staticInstancePath = ModelLoader.GetStaticInstancePath( entry.Path, lod );
-							if ( registered.Add( staticInstancePath ) )
-								context.Add( ResourceType.Model, staticInstancePath, new ModelLoader( source, staticInstance: true, staticLod: lod ) );
-						}
+							context.Add( ResourceType.Model, allLodsPath, new ModelLoader( source, staticInstance: true ) );
 						break;
 					case ".wav":
 						_soundFileSources[NormalizeSoundKey( entry.Path ) + ".wav"] = source;
@@ -1037,77 +1023,6 @@ public partial class Titanfall2Mount : BaseGameMount
 		metadata = MaterialLoader.ReadMetadata( data.Header, source.Asset.Name, shaderSetName );
 		lock ( _materialMetadataLock ) _materialMetadata.TryAdd( name, metadata );
 		return true;
-	}
-
-	async Task RunSelfTest()
-	{
-		await Task.Yield();
-		try
-		{
-			var regressionPaths = new[]
-			{
-				$"mount://{Ident}/maps/mp_angel_city.bsp.scene",
-				$"mount://{Ident}/maps/mp_homestead.bsp.scene",
-				$"mount://{Ident}/maps/mp_wargames.bsp.scene",
-				$"mount://{Ident}/models/robots/super_spectre/super_spectre_v1.mdl.vmdl",
-				$"mount://{Ident}/models/humans/grunts/imc_grunt_rifle.mdl.vmdl",
-				$"mount://{Ident}/models/titans/heavy/titan_heavy_legion_prime.mdl.vmdl",
-				$"mount://{Ident}/models/vehicle/crow_dropship/crow_dropship.mdl.vmdl",
-				$"mount://{Ident}/models/levels_terrain/mp_angel_city/ac_hardpointb_decals.mdl.vmdl"
-			};
-			var missingRegressionResources = regressionPaths.Where( path => GetByPath( path ) is null ).ToArray();
-
-			while ( !IsParticleCatalogComplete )
-			{
-				IndexParticleFiles( 32, 20f );
-				await Task.Yield();
-			}
-			var particleSamples = new[]
-			{
-				"env_sun_fracture",
-				"env_ground_fog_far",
-				"glow_imc_light04",
-				"P_steam_leak_LG",
-				"P_wargames_streaks_400_blue"
-			};
-			var missingParticleSamples = particleSamples.Where( name => !TryGetParticleDefinition( name, out _ ) ).ToArray();
-			var modelPath = $"mount://{Ident}/models/backwater/backwater_industrial_ground_marker.mdl.vmdl";
-			var texturePath = $"mount://{Ident}/decals/blood1_col.vtex";
-			var materialPath = $"mount://{Ident}/decals/blood1.vmat";
-			var soundPath = $"mount://{Ident}/sound/12_gauge_shotgun_shell_drop_01.vsnd";
-			var scenePath = $"mount://{Ident}/maps/mp_angel_city.bsp.scene";
-			var model = Model.Load( modelPath );
-			var texture = Texture.Load( texturePath, false );
-			var material = Material.Load( materialPath );
-			var dependencyStats = GetMaterialDependencyStatistics();
-			var textureStats = RpakTextureDecoder.GetStatistics();
-			var rpakStats = RpakArchive.GetCacheStatistics();
-			var starpakStats = StarPakIndex.GetStatistics();
-			var sound = SoundFile.Load( soundPath );
-			var soundDirectory = System.IO.Path.Combine( _root, "r2", "sound" );
-			var audioLayout = File.Exists( System.IO.Path.Combine( soundDirectory, "general.mbnk" ) )
-				&& System.IO.Directory.EnumerateFiles( soundDirectory, "*.mstr", SearchOption.TopDirectoryOnly ).Any();
-			var scene = SceneFile.Load( scenePath );
-			Log.Info( $"Titanfall 2 mount self-test: model={model is not null && model != Model.Error}, texture={texture is not null && !texture.IsError}, material={material is not null}, sound={sound is not null || Application.IsHeadless}, audioLayoutMbnkMstr={audioLayout}, scene={scene is not null}." );
-			Log.Info( $"Titanfall 2 material descriptors: {dependencyStats.Materials} materials, {dependencyStats.References} bindings, "
-				+ $"{dependencyStats.Reflected} reflected, {dependencyStats.Unknown} unknown, "
-				+ $"{dependencyStats.TextureGuids} GUID and {dependencyStats.TexturePaths} path dependency keys." );
-			Log.Info( $"Titanfall 2 streaming statistics: textures={textureStats.Created} low-resident/"
-				+ $"{textureStats.Failed} failed, {textureStats.UploadedBytes / (1024.0 * 1024.0):0.0} MB uploaded at max {textureStats.MaximumDimension}; "
-				+ $"RPAK={rpakStats.StrongBuffers} buffers, {rpakStats.StrongBufferBytes / (1024.0 * 1024.0):0.0}/"
-				+ $"{rpakStats.StrongBufferLimit / (1024.0 * 1024.0):0} MB, hits={rpakStats.StrongHits}/{rpakStats.WeakHits}, "
-				+ $"misses={rpakStats.StrongMisses}, evictions={rpakStats.Evictions}; STARPAK={starpakStats.RangeReads} reads, "
-				+ $"{starpakStats.BytesRead / (1024.0 * 1024.0):0.0} MB, {starpakStats.Failures} failures." );
-			Log.Info( $"Titanfall 2 regression registration: {regressionPaths.Length - missingRegressionResources.Length}/{regressionPaths.Length} samples; "
-				+ $"particles={particleSamples.Length - missingParticleSamples.Length}/{particleSamples.Length}, "
-				+ $"catalog={ParticleDefinitionCount} definitions from {IndexedParticleFileCount}/{ParticleFileCount} PCFs."
-				+ (missingRegressionResources.Length > 0 ? $" Missing resources: {string.Join( ", ", missingRegressionResources )}." : string.Empty)
-				+ (missingParticleSamples.Length > 0 ? $" Missing FX: {string.Join( ", ", missingParticleSamples )}." : string.Empty) );
-		}
-		catch ( Exception exception )
-		{
-			Log.Error( exception, "Titanfall 2 mount self-test failed." );
-		}
 	}
 
 	readonly record struct MountedAssetSource( RpakArchive Archive, RpakAsset Asset );

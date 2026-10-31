@@ -8,7 +8,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 	{
 		_pvsCameraCell = -1;
 		if ( !TryFindPvsCell( anchor, out _pvsCameraCell ) ) return default;
-		var reachable = _visibility.GetReachableCells( _pvsCameraCell, Titanfall2StreamingSettings.PropPvsPortalDepth )
+		var reachable = _visibility.GetReachableCells( _pvsCameraCell, PvsPortalDepth )
 			.Union( _visibility.AlwaysVisibleCells );
 		LogPvsDiagnostics( anchor, applied: true );
 		return reachable;
@@ -17,11 +17,6 @@ public sealed partial class Titanfall2StaticPropStreamer
 	bool TryFindPvsCell( Vector3 anchor, out int cell )
 	{
 		cell = -1;
-		if ( !Titanfall2StreamingSettings.PropPvsCulling )
-		{
-			LogPvsDiagnostics( anchor, applied: false, reason: "SBOX_TITANFALL2_PROP_PVS disabled culling" );
-			return false;
-		}
 		if ( _visibility is not { IsValid: true } )
 		{
 			LogPvsDiagnostics( anchor, applied: false, reason: _visibilityRestoreFailed
@@ -37,10 +32,10 @@ public sealed partial class Titanfall2StaticPropStreamer
 
 	/// <summary>
 	/// Reports exactly why cell-based PVS culling is or is not running. A log line is
-	/// the only way to tell the three failure modes apart at runtime: culling turned
-	/// off, data that failed its validity gate, and an anchor that no cell contains.
-	/// The engine's own summary cannot distinguish them, and the empty visible/culled
-	/// counters in the completion line look identical in all three cases.
+	/// the only way to tell the failure modes apart at runtime: data that failed its
+	/// validity gate and an anchor that no cell contains. The engine's own summary cannot
+	/// distinguish them, and the empty visible/culled counters in the completion line
+	/// look identical in both cases.
 	/// </summary>
 	void LogPvsDiagnostics( Vector3 anchor, bool applied, string reason = null )
 	{
@@ -101,10 +96,6 @@ public sealed partial class Titanfall2StaticPropStreamer
 		return IsPvsVisible( propCells );
 	}
 
-	/// <summary>True when any distance rule (global or authored per prop) can hide an instance.</summary>
-	static bool IsDistanceCullActive => !Titanfall2StreamingSettings.PropRenderDistanceDryRun
-		&& (Titanfall2StreamingSettings.PropRenderDistance > 0 || Titanfall2StreamingSettings.PropAuthoredFade);
-
 	/// <summary>
 	/// The distance at which one prop stops drawing, before its radius and hysteresis are added:
 	/// the nearer of the global PropRenderDistance and the prop's authored fade distance.
@@ -113,31 +104,27 @@ public sealed partial class Titanfall2StaticPropStreamer
 	static float GetRenderDistance( float fadeDistance )
 	{
 		var global = Titanfall2StreamingSettings.PropRenderDistance > 0 ? Titanfall2StreamingSettings.PropRenderDistance : float.PositiveInfinity;
-		if ( !Titanfall2StreamingSettings.PropAuthoredFade || !(fadeDistance > 0) ) return global;
+		if ( !(fadeDistance > 0) ) return global;
 		return MathF.Min( global, fadeDistance * Titanfall2StreamingSettings.PropAuthoredFadeScale );
 	}
 
 	bool IsWithinRenderDistance( Vector3 position, float radius, bool wasVisible, float fadeDistance )
 	{
-		var landmark = Titanfall2StreamingSettings.PropLandmarkRadius;
-		if ( !IsDistanceCullActive || (landmark > 0 && radius >= landmark) ) return true;
+		if ( radius >= LandmarkRadius ) return true;
 		var distance = GetRenderDistance( fadeDistance );
 		if ( float.IsPositiveInfinity( distance ) ) return true;
-		distance += radius + (wasVisible ? Titanfall2StreamingSettings.PropRenderDistanceHysteresis : 0);
+		distance += radius + (wasVisible ? RenderDistanceHysteresis : 0);
 		return position.DistanceSquared( _lastAnchor ) <= distance * distance;
 	}
 
 	/// <summary>Per-instance keep distances (render distance plus hysteresis) for a batch's culler.</summary>
 	static float[] GetKeepDistances( PendingBatch batch )
 	{
-		var key = (Titanfall2StreamingSettings.PropRenderDistance, Titanfall2StreamingSettings.PropRenderDistanceHysteresis,
-			Titanfall2StreamingSettings.PropAuthoredFade, Titanfall2StreamingSettings.PropAuthoredFadeScale);
-		if ( batch.KeepDistances is { } cached && cached.Length == batch.FadeDistances.Count && batch.KeepDistanceKey == key ) return cached;
+		if ( batch.KeepDistances is { } cached && cached.Length == batch.FadeDistances.Count ) return cached;
 		var result = new float[batch.FadeDistances.Count];
 		for ( var index = 0; index < result.Length; index++ )
-			result[index] = GetRenderDistance( batch.FadeDistances[index] ) + key.PropRenderDistanceHysteresis;
+			result[index] = GetRenderDistance( batch.FadeDistances[index] ) + RenderDistanceHysteresis;
 		batch.KeepDistances = result;
-		batch.KeepDistanceKey = key;
 		return result;
 	}
 
@@ -158,7 +145,6 @@ public sealed partial class Titanfall2StaticPropStreamer
 
 		// Distance is evaluated against each instance's radius. Large landmarks are
 		// retained, and a changed membership rebuilds the subset even at the same count.
-		var instanceCull = IsDistanceCullActive;
 		var anchor = _lastAnchor;
 
 		foreach ( var batch in cluster.Batches.Values )
@@ -166,28 +152,15 @@ public sealed partial class Titanfall2StaticPropStreamer
 			var visible = IsRenderVisible( batch.PvsCells );
 			var wasRendered = batch.RenderingEnabled;
 
-			if ( batch.RenderBatch.IsValid() )
+			if ( batch.RenderBatch.IsValid() && visible )
 			{
-				if ( instanceCull )
-				{
-					if ( visible )
-					{
-						// Re-evaluate a batch restored after PVS hid it at an older anchor.
-						if ( !wasRendered ) batch.Culler.Invalidate();
-						var all = batch.GetOrBuildTransformArray();
-						var changed = batch.Culler.Update( all, anchor, float.PositiveInfinity, batch.Radii,
-							Titanfall2StreamingSettings.PropLandmarkRadius, GetKeepDistances( batch ) );
-						if ( batch.Culler.KeptCount == 0 ) visible = false;
-						else if ( changed ) batch.Culler.ApplyTo( batch.RenderBatch );
-					}
-				}
-				else if ( batch.Culler.IsInitialized )
-				{
-					// Switched back to "no cull" at runtime: restore the full set once instead of
-					// leaving the batch drawing the last subset forever.
-					batch.Culler.Reset();
-					batch.RenderBatch.SetDrawTransforms( batch.GetOrBuildTransformArray() );
-				}
+				// Re-evaluate a batch restored after PVS hid it at an older anchor.
+				if ( !wasRendered ) batch.Culler.Invalidate();
+				var all = batch.GetOrBuildTransformArray();
+				var changed = batch.Culler.Update( all, anchor, float.PositiveInfinity, batch.Radii,
+					LandmarkRadius, GetKeepDistances( batch ) );
+				if ( batch.Culler.KeptCount == 0 ) visible = false;
+				else if ( changed ) batch.Culler.ApplyTo( batch.RenderBatch );
 			}
 
 			if ( batch.RenderingEnabled == visible ) continue;
@@ -200,7 +173,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 
 	void UpdatePvsStatistics()
 	{
-		var visible = _aggregatedProps; // Baked geometry now follows native world visibility.
+		var visible = 0;
 		foreach ( var cell in _cells.Values )
 			foreach ( var instance in cell.Instances )
 				if ( !instance.IsBatched && instance.RenderingEnabled ) visible++;
@@ -213,66 +186,8 @@ public sealed partial class Titanfall2StaticPropStreamer
 		_pvsCulledProps = Math.Max( 0, _liveProps - _pvsVisibleProps );
 	}
 
-	void UpdateClusterShadowState( PropCluster cluster, Vector3 anchor )
-	{
-		if ( !Titanfall2StreamingSettings.PropShadows && _shadowCastingProps == 0 ) return;
-		foreach ( var cell in cluster.Cells )
-		{
-			foreach ( var instance in cell.Instances )
-			{
-				if ( instance.IsBatched ) continue;
-				var castShadows = ShouldCastShadows( instance.Position, instance.Radius, anchor );
-				if ( castShadows != instance.CastShadows )
-				{
-					instance.CastShadows = castShadows;
-					if ( instance.RenderObject.IsValid() )
-						instance.RenderObject.Flags.CastShadows = castShadows;
-					_shadowCastingProps += castShadows ? 1 : -1;
-				}
-			}
-		}
-
-		foreach ( var pendingBatch in cluster.Batches.Values )
-		{
-			// A valid render batch is all-or-none, so one near instance is enough to decide; only
-			// the fallback path needs the exact count.
-			var hasRenderBatch = pendingBatch.RenderBatch.IsValid();
-			var nearCount = 0;
-			for ( var index = 0; index < pendingBatch.Transforms.Count; ++index )
-			{
-				if ( ShouldCastShadows(
-					pendingBatch.Transforms[index].Position,
-					pendingBatch.Radii[index],
-					anchor ) )
-				{
-					nearCount++;
-					if ( hasRenderBatch ) break;
-				}
-			}
-
-			// A batch has one shadow-pass flag. If any instance in this cluster/model
-			// group is close enough, the permanent batch casts as a whole.
-			var desiredCount = pendingBatch.RenderBatch.IsValid()
-				? (nearCount > 0 ? pendingBatch.Transforms.Count : 0)
-				: nearCount;
-			if ( pendingBatch.RenderBatch.IsValid() )
-				pendingBatch.RenderBatch.CastShadows = desiredCount > 0;
-			else if ( pendingBatch.FallbackObjects.Count == pendingBatch.Transforms.Count )
-			{
-				for ( var index = 0; index < pendingBatch.FallbackObjects.Count; ++index )
-					pendingBatch.FallbackObjects[index].Flags.CastShadows = ShouldCastShadows(
-						pendingBatch.Transforms[index].Position,
-						pendingBatch.Radii[index],
-						anchor );
-			}
-
-			_shadowCastingProps += desiredCount - pendingBatch.ShadowedInstanceCount;
-			pendingBatch.ShadowedInstanceCount = desiredCount;
-		}
-	}
-
 	/// <summary>
-	/// Reports what the optional distance cull would hide, measured against the live cell
+	/// Reports what the global distance cull hides, measured against the live cell
 	/// state at completion. The counters are not accumulated during RefreshCells: while a
 	/// scene is loading there is no OnUpdate, so RefreshCells has run exactly once, before
 	/// any instance existed, and an accumulation from that pass reports zero regardless of
@@ -301,9 +216,8 @@ public sealed partial class Titanfall2StaticPropStreamer
 			props += cell.Instances.Count;
 		}
 
-		var dryRun = Titanfall2StreamingSettings.PropRenderDistanceDryRun;
-		Log.Info( $"Titanfall 2 prop render distance: {(dryRun ? "dry run, nothing was hidden" : "active")} at "
-			+ $"{renderDistance:0} (+{Titanfall2StreamingSettings.PropRenderDistanceHysteresis:0} hysteresis); "
+		Log.Info( $"Titanfall 2 prop render distance: active at "
+			+ $"{renderDistance:0} (+{RenderDistanceHysteresis:0} hysteresis); "
 			+ $"{batches} of {_batchCount} batches and {props} of {_liveProps} individual props sit beyond it "
 			+ $"relative to the anchor at the last cell refresh ({MapPath})." );
 	}
