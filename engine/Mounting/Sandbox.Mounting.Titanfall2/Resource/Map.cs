@@ -32,10 +32,23 @@ partial class MapLoader(
 	/// </summary>
 	public bool ReleaseSceneResource()
 	{
-		if ( !ReleaseCachedResult() ) return false;
+		// A load may still be producing the scene. The owner retries later instead of
+		// tearing down something that is being built.
+		if ( IsLoading ) return false;
+		var releasedCache = ReleaseCachedResult();
+		// Destroying the cached SceneFile is what makes a later reopen rebuild the map:
+		// SceneFile.Load checks the resource library first, so otherwise it would return
+		// the stale serialized scene whose generated models and lightmaps we are about to
+		// drop (see the field comment above).
+		var releasedScene = ReleaseCachedScene();
+		var releasedWorldBuild = _cachedWorldBuild is not null;
+		if ( !releasedCache && !releasedScene && !releasedWorldBuild ) return false;
 		// Lightmap pages are this build's own textures; nothing else holds them.
-		foreach ( var resource in _cachedWorldBuild?.OwnedResources ?? [] ) resource.Dispose();
-		_cachedWorldBuild = null;
+		if ( _cachedWorldBuild is not null )
+		{
+			foreach ( var resource in _cachedWorldBuild.OwnedResources ) resource.Dispose();
+			_cachedWorldBuild = null;
+		}
 		_classifiedWorldModels.Clear();
 		_materialPrefetch = null;
 		return true;

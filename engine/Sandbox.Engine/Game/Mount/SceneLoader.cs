@@ -71,6 +71,26 @@ public abstract class SceneLoader<T> : ResourceLoader<T>, IThumbnailProvider whe
 		_thumbnail = null;
 	}
 
+	/// <summary>
+	/// Drops the cached scene file so the next load rebuilds it. A mount whose scene is culled
+	/// while no live scene uses it calls this together with dropping its own built resources:
+	/// <see cref="SceneFile.Load"/> asks the resource library first, so without this the next
+	/// open would return the stale serialized scene whose generated resources are already gone.
+	/// Never call this while a load is in progress.
+	/// </summary>
+	/// <returns>True if a cached scene file was dropped.</returns>
+	protected bool ReleaseCachedScene()
+	{
+		var scene = _scene;
+		_scene = null;
+
+		if ( scene is null )
+			return false;
+
+		scene.DestroyInternal();
+		return true;
+	}
+
 	static SceneFile GetOrRegister( string path )
 	{
 		var resourcePath = path ?? string.Empty;

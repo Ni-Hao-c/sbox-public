@@ -137,6 +137,26 @@ public abstract class ResourceLoader
 	}
 
 	/// <summary>
+	/// True while a load started by <see cref="GetOrCreate"/> has not completed. A release
+	/// path must not drop or destroy anything that load is still producing.
+	/// </summary>
+	protected bool IsLoading
+	{
+		get
+		{
+			_lock.Enter();
+			try
+			{
+				return _loadTask is not null && !_loadTask.IsCompleted;
+			}
+			finally
+			{
+				_lock.Exit();
+			}
+		}
+	}
+
+	/// <summary>
 	/// Forget the cached result so the next <see cref="GetOrCreate"/> loads it again. The
 	/// released object is not destroyed: anything still using it keeps it alive, and the
 	/// garbage collector frees it once nothing does. Lets a mount drop per-map resources

@@ -355,6 +355,7 @@ solid 类型不为 0 时，有效 contents 由 `Titanfall2CollisionSource.Static
 ## 12. 生命周期和所有权
 
 - 缓存的 `SceneFile` 中，生成的世界模型和光照贴图没有磁盘加载器。`MapLoader` 用 `_cachedWorldBuild` 保持这些资源存活，存活时间与 SceneLoader 的场景缓存相同。否则关闭最后一个场景后，GC 会让下一次打开得到错误模型。
+- 释放场景资源时，`MapLoader` 同时销毁缓存的 `SceneFile`（`SceneLoader.ReleaseCachedScene`）。否则 `SceneFile.Load` 会命中 `ResourceLibrary` 里的陈旧场景并跳过 `BuildScene`，下一次打开引用的正是刚被释放的模型和光照贴图。加载进行中不释放（`ResourceLoader.IsLoading`），留给下一次重试。
 - `Titanfall2SceneResourceOwner` 只释放传给它的资源。共享的挂载缓存属于挂载本身，编辑器或运行时克隆的场景被销毁时，这些缓存必须继续存在。
 - 共享粒子纹理在挂载卸载时只解除引用，不调用 `Dispose`，因为仍在运行的场景实例可能还在使用它们。
 - `Shutdown` 的清理工作：
