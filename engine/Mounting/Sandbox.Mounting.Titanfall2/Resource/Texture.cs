@@ -1,7 +1,7 @@
 /// <summary>
 /// Loads a texture from a Titanfall 2 loose file or RPak entry.
 /// </summary>
-class Titanfall2TextureLoader( ITitanfall2AssetSource source, bool animatedVtfAtlas = false ) : ResourceLoader<Titanfall2Mount>
+class Titanfall2TextureLoader( ITitanfall2AssetSource source, bool animatedVtfAtlas = false ) : ResourceLoader<Titanfall2Mount>, ITitanfall2SceneResource
 {
 	readonly ITitanfall2AssetSource _source = source;
 	readonly bool _animatedVtfAtlas = animatedVtfAtlas;
@@ -54,6 +54,18 @@ class Titanfall2TextureLoader( ITitanfall2AssetSource source, bool animatedVtfAt
 			if ( _prepared is not null ) _releaseBudget?.Invoke( _prepared.Length );
 			_prepared = null;
 			_releaseBudget = null;
+		}
+	}
+
+	public bool ReleaseSceneResource()
+	{
+		lock ( _prepareLock )
+		{
+			if ( !ReleaseCachedResult() ) return false;
+			// Let the next map's material prefetch decode this texture on a worker again.
+			_loaded = false;
+			ClearPreparation();
+			return true;
 		}
 	}
 

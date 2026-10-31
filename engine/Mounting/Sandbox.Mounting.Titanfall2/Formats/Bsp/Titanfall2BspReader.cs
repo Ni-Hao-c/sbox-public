@@ -35,6 +35,8 @@ public static partial class Titanfall2BspReader
 	private const int LightmapDataSkyLumpId = 0x0062;
 	private const int LightProbesLumpId = 0x0065;
 	private const int StaticPropLightProbeIndicesLumpId = 0x0066;
+	private const int LightProbeTreeLumpId = 0x0067;
+	private const int LightProbeReferencesLumpId = 0x0068;
 	private const int LightmapDataRealTimeLightsLumpId = 0x0069;
 	private const int WorldLightsLumpId = 0x0036;
 	private const int LightmapRealTimeLightPagesLumpId = 0x007A;
@@ -85,6 +87,8 @@ public static partial class Titanfall2BspReader
 		public byte[] EmbeddedCubemapVtf { get; init; } = Array.Empty<byte>();
 		public BspLightmaps Lightmaps { get; init; } = new();
 		public IReadOnlyList<Titanfall2WorldLight> WorldLights { get; init; } = Array.Empty<Titanfall2WorldLight>();
+		/// <summary>Probe lookup by position for entities without a baked probe index; null when not parsed.</summary>
+		public Titanfall2LightProbeLookup LightProbes { get; init; }
 	}
 
 	public sealed class BspLightmaps
@@ -429,12 +433,17 @@ public static partial class Titanfall2BspReader
 			? ParseWorldCollision( stream, headers, overrideLumps, playerOnly: !allCollisionContents, includeParts: allCollisionContents )
 			: new BspWorldCollision();
 		var staticProps = ParseStaticProps( stream, headers, overrideLumps );
+		Titanfall2LightProbeLookup lightProbes = null;
 		if ( parseStaticPropLightProbes )
 		{
+			var probeBytes = ReadLumpBytes( stream, headers, overrideLumps, LightProbesLumpId );
 			ApplyStaticPropLightProbes(
 				staticProps,
-				ReadLumpBytes( stream, headers, overrideLumps, LightProbesLumpId ),
+				probeBytes,
 				ReadLumpBytes( stream, headers, overrideLumps, StaticPropLightProbeIndicesLumpId ) );
+			lightProbes = Titanfall2LightProbeLookup.TryCreate( probeBytes,
+				ReadLumpBytes( stream, headers, overrideLumps, LightProbeTreeLumpId ),
+				ReadLumpBytes( stream, headers, overrideLumps, LightProbeReferencesLumpId ) );
 		}
 		// Lightmap pages are ~73 MB on mp_angel_city and are copied again by ReadLightmaps;
 		// skip the whole read when the runtime lightmap path is disabled.
@@ -469,6 +478,7 @@ public static partial class Titanfall2BspReader
 			EmbeddedCubemapVtf = embeddedCubemapVtf,
 			Lightmaps = lightmaps,
 			WorldLights = worldLights,
+			LightProbes = lightProbes,
 			Entities = entities,
 			EntityPartitions = entityPartitions
 		};
@@ -1253,8 +1263,7 @@ public static partial class Titanfall2BspReader
 				float lightmapU = reader.ReadSingle();
 				float lightmapV = reader.ReadSingle();
 				// R2's embedded lightmap pages are uploaded directly in their
-				// original top-left layout. Unlike decoded material textures,
-				// this UV set must not be vertically inverted.
+				// original top-left layout, so this UV set is used unchanged.
 				lightmapUv = new NumericsVector2( lightmapU, lightmapV );
 				// Seek instead of ReadBytes: one throwaway array per vertex otherwise.
 				if ( stride > 28 )
@@ -1268,7 +1277,11 @@ public static partial class Titanfall2BspReader
 			vertexRefs[i] = new VertexRef(
 				positionIndex,
 				normalIndex,
-				new NumericsVector2( u, 1f - v ),
+				// Material UVs are already top-left (D3D) like the RPAK textures
+				// and MDL UVs; the retail world VS passes them through unchanged.
+				// Inverting V turned wall textures upside down and reversed every
+				// animated V scroll, e.g. sp_training's water_wild_02 flow.
+				new NumericsVector2( u, v ),
 				lightmapUv,
 				color );
 		}

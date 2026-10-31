@@ -1,6 +1,8 @@
 /// <summary>Builds a runtime material from a legacy VMT when no RPAK MATL exists at the same path.</summary>
-class LegacyMaterialLoader( string materialName ) : ResourceLoader<Titanfall2Mount>
+class LegacyMaterialLoader( string materialName ) : ResourceLoader<Titanfall2Mount>, ITitanfall2SceneResource
 {
+	public bool ReleaseSceneResource() => ReleaseCachedResult();
+
 	static int _warningCount;
 	const int WarningLimit = 64;
 	static readonly Vector4 WhiteVector = new( 1f, 1f, 1f, 1f );

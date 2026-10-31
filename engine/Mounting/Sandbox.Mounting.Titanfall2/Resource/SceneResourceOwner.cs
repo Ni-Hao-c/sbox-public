@@ -22,5 +22,8 @@ public sealed class Titanfall2SceneResourceOwner : Component, Component.DontExec
 		foreach ( var resource in _ownedResources )
 			resource.Dispose();
 		_ownedResources.Clear();
+		// Once no scene shows a map any more, the mount drops the map-scoped caches.
+		if ( !string.IsNullOrWhiteSpace( MountIdent ) && Sandbox.Mounting.Directory.Get( MountIdent ) is Titanfall2Mount mount )
+			mount.OnSceneOwnerDestroyed( Scene );
 	}
 }

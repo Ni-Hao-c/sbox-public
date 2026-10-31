@@ -42,8 +42,10 @@ readonly record struct Titanfall2MaterialMetadata(
 }
 
 /// <summary>Builds a Titanfall 2 material and binds its RPAK texture GUIDs.</summary>
-class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Titanfall2Mount>
+class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Titanfall2Mount>, ITitanfall2SceneResource
 {
+	public bool ReleaseSceneResource() => ReleaseCachedResult();
+
 	static int _bindingWarningCount;
 	static readonly object SharedTextureLock = new();
 	static Texture _neutralEnvironment;

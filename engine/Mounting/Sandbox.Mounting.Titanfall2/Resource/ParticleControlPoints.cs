@@ -55,6 +55,9 @@ public sealed class Titanfall2ParticleGeometry : ParticleController
 	readonly Dictionary<Particle, (float Radius, float Alpha)> _initialValues = [];
 	readonly Dictionary<Particle, (float In, float Out)> _randomFades = [];
 	readonly Dictionary<Particle, float[]> _scalarInitialValues = [];
+	readonly Dictionary<Particle, OscillationState[]> _oscillations = [];
+
+	readonly record struct OscillationState( float Lifespan, Vector3 Rate, Vector3 Frequency, float Start, float End );
 
 	internal void Configure( Titanfall2ParticleDefinition definition, Titanfall2ParticleControlPoints points,
 		ParticleFloat trailTime, float textureAspect = 1f )
@@ -80,6 +83,15 @@ public sealed class Titanfall2ParticleGeometry : ParticleController
 		}
 		if ( _definition?.ScalarRemaps.Any( remap => remap.InitialOnly ) == true )
 			_scalarInitialValues[particle] = _definition.ScalarRemaps.Select( remap => remap.InitialOnly ? EvaluateScalarRemap( remap ) : float.NaN ).ToArray();
+		if ( _definition is { Oscillations.Count: > 0 } oscillating )
+		{
+			// End-cap-only decay keeps particles past their PCF lifespan, so keep
+			// the sampled lifespan for proportional oscillation time.
+			var lifespan = MathF.Max( 0.01f, RandomRange( oscillating.LifetimeMinimum, oscillating.LifetimeMaximum ) );
+			_oscillations[particle] = oscillating.Oscillations.Select( oscillation => new OscillationState( lifespan,
+				RandomVector( oscillation.RateMin, oscillation.RateMax ), RandomVector( oscillation.FrequencyMin, oscillation.FrequencyMax ),
+				RandomRange( oscillation.StartMin, oscillation.StartMax ), RandomRange( oscillation.EndMin, oscillation.EndMax ) ) ).ToArray();
+		}
 		var index = _nextParticle++;
 		if ( _definition is { } definition && (definition.PositionWarpMinimum != Vector3.One
 			|| definition.PositionWarpMaximum != Vector3.One) )
@@ -113,6 +125,7 @@ public sealed class Titanfall2ParticleGeometry : ParticleController
 		_initialValues.Remove( particle );
 		_randomFades.Remove( particle );
 		_scalarInitialValues.Remove( particle );
+		_oscillations.Remove( particle );
 	}
 
 	protected override void OnAfterStep( float delta )
@@ -165,6 +178,7 @@ public sealed class Titanfall2ParticleGeometry : ParticleController
 					Remap( input.y, remap.InputMin.y, remap.InputMax.y, remap.OutputMin.y, remap.OutputMax.y ),
 					Remap( input.z, remap.InputMin.z, remap.InputMax.z, remap.OutputMin.z, remap.OutputMax.z ), particle.Color.a );
 			}
+			if ( delta > 0f && _oscillations.TryGetValue( particle, out var oscillations ) ) Oscillate( particle, oscillations, delta );
 			if ( _randomFades.TryGetValue( particle, out var fade ) )
 			{
 				var fadeInAge = _definition.RandomFadeIn?.Proportional == true ? particle.LifeDelta : particle.Age;
@@ -192,6 +206,34 @@ public sealed class Titanfall2ParticleGeometry : ParticleController
 			particle.Angles = Angles.Zero;
 		}
 	}
+
+	/// <summary>
+	/// Source 1 Oscillate Vector on position: each step adds rate * dt * sin(2π phase).
+	/// Movement Basic derives velocity from the position change, so the offset also
+	/// persists as velocity, which is what makes retail debris drift.
+	/// </summary>
+	void Oscillate( Particle particle, OscillationState[] states, float delta )
+	{
+		for ( var index = 0; index < states.Length && index < _definition.Oscillations.Count; ++index )
+		{
+			var oscillation = _definition.Oscillations[index];
+			var state = states[index];
+			var lifeFraction = _definition.EndCapLifetime ? particle.Age / state.Lifespan : particle.LifeDelta;
+			var time = oscillation.ProportionalTimes ? lifeFraction : particle.Age;
+			if ( time < state.Start || time >= state.End ) continue;
+			var phase = oscillation.Proportional
+				? oscillation.Multiplier * lifeFraction * state.Frequency + oscillation.Phase
+				: (oscillation.Multiplier * (particle.BornTime + particle.Age) + oscillation.Phase) * state.Frequency;
+			var offset = state.Rate * delta * new Vector3( MathF.Sin( MathF.Tau * phase.x ), MathF.Sin( MathF.Tau * phase.y ),
+				MathF.Sin( MathF.Tau * phase.z ) );
+			if ( !offset.IsFinite ) continue;
+			particle.Position += offset;
+			particle.Velocity += offset / delta;
+		}
+	}
+
+	static float RandomRange( float a, float b ) => Random.Shared.Float( MathF.Min( a, b ), MathF.Max( a, b ) );
+	static Vector3 RandomVector( Vector3 a, Vector3 b ) => new( RandomRange( a.x, b.x ), RandomRange( a.y, b.y ), RandomRange( a.z, b.z ) );
 
 	float EvaluateScalarRemap( ParticleControlScalarDefinition remap )
 	{
@@ -232,6 +274,7 @@ public sealed class Titanfall2ParticleGeometry : ParticleController
 		_initialValues.Clear();
 		_randomFades.Clear();
 		_scalarInitialValues.Clear();
+		_oscillations.Clear();
 		_nextParticle = 0;
 	}
 }

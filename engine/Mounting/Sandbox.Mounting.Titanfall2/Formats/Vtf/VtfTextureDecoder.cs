@@ -183,22 +183,26 @@ static class VtfTextureDecoder
 	}
 
 	/// <summary>
-	/// Extracts sequence zero from Valve's particle-sheet VTF resource. Runtime
+	/// Extracts one sequence from Valve's particle-sheet VTF resource. Runtime
 	/// textures cannot be assigned native sheet metadata through the public API,
 	/// so each UV rectangle is copied into an ordinary texture for Sprite playback.
 	/// Block-compressed frames remain compressed and are copied on block boundaries.
+	/// A missing sequence falls back to sequence zero, then to the first sequence.
+	/// Debris sheets such as particle/impact/fleks.vtf hold one frame per sequence;
+	/// SpriteCard always samples through the sheet, so those return one cropped frame.
 	/// </summary>
-	internal static bool TryCreateSheetFrames( byte[] bytes, out Texture[] textures, out float frameRate, out string error )
+	internal static bool TryCreateSheetFrames( byte[] bytes, int sequence, out Texture[] textures, out float frameRate, out string error )
 	{
 		textures = Array.Empty<Texture>();
 		frameRate = 0f;
-		if ( !TryReadFirstSheetSequence( bytes, out var coordinates, out var totalTime, out error ) ) return false;
-		if ( !TryRead( bytes, false, out var decoded, out error ) ) return false;
-		if ( coordinates.Count <= 1 )
+		if ( !TryReadSheetSequence( bytes, sequence, out var coordinates, out var totalTime, out error ) ) return false;
+		if ( coordinates.Count == 1 && coordinates[0] is { Left: <= 0f, Top: <= 0f, Right: >= 1f, Bottom: >= 1f } )
 		{
-			error = "Particle sheet sequence zero has fewer than two frames.";
+			// The whole image; the caller's normal texture keeps its mip chain.
+			error = "Particle sheet sequence covers the whole texture.";
 			return false;
 		}
+		if ( !TryRead( bytes, false, out var decoded, out error ) ) return false;
 
 		var largestMipBytes = GetMipSize( decoded.Width, decoded.Height, decoded.BytesPerBlock, decoded.BlockSize );
 		if ( largestMipBytes <= 0 || largestMipBytes > decoded.Data.Length )
@@ -235,7 +239,7 @@ static class VtfTextureDecoder
 		}
 	}
 
-	static bool TryReadFirstSheetSequence( byte[] bytes, out List<VtfSheetCoordinate> coordinates, out float totalTime, out string error )
+	static bool TryReadSheetSequence( byte[] bytes, int requested, out List<VtfSheetCoordinate> coordinates, out float totalTime, out string error )
 	{
 		coordinates = [];
 		totalTime = 0f;
@@ -268,8 +272,8 @@ static class VtfTextureDecoder
 		}
 
 		var offset = 8;
-		List<VtfSheetCoordinate> first = null;
-		float firstTime = 0f;
+		List<VtfSheetCoordinate> first = null, zero = null;
+		float firstTime = 0f, zeroTime = 0f;
 		for ( var sequenceIndex = 0; sequenceIndex < sequenceCount; sequenceIndex++ )
 		{
 			if ( offset > resource.Length - 16 ) { error = "Particle-sheet sequence header is truncated."; return false; }
@@ -291,21 +295,27 @@ static class VtfTextureDecoder
 					ReadSingle( resource, offset + 16 ) ) );
 				offset += frameBytes;
 			}
-			if ( sequenceId == 0 )
+			if ( sequence.Count == 0 ) continue;
+			if ( sequenceId == requested && coordinates.Count == 0 )
 			{
 				coordinates = sequence;
 				totalTime = sequenceTime;
 			}
-			else if ( first is null )
+			if ( sequenceId == 0 && zero is null )
+			{
+				zero = sequence;
+				zeroTime = sequenceTime;
+			}
+			if ( first is null )
 			{
 				first = sequence;
 				firstTime = sequenceTime;
 			}
 		}
-		if ( coordinates.Count == 0 && first is not null )
+		if ( coordinates.Count == 0 && (zero ?? first) is { } fallback )
 		{
-			coordinates = first;
-			totalTime = firstTime;
+			coordinates = fallback;
+			totalTime = zero is not null ? zeroTime : firstTime;
 		}
 		if ( coordinates.Count > 0 ) return true;
 		error = "Particle-sheet contains no usable sequence.";

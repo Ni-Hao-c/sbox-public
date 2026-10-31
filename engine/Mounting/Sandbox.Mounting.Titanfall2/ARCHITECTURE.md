@@ -250,6 +250,16 @@ solid 类型不为 0 时，有效 contents 由 `Titanfall2CollisionSource.Static
 - VMT `TextureScroll` 代理应用 `texturescale`，并用 `(scale - 1) / 2` 的偏移补偿缩放中心。
 - `Sine` 代理使用 `time - timeoffset`，只把周期 0 改成 1。
 
+### UV 失真（草的摆动）
+
+零售版的草（`models/foliage/grass_*_animated`）不移动顶点，顶点程序只做普通变换。摆动来自像素程序中的 `Uvd1` UV 失真：
+
+- `uvDistortionTexture` 按它自己的 UV 选择符采样。草使用 UV2，`Uv2at` 让它按 `c_uv2Translate * c_gameTime` 滚动。
+- 偏移量：`uv = uv1 + (rg * 2 - 1) * c_uvDistortionIntensity * (c_uv1RotScaleX.x, c_uv1RotScaleY.y)`，所有贴图都用这个 UV 采样。
+- 草的材质参数：UV2 缩放 0.5，平移 (-0.25, 0) 或 (-0.3, 0)，强度 (0.2, 0)。
+
+`Titanfall2MaterialDescriptor.GetDistortionUvChannel` 从着色器集名称解析失真贴图的选择符，写入 `g_flT2DistortionUvChannel`。目前只有 `titanfall2_cutout` 读取它，选择符无法解析时仍在 UV1 上采样失真贴图。
+
 ### 大气卡片
 
 大气卡片材质的淡出：

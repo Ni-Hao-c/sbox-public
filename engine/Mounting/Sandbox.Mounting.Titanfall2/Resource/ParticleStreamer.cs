@@ -469,7 +469,8 @@ static class Titanfall2ParticleFactory
 		Titanfall2ParticleGeometry geometry = null;
 		if ( definition.OrientationType == 2 || definition.Path.HasValue || definition.Visibility.HasValue || definition.EndCapLifetime || definition.DistanceRemaps.Count > 0
 			|| definition.ColorRemaps.Count > 0 || definition.ScalarRemaps.Count > 0 || definition.RandomFadeIn.HasValue || definition.RandomFadeOut.HasValue || definition.PositionWarpMinimum != Vector3.One
-			|| definition.PositionWarpMaximum != Vector3.One || (definition.Renderer & Titanfall2ParticleRenderer.Trail) != 0 )
+			|| definition.PositionWarpMaximum != Vector3.One || (definition.Renderer & Titanfall2ParticleRenderer.Trail) != 0
+			|| definition.Oscillations.Count > 0 )
 		{
 			geometry = gameObject.AddComponent<Titanfall2ParticleGeometry>();
 			geometry.Configure( definition, controlPoints, CreateStretch( definition ) );
@@ -654,8 +655,14 @@ static class Titanfall2ParticleFactory
 			var frameRate = definition.AnimationRate;
 			if ( materialDefinition.TryGetAnimatedTexture( false, out var materialFrameRate ) && materialFrameRate > 0f )
 				frameRate = materialFrameRate;
+			// Runtime textures carry no native sheet data, so the batch cannot pick a sheet
+			// sequence per particle. Use one sequence from the PCF range for the system
+			// rather than drawing the whole atlas (e.g. 25 one-frame chips in fleks.vtf).
+			var sequence = definition.SequenceMaximum > definition.SequenceMinimum
+				? Random.Shared.Int( definition.SequenceMinimum, definition.SequenceMaximum )
+				: definition.SequenceMinimum;
 			if ( !string.IsNullOrWhiteSpace( textureName )
-				&& mount.TryGetLegacyParticleSprite( textureName, frameRate, out var sprite, out _ ) )
+				&& mount.TryGetLegacyParticleSprite( textureName, frameRate, out var sprite, out _, Math.Max( 0, sequence ) ) )
 			{
 				var metadata = materialDescriptor.Metadata;
 				// The sprite batch preserves HDR colour via RGBE. Keep the VMT's
@@ -767,6 +774,13 @@ static class Titanfall2ParticleFactory
 				modelRenderer.RotateWithGameObject = true;
 				modelRenderer.Scale = 1f;
 				modelRenderer.CastShadows = false;
+				// PCF "Render models" has no colour inputs: retail draws the model with its
+				// own materials. The particle colour (often the editor default, e.g. green
+				// 124 159 99 in env_training.pcf) would otherwise become the model ColorTint,
+				// which the mount shaders multiply into albedo.
+				if ( (definition.Renderer & (Titanfall2ParticleRenderer.Sprite | Titanfall2ParticleRenderer.Trail
+					| Titanfall2ParticleRenderer.Rope | Titanfall2ParticleRenderer.Light)) == 0 )
+					gameObject.Components.Get<ParticleEffect>().ApplyColor = false;
 				created = true;
 			}
 		}

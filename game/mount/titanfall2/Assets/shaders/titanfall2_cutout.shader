@@ -85,6 +85,7 @@ PS
 	float g_flT2EmissiveStrength < Default( 1.0 ); >;
 	float g_flT2DetailBlend < Default( 0.0 ); >;
 	float4 g_vT2UvDistortion < Default4( 0.0, 0.0, 0.0, 0.0 ); >;
+	float g_flT2DistortionUvChannel < Default( -1.0 ); >;
 	float g_flT2HasEnvironment < Default( 0.0 ); >;
 	float g_flT2EnvironmentIntensity < Default( 1.0 ); >;
 	float g_flT2FresnelStrength < Default( 0.0 ); >;
@@ -121,9 +122,22 @@ PS
 	#define T2_HAS_PROBE_INDEX
 	#include "titanfall2_surface.hlsl"
 
+	// Retail Uvd1 programs (models/foliage/grass_*_animated) read uvDistortionTexture
+	// through its own UV selector, usually UV2 scrolled by c_uv2Translate * c_gameTime,
+	// and add ( rg * 2 - 1 ) * c_uvDistortionIntensity * ( uv1RotScaleX.x, uv1RotScaleY.y )
+	// to UV1. That scrolling warp is the grass sway; the vertex program does not move.
+	float2 T2DistortedUv( float2 rawUv )
+	{
+		float2 uv = T2Uv1( rawUv );
+		if ( g_flT2DistortionUvChannel < -0.5 ) return T2ApplyDistortion( uv );
+		float2 distortionUv = T2SurfaceUv( rawUv, uv, g_flT2DistortionUvChannel );
+		float2 vector = Tex2DS( g_tDistortion, g_sAniso, distortionUv ).rg * 2.0 - 1.0;
+		return uv + vector * g_vT2UvDistortion.xy * g_vT2Uv1RotScale.xw;
+	}
+
 	Material BuildTitanfall2Material( PixelInput i, out float opacity, out float3 specularColor )
 	{
-		float2 uv = T2ApplyDistortion( T2Uv1( i.vTextureCoords.xy ) );
+		float2 uv = T2DistortedUv( i.vTextureCoords.xy );
 		float4 albedo; float gloss; float3 specular; float3 surfaceNormal;
 		T2ReadSurface( i, uv, albedo, gloss, specular, surfaceNormal );
 		specularColor = specular * g_vT2SpecularTint.rgb;

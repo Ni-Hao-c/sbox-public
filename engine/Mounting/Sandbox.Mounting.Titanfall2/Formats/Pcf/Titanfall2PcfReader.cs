@@ -180,6 +180,15 @@ static class Titanfall2PcfReader
 			definition.ColorMinimum = initializer.GetColor( "color1", RgbaColor.White );
 			definition.ColorMaximum = initializer.GetColor( "color2", definition.ColorMinimum );
 		}
+		else if ( function.Equals( "Color Lit Per Particle", StringComparison.OrdinalIgnoreCase ) )
+		{
+			// Source 1 C_INIT_ColorLitPerParticle writes the tint from color1..color2
+			// (default white), replacing the definition colour, then blends in the
+			// lighting at the particle. Lighting comes from the renderer here; e.g. the
+			// sp_training stone chips would otherwise keep the green editor colour.
+			definition.ColorMinimum = initializer.GetColor( "color1", RgbaColor.White );
+			definition.ColorMaximum = initializer.GetColor( "color2", RgbaColor.White );
+		}
 		else if ( function.Equals( "Position Modify Warp Random", StringComparison.OrdinalIgnoreCase ) )
 		{
 			definition.PositionWarpMinimum = initializer.GetVector3( "warp min", Vector3.One );
@@ -399,6 +408,22 @@ static class Titanfall2PcfReader
 				particleOperator.GetFloat( "end_time", 1f ),
 				particleOperator.GetFloat( "radius_start_scale", particleOperator.GetFloat( "start_scale", 1f ) ),
 				particleOperator.GetFloat( "radius_end_scale", particleOperator.GetFloat( "end_scale", 1f ) ) );
+		}
+		else if ( function.Equals( "Oscillate Vector", StringComparison.OrdinalIgnoreCase )
+			&& particleOperator.GetInt( "oscillation field", 0 ) == 0 && particleOperator.GetInt( "operator end cap state", 0 ) != 1 )
+		{
+			// Source 1 C_OP_OscillateVector defaults. Retail PCFs only oscillate position.
+			definition.Oscillations.Add( new ParticleOscillationDefinition(
+				particleOperator.GetVector3( "oscillation rate min", Vector3.Zero ),
+				particleOperator.GetVector3( "oscillation rate max", Vector3.Zero ),
+				particleOperator.GetVector3( "oscillation frequency min", Vector3.One ),
+				particleOperator.GetVector3( "oscillation frequency max", Vector3.One ),
+				particleOperator.GetBool( "proportional 0/1", true ),
+				particleOperator.GetBool( "start/end proportional", true ),
+				particleOperator.GetFloat( "start time min", 0f ), particleOperator.GetFloat( "start time max", 0f ),
+				particleOperator.GetFloat( "end time min", 1f ), particleOperator.GetFloat( "end time max", 1f ),
+				particleOperator.GetFloat( "oscillation multiplier", 2f ),
+				particleOperator.GetFloat( "oscillation start phase", 0.5f ) ) );
 		}
 		else if ( function.Equals( "Rotation Spin Roll", StringComparison.OrdinalIgnoreCase ) )
 		{
@@ -815,6 +840,8 @@ internal readonly record struct ParticlePathDefinition( int Start, int End, int 
 internal readonly record struct ParticleDistanceRemapDefinition( int ControlPoint, int Field, float InputMin, float InputMax, float OutputMin, float OutputMax, bool ScaleInitialRange = false );
 internal readonly record struct ParticleColorRemapDefinition( int ControlPoint, Vector3 InputMin, Vector3 InputMax, Vector3 OutputMin, Vector3 OutputMax );
 internal readonly record struct ParticleVisibilityDefinition( int ControlPoint, float DistanceMin, float DistanceMax, float DotMin, float DotMax, bool CullBackFacing );
+internal readonly record struct ParticleOscillationDefinition( Vector3 RateMin, Vector3 RateMax, Vector3 FrequencyMin, Vector3 FrequencyMax,
+	bool Proportional, bool ProportionalTimes, float StartMin, float StartMax, float EndMin, float EndMax, float Multiplier, float Phase );
 internal readonly record struct ParticleScalarGraphDefinition(
 	int OutputField,
 	int OutputOperation,
@@ -913,5 +940,6 @@ internal sealed class Titanfall2ParticleDefinition
 	internal List<ParticleControlScalarDefinition> ScalarRemaps { get; } = [];
 	internal ParticleScaleDefinition? RadiusScale { get; set; }
 	internal List<ParticleScalarGraphDefinition> ScalarGraphs { get; } = [];
+	internal List<ParticleOscillationDefinition> Oscillations { get; } = [];
 	internal List<string> Children { get; } = [];
 }

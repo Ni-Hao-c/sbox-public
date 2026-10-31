@@ -296,7 +296,7 @@ public class Titanfall2CollisionReaderTests
 		Assert.IsTrue( Titanfall2BspReader.TryReadBrushModels( fixture.Bytes(), null, false, out var catalog, out var error ), error );
 		var mesh = catalog.Models.Single().Geometry.Meshes.Single(); var vertex = mesh.Vertices[0];
 		Assert.AreEqual( 12f, vertex.Position.X ); Assert.AreEqual( 1f, vertex.Normal.Z );
-		Assert.AreEqual( 0.25f, vertex.TexCoord.Y ); Assert.AreEqual( 0.6f, vertex.LightmapTexCoord.Y );
+		Assert.AreEqual( 0.75f, vertex.TexCoord.Y ); Assert.AreEqual( 0.6f, vertex.LightmapTexCoord.Y );
 		Assert.AreEqual( (byte)123, vertex.Color.R ); Assert.AreEqual( 7, mesh.LightmapPage );
 		Assert.AreEqual( 0, Read( fixture ).SourcePrimitiveCount - 2 );
 		Assert.IsTrue( fixture.Read( out var world, out error ), error ); Assert.AreEqual( 0, world.World.Meshes.Count );

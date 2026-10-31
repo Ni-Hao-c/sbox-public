@@ -169,21 +169,40 @@ sealed class Titanfall2BrushModelSource( ITitanfall2AssetSource source, ITitanfa
 		|| name?.Contains( "toolsskybox", StringComparison.OrdinalIgnoreCase ) == true;
 	static Vector3 ToSandbox( System.Numerics.Vector3 value ) => new( value.X, value.Y, value.Z );
 
+	/// <summary>
+	/// Drops the parsed geometry, lightmap pages and materials once no map scene uses them.
+	/// The next build parses the BSP again. Returns false when nothing was held.
+	/// </summary>
+	internal bool Release()
+	{
+		lock ( _gate )
+		{
+			if ( _disposed || (_parsed is null && _pages.Count == 0 && _materials.Count == 0) ) return false;
+			ReleaseHeld();
+			return true;
+		}
+	}
+
+	void ReleaseHeld()
+	{
+		foreach ( var texture in new RuntimeLightmaps( _pages.Values.ToArray(), _skyColor ).OwnedResources ) texture.Dispose();
+		_pages.Clear();
+		_materials.Clear();
+		_parsed = null;
+	}
+
 	public void Dispose()
 	{
 		lock ( _gate )
 		{
 			if ( _disposed ) return;
 			_disposed = true;
-			foreach ( var texture in new RuntimeLightmaps( _pages.Values.ToArray(), _skyColor ).OwnedResources ) texture.Dispose();
-			_pages.Clear();
-			_materials.Clear();
-			_parsed = null;
+			ReleaseHeld();
 		}
 	}
 }
 
-sealed class Titanfall2BrushModelLoader( Titanfall2BrushModelSource source, int index ) : ResourceLoader<Titanfall2Mount>
+sealed class Titanfall2BrushModelLoader( Titanfall2BrushModelSource source, int index ) : ResourceLoader<Titanfall2Mount>, ITitanfall2SceneResource
 {
 	Material[] _materials;
 	(uint Contents, Model Model)[] _collisionGroups;
@@ -193,6 +212,14 @@ sealed class Titanfall2BrushModelLoader( Titanfall2BrushModelSource source, int 
 		var model = source.Build( Host, Path, index );
 		_materials = model.Materials.ToArray();
 		return model;
+	}
+
+	public bool ReleaseSceneResource()
+	{
+		var released = ReleaseCachedResult() | (_collisionGroups is not null);
+		_materials = null;
+		_collisionGroups = null;
+		return released;
 	}
 }
 

@@ -48,6 +48,16 @@ public sealed class Titanfall2LocalLightController : Component, Component.Execut
 		}
 	}
 
+	/// <summary>
+	/// Binds the compiled lights to one object. Instanced prop batches overwrite the shared
+	/// render-context light count, so per-object probe users must carry their own binding.
+	/// </summary>
+	internal void ApplyTo( RenderAttributes attributes )
+	{
+		if ( _lights is not null ) _lights.Apply( attributes );
+		else attributes.Set( "T2LocalLightCount", 0 );
+	}
+
 	protected override void OnDisabled() => Release();
 	protected override void OnDestroy() => Release();
 

@@ -182,6 +182,27 @@ sealed class Titanfall2MaterialDescriptor
 		material.Set( "g_vT2AuxUvChannels", auxiliary );
 	}
 
+	// Retail Uvd programs sample uvDistortionTexture through that texture's own UV
+	// selector. The animated foliage cards (grass_*_animated) scroll it on UV2 (Uv2at),
+	// which is their only wind motion. Without a resolved selector the shaders keep
+	// sampling the distortion map on UV1.
+	internal int GetDistortionUvChannel()
+	{
+		if ( SourceKind != Titanfall2MaterialSourceKind.Rpak || !Parameters.HasValue
+			|| ShaderSetName?.Contains( "Uvd", StringComparison.Ordinal ) != true ) return -1;
+		foreach ( var binding in TextureBindings )
+		{
+			if ( binding.Semantic == Titanfall2TextureSemantic.Distortion ) return GetTextureUvChannel( binding );
+		}
+		return -1;
+	}
+
+	void ApplyDistortionUvChannel( Material material )
+	{
+		var channel = GetDistortionUvChannel();
+		if ( channel >= 0 ) material.Set( "g_flT2DistortionUvChannel", (float)channel );
+	}
+
 	internal bool UsesTexture( Titanfall2TextureBinding binding )
 	{
 		if ( binding.Layer > 0 && !UsesLayeredSurface ) return false;
@@ -302,6 +323,7 @@ sealed class Titanfall2MaterialDescriptor
 		material.Set( "g_flT2SpecularWorkflow", SourceKind == Titanfall2MaterialSourceKind.Rpak ? 1f : 0f );
 		material.Set( "g_flT2LayeredOpacity", UsesLayeredOpacity ? 1f : 0f );
 		ApplySurfaceUvChannels( material );
+		ApplyDistortionUvChannel( material );
 
 		var boundParameters = new HashSet<string>( StringComparer.Ordinal );
 		var albedoBound = false;

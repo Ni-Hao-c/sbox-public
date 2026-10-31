@@ -9,7 +9,7 @@ partial class MapLoader(
 	ITitanfall2AssetSource particleEntitySource = null,
 	ITitanfall2AssetSource scriptEntitySource = null,
 	ITitanfall2AssetSource soundEntitySource = null,
-	bool pureWorld = false ) : SceneLoader<Titanfall2Mount>
+	bool pureWorld = false ) : SceneLoader<Titanfall2Mount>, ITitanfall2SceneResource
 {
 	const float DecalNormalOffset = 0.25f;
 	// Seconds after load before the deferred navmesh build starts.
@@ -26,11 +26,28 @@ partial class MapLoader(
 	// otherwise closing the last scene lets GC turn a later reopen into error models.
 	WorldBuildResult _cachedWorldBuild;
 
+	/// <summary>
+	/// Drops the cached scene together with the world models it names; one without the
+	/// other would reopen as error models. Called only when no live scene uses this map.
+	/// </summary>
+	public bool ReleaseSceneResource()
+	{
+		if ( !ReleaseCachedResult() ) return false;
+		// Lightmap pages are this build's own textures; nothing else holds them.
+		foreach ( var resource in _cachedWorldBuild?.OwnedResources ?? [] ) resource.Dispose();
+		_cachedWorldBuild = null;
+		_classifiedWorldModels.Clear();
+		_materialPrefetch = null;
+		return true;
+	}
+
 	protected override void BuildScene()
 	{
 		// The game instance replaces Game.TypeLibrary after mount discovery. Register
 		// against the current instance before custom components are added/serialized.
 		Host.EnsureRuntimeTypesRegistered();
+		Host.BeginMapBuild( Game.ActiveScene );
+		Host.ReleaseSceneResourcesBeforeBuild( this );
 		var timer = System.Diagnostics.Stopwatch.StartNew();
 		// Authoritative rBSP collision is always parsed. The render-geometry fallback is
 		// only built when that collision is missing or incomplete.
@@ -78,7 +95,8 @@ partial class MapLoader(
 		world.IsStatic = true;
 		if ( !server ) world.AddComponent<Titanfall2MaterialAnimator>();
 		// Lightmap textures belong to the cached generated scene, not an individual
-		// editor/play clone. The retained build owns them until the mount is released.
+		// editor/play clone. The retained build owns them until the map's resources are
+		// released (no live scene shows the map) or the mount is.
 		world.AddComponent<Titanfall2SceneResourceOwner>().Configure( Host.Ident );
 		foreach ( var model in worldBuild.TranslucentChunks
 			.Concat( worldBuild.DecalChunks ).Concat( worldBuild.GodrayChunks ).Concat( worldBuild.WaterChunks ).Select( static chunk => chunk.Model ) )
@@ -193,7 +211,7 @@ partial class MapLoader(
 		}
 		var particleCount = server ? 0 : CreateParticleSystems( parsed, streamingAnchor );
 		var audioCount = server ? 0 : CreateMapAudio( parsed, streamingAnchor );
-		var dynamicPropCount = _pureWorld ? 0 : CreateDynamicProps( world );
+		var dynamicPropCount = _pureWorld ? 0 : CreateDynamicProps( world, parsed );
 		var worldProps = parsed.StaticProps.Where( static prop => !IsVistaModelPath( prop.ModelPath ) ).ToArray();
 		var streamerObject = new GameObject( true, "titanfall2_static_prop_streamer" );
 		var propStreamer = streamerObject.AddComponent<Titanfall2StaticPropStreamer>();

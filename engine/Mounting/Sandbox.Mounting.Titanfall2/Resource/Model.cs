@@ -3,8 +3,10 @@ using System.Runtime.InteropServices;
 using Titanfall2.Formats;
 
 /// <summary>Loads an embedded Titanfall 2 MDL53/RMDL as a runtime model.</summary>
-partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false, Titanfall2Mount variantHost = null, string variantPath = null, int skin = 0, int body = 0, bool collisionOnly = false ) : ResourceLoader<Titanfall2Mount>
+partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = false, Titanfall2Mount variantHost = null, string variantPath = null, int skin = 0, int body = 0, bool collisionOnly = false ) : ResourceLoader<Titanfall2Mount>, ITitanfall2SceneResource
 {
+	public bool ReleaseSceneResource() => ReleaseCachedResult();
+
 	internal const string StaticInstanceSuffix = ".t2static";
 	// Resource path suffix of the static-instance model, which holds every decoded LOD.
 	internal const string StaticInstanceAllLodsSuffix = StaticInstanceSuffix + ".all";

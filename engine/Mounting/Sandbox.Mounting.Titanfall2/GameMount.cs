@@ -838,7 +838,12 @@ public partial class Titanfall2Mount : BaseGameMount
 		}
 	}
 
-	internal bool TryGetLegacyParticleSprite( string textureName, float frameRate, out Sprite sprite, out string error )
+	/// <summary>
+	/// Builds a sprite for a legacy particle texture. For VTF particle sheets,
+	/// <paramref name="sequence"/> selects the sheet sequence; a one-frame sequence
+	/// becomes a static sprite cropped to that frame.
+	/// </summary>
+	internal bool TryGetLegacyParticleSprite( string textureName, float frameRate, out Sprite sprite, out string error, int sequence = 0 )
 	{
 		sprite = null;
 		error = null;
@@ -850,7 +855,8 @@ public partial class Titanfall2Mount : BaseGameMount
 		}
 
 		frameRate = Math.Clamp( frameRate > 0f ? frameRate : 1f, 0.1f, 120f );
-		var spriteKey = $"{normalized}|{MathF.Round( frameRate * 100f )}";
+		var spriteKey = $"{normalized}|{MathF.Round( frameRate * 100f )}|{sequence}";
+		var sheetKey = $"{normalized}#{sequence}";
 		lock ( _legacyParticleSpriteLock )
 		{
 			if ( _legacyParticleSprites.TryGetValue( spriteKey, out sprite ) ) return true;
@@ -858,22 +864,26 @@ public partial class Titanfall2Mount : BaseGameMount
 			{
 				if ( source.TryReadAllBytes( out var bytes, out var readError ) )
 				{
-					if ( !_legacyParticleTextureFrames.TryGetValue( normalized, out var frames ) )
+					if ( !_legacyParticleTextureFrames.TryGetValue( normalized, out var frames )
+						&& !_legacyParticleTextureFrames.TryGetValue( sheetKey, out frames ) )
 					{
 						if ( VtfTextureDecoder.GetFrameCount( bytes ) > 1 )
 						{
 							if ( !VtfTextureDecoder.TryCreateFrames( bytes, out frames, out error ) ) return false;
+							if ( frames.Length > 1 ) _legacyParticleTextureFrames.Add( normalized, frames );
 						}
-						else if ( VtfTextureDecoder.TryCreateSheetFrames( bytes, out frames, out var sheetFrameRate, out _ ) )
-							_legacyParticleSheetFrameRates[normalized] = sheetFrameRate;
-						if ( frames is not null && frames.Length > 1 ) _legacyParticleTextureFrames.Add( normalized, frames );
+						else if ( VtfTextureDecoder.TryCreateSheetFrames( bytes, sequence, out frames, out var sheetFrameRate, out _ ) )
+						{
+							_legacyParticleSheetFrameRates[sheetKey] = sheetFrameRate;
+							_legacyParticleTextureFrames.Add( sheetKey, frames );
+						}
 					}
-					if ( frames is not null && frames.Length > 1 )
+					if ( frames is { Length: > 0 } )
 					{
-						var effectiveRate = _legacyParticleSheetFrameRates.TryGetValue( normalized, out var sheetRate )
+						var effectiveRate = _legacyParticleSheetFrameRates.TryGetValue( sheetKey, out var sheetRate )
 							? Math.Clamp( sheetRate * frameRate, 0.1f, 120f )
 							: frameRate;
-						sprite = Sprite.FromTextures( frames, effectiveRate );
+						sprite = frames.Length > 1 ? Sprite.FromTextures( frames, effectiveRate ) : Sprite.FromTexture( frames[0] );
 						_legacyParticleSprites.Add( spriteKey, sprite );
 						return true;
 					}

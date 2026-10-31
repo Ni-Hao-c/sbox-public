@@ -276,10 +276,13 @@ partial class MapLoader
 		return emitters.Count + zones.Count;
 	}
 
-	int CreateDynamicProps( GameObject world )
+	int CreateDynamicProps( GameObject world, Titanfall2BspReader.ParsedBsp parsed )
 	{
 		var entities = ReadEntities( _scriptEntitySource );
 		if ( entities.Count == 0 ) return 0;
+		var probes = Application.IsDedicatedServer ? null : parsed.LightProbes;
+		var skyColor = probes is null ? default : ReadBakedSkyColor( parsed );
+		var probed = 0;
 
 		var root = new GameObject( world, true, "titanfall2_dynamic_props" );
 		root.IsStatic = false;
@@ -351,6 +354,15 @@ partial class MapLoader
 					: ModelRenderer.ShadowRenderType.On;
 			}
 
+			if ( !Application.IsDedicatedServer )
+			{
+				// Retail samples entity lighting at the bounds centre, not the (often floor) origin.
+				var lightingOrigin = gameObject.WorldTransform.PointToWorld( model.Bounds.Center );
+				var probe = probes?.Find( new System.Numerics.Vector3( lightingOrigin.x, lightingOrigin.y, lightingOrigin.z ) );
+				gameObject.AddComponent<Titanfall2DynamicPropLighting>().Configure( probe, skyColor );
+				if ( probe is not null ) probed++;
+			}
+
 			var variant = gameObject.AddComponent<Titanfall2ModelVariant>();
 			variant.MountIdent = Host.Ident; variant.ModelPath = normalizedModelPath; variant.Skin = skin; variant.Body = body;
 			var solid = values.TryGetValue( "solid", out var solidText )
@@ -388,7 +400,7 @@ partial class MapLoader
 		var rotators = CreateRotatingMovers( root, entities, propsByGuid );
 		Log.Info( $"Titanfall 2 scripted dynamic props created: {created} models, "
 			+ $"{animated} skinned, {rotators} rotating movers, {colliders} colliders, "
-			+ $"{failed} failures ({Path})." );
+			+ $"{probed} light probes, {failed} failures ({Path})." );
 		return created;
 	}
 

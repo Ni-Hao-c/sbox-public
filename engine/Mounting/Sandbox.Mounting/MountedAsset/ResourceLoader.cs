@@ -1,4 +1,4 @@
-﻿using Sandbox.Diagnostics;
+using Sandbox.Diagnostics;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
@@ -134,6 +134,28 @@ public abstract class ResourceLoader
 		_loadTask = default;
 
 		return result;
+	}
+
+	/// <summary>
+	/// Forget the cached result so the next <see cref="GetOrCreate"/> loads it again. The
+	/// released object is not destroyed: anything still using it keeps it alive, and the
+	/// garbage collector frees it once nothing does. Lets a mount drop per-map resources
+	/// when the scene that used them is gone. Returns false while a load is in progress.
+	/// </summary>
+	protected bool ReleaseCachedResult()
+	{
+		if ( !_lock.TryEnter() ) return false;
+		try
+		{
+			if ( _loadTask is not null && !_loadTask.IsCompleted ) return false;
+			var released = _cachedResult is not null;
+			_cachedResult = null;
+			return released;
+		}
+		finally
+		{
+			_lock.Exit();
+		}
 	}
 
 	/// <summary>
