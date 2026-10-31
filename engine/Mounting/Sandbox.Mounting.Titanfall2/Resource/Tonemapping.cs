@@ -2,7 +2,7 @@ using Sandbox.Rendering;
 using System.Runtime.InteropServices;
 
 /// <summary>Retail display curve and bounded logarithmic auto exposure.</summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2Tonemapping : BasePostProcess<Titanfall2Tonemapping>
 {
 	[Property] public float ExposureCompensation { get; set; }

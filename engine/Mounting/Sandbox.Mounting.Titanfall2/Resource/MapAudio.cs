@@ -16,7 +16,7 @@ using Titanfall2;
 /// empty (same reason <c>Titanfall2ParticleStreamer</c> encodes its entity list).
 /// </para>
 /// </summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2MapAudio : Component, Component.DontExecuteOnServer, Sandbox.Internal.IUpdateSubscriber
 {
 	static readonly Sandbox.Diagnostics.Logger Log = new( "Titanfall2Audio" );

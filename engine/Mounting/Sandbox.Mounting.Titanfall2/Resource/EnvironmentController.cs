@@ -2,7 +2,7 @@ using System.Text.Json;
 using Titanfall2;
 
 /// <summary>Keeps the camera's authored sun and sky environment out of unrelated regions.</summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2EnvironmentController : Component, Component.ExecuteInEditor, Component.DontExecuteOnServer, Sandbox.Internal.IUpdateSubscriber
 {
 	[Property, Hide] public string EncodedEntities { get; set; }

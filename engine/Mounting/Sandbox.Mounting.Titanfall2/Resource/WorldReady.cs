@@ -1,5 +1,5 @@
 /// <summary>Publishes readiness after world and resident prop collision enter the physics world.</summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2WorldReady : Component, Sandbox.Internal.IUpdateSubscriber
 {
 	public const string ReadyTag = "ttf2_map_ready";

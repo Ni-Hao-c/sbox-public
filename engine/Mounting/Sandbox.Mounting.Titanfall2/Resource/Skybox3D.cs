@@ -6,7 +6,7 @@ using Sandbox.Rendering;
 /// native bridge is internal to Sandbox.Engine, so the mounting layer discovers
 /// it at runtime without changing the engine assembly.
 /// </summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServer, Sandbox.Internal.IPreRenderSubscriber
 {
 	static readonly Sandbox.Diagnostics.Logger Log = new( "Titanfall2Skybox" );

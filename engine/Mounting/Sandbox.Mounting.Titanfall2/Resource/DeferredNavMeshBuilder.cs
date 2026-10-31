@@ -13,7 +13,7 @@ using System.Runtime.CompilerServices;
 /// change host settings.
 /// </para>
 /// </summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2DeferredNavMeshBuilder : Component, Sandbox.Internal.IUpdateSubscriber
 {
 	static readonly Sandbox.Diagnostics.Logger Log = new( "Titanfall2NavMesh" );

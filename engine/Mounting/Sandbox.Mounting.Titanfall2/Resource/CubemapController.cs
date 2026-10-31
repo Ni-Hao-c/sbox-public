@@ -5,7 +5,7 @@ using System.Diagnostics;
 /// static scene probes. If a map has no embedded probes, it creates one cheap
 /// render-once fallback after the loading frame has completed.
 /// </summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2CubemapController : Component, Component.DontExecuteOnServer, Sandbox.Internal.IUpdateSubscriber
 {
 	static readonly Sandbox.Diagnostics.Logger Log = new( "Titanfall2Cubemaps" );

@@ -1,7 +1,7 @@
 using Titanfall2;
 
 /// <summary>Control points shared by a PCF collection and inherited by its children.</summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2ParticleControlPoints : Component
 {
 	readonly Dictionary<int, Vector3> _world = [];
@@ -42,7 +42,7 @@ public sealed class Titanfall2ParticleControlPoints : Component
 /// Applies PCF geometry after the engine finishes simulation, before sprite batching.
 /// Trail time is in seconds; it must never be passed to an aspect-ratio stretch input.
 /// </summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2ParticleGeometry : ParticleController
 {
 	Titanfall2ParticleDefinition _definition;

@@ -222,7 +222,7 @@ public partial class Titanfall2Mount
 }
 
 /// <summary>Applies authored MDL skin and packed body choices to a renderer and optional collider.</summary>
-[Library( "titanfall2_model_variant" )]
+[Library( "titanfall2_model_variant" ), Hide]
 public sealed class Titanfall2ModelVariant : Component, Sandbox.Internal.IUpdateSubscriber
 {
 	[Property] public string MountIdent { get; set; } = "titanfall2";

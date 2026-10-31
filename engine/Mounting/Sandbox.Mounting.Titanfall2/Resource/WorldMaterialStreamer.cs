@@ -10,7 +10,7 @@ using Sandbox.Mounting;
 /// Not currently installed: nothing adds this component to a scene. World materials
 /// are created synchronously while the map is built.
 /// </remarks>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2WorldMaterialStreamer : Component, Component.DontExecuteOnServer, Sandbox.Internal.IUpdateSubscriber
 {
 	static readonly Sandbox.Diagnostics.Logger Log = new( "Titanfall2WorldMaterials" );

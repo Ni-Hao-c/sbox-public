@@ -7,7 +7,7 @@ using Titanfall2;
 /// T2ProbeMode inherits whatever an instanced prop batch last left in the shared render
 /// attributes, so the model flickers between another batch's probes and none.
 /// </summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2DynamicPropLighting : Component, Component.ExecuteInEditor, Component.DontExecuteOnServer, Sandbox.Internal.IPreRenderSubscriber
 {
 	[Property, Hide] public bool HasProbe { get; set; }

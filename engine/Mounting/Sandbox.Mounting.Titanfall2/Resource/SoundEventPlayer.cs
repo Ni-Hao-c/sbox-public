@@ -1,5 +1,5 @@
 /// <summary>Plays an authored Miles event, including its own looping, layering and controller program.</summary>
-[Library( "titanfall2_sound_event" )]
+[Library( "titanfall2_sound_event" ), Hide]
 public sealed class Titanfall2SoundEventPlayer : Component, Component.DontExecuteOnServer, Sandbox.Internal.IUpdateSubscriber
 {
 	[Property] public string MountIdent { get; set; } = "titanfall2";

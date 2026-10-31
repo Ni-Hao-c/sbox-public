@@ -5,7 +5,7 @@ using Titanfall2;
 /// View attributes reach both normal renderers and aggregate indirect draws.
 /// Material parameters cannot bind per-view structured buffers.
 /// </summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2LocalLightController : Component, Component.ExecuteInEditor, Component.DontExecuteOnServer
 {
 	[Property, Hide] public string EncodedLights { get; set; }

@@ -4,7 +4,7 @@ using Sandbox.Rendering;
 /// Mount-owned SpriteCard lookup rendering, including sheet interpolation before
 /// the nonlinear RG lookup. Uses public APIs shared by Steam and the source SDK.
 /// </summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2ParticleRampRenderer : ParticleController
 {
 	[Property, Hide] public ParticleSpriteRenderer Source { get; set; }

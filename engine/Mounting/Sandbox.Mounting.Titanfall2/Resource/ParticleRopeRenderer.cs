@@ -1,7 +1,7 @@
 using Titanfall2;
 
 /// <summary>One textured ribbon per PCF collection, rather than one draw per segment.</summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2ParticleRopeRenderer : ParticleController
 {
 	SceneLineObject _line;

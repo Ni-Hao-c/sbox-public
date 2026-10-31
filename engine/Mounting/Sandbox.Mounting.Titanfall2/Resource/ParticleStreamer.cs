@@ -6,7 +6,7 @@ using Titanfall2;
 /// by a map's *_fx.ent partition. Instances are retained; distant systems are
 /// suspended instead of destroyed so moving through a map does not reveal gaps.
 /// </summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecuteOnServer, Sandbox.Internal.IUpdateSubscriber
 {
 	static readonly Sandbox.Diagnostics.Logger Log = new( "Titanfall2Particles" );

@@ -3,7 +3,7 @@
 /// prop_dynamic entities. This is visual transform animation only; it does not
 /// create physics movers or submit changing geometry to NavMesh.
 /// </summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2RotatingMover : Component, Component.DontExecuteOnServer, Sandbox.Internal.IUpdateSubscriber
 {
 	[Property, Hide]

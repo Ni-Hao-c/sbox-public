@@ -13,7 +13,7 @@ public sealed class Titanfall2ModelCollisionData
 /// Original instance identity on a streamed collider. Diagnostic only: these
 /// values do not change physics filtering or invent a contents-mask conversion.
 /// </summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2CollisionSource : Component
 {
 	/// <summary>Retail static-prop initialization (engine.dll 0x1801affc4..0x1801b0007).

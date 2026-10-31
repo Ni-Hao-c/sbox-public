@@ -2,7 +2,7 @@
 /// Releases resources owned exclusively by this scene. Shared mount caches have
 /// the mount's lifetime and must survive destruction of an editor or play clone.
 /// </summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2SceneResourceOwner : Component, Component.DontExecuteOnServer
 {
 	readonly List<IDisposable> _ownedResources = new();

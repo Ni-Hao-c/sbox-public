@@ -336,7 +336,7 @@ static class Titanfall2MaterialAnimationRegistry
 	static float Lerp( float minimum, float maximum, float amount ) => minimum + (maximum - minimum) * amount;
 }
 
-[Library]
+[Library, Hide]
 public sealed class Titanfall2MaterialAnimator : Component, Component.ExecuteInEditor, Component.DontExecuteOnServer, Sandbox.Internal.IUpdateSubscriber
 {
 	protected override void OnEnabled() => Titanfall2MaterialAnimationRegistry.Activate();

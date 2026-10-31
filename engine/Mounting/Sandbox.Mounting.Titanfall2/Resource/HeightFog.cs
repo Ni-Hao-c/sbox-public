@@ -4,7 +4,7 @@ using System.Text.Json;
 using Titanfall2;
 
 /// <summary>Restores the map's height-dependent, directional fog for each scene view.</summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2HeightFog : Component, Component.ExecuteInEditor, Component.DontExecuteOnServer, Sandbox.Internal.IPreRenderSubscriber
 {
 	[Property, Hide] public string SourceName { get; set; }

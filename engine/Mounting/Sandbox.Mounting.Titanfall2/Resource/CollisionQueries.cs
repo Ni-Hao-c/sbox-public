@@ -107,7 +107,7 @@ public static class Titanfall2CollisionQueries
 }
 
 /// <summary>All world contents groups must have native physics bodies before map readiness.</summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2CollisionManifest : Component
 {
 	[Property, Hide] public ModelCollider[] Colliders { get; set; } = [];

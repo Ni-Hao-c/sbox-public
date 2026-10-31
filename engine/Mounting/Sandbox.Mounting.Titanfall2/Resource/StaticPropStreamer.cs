@@ -7,7 +7,7 @@ using Titanfall2;
 /// camera are prioritized, then the remaining map cells are populated using the
 /// same frame budget. Spawned props are retained until the scene is destroyed.
 /// </summary>
-[Library]
+[Library, Hide]
 public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.Internal.IUpdateSubscriber
 {
 	static readonly Sandbox.Diagnostics.Logger Log = new( "Titanfall2Props" );
