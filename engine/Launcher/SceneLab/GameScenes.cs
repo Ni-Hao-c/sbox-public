@@ -8,7 +8,7 @@ namespace Sandbox.SceneLab;
 ///
 /// They share a stage (<see cref="Stage"/>): a camera, the sun with sky light, the default sky and a floor.
 /// </summary>
-internal static class GameScenes
+internal static partial class GameScenes
 {
 	/// <summary>
 	/// A camera looking at the middle of the floor from above and to the side, the sun, the default sky and a floor -
@@ -165,6 +165,36 @@ internal static class GameScenes
 	}
 
 	/// <summary>
+	/// A physical rectangle between a spotlight and a floor, exercising both renderer paths.
+	/// </summary>
+	public static Scene LightModulation()
+	{
+		var scene = LightCookie();
+		using var scope = scene.Push();
+		var lamp = scene.Directory.FindByName( "Cookie Light" ).First().Components.Get<SpotLight>();
+		var pattern = lamp.Cookie;
+		lamp.Cookie = null;
+		var pane = new GameObject( true, "Light modulator" );
+		pane.WorldPosition = new Vector3( 0, 0, 120 );
+		pane.WorldRotation = Rotation.LookAt( Vector3.Down, Vector3.Forward );
+		var modulator = pane.Components.Create<LightModulator>();
+		modulator.Size = new Vector2( 100, 100 );
+		modulator.Texture = pattern;
+		modulator.Tint = new Color( 0.12f, 0.8f, 0.3f );
+		return scene;
+	}
+
+	/// <summary>
+	/// Move and tint the rectangle to invalidate its cached light interactions.
+	/// </summary>
+	public static void ChangeLightModulation( Scene scene )
+	{
+		var pane = scene.Directory.FindByName( "Light modulator" ).First();
+		pane.WorldPosition += new Vector3( 55, 0, -25 );
+		pane.Components.Get<LightModulator>().Tint = new Color( 0.85f, 0.12f, 0.4f );
+	}
+
+	/// <summary>
 	/// The Highlight post process outlining a box, a sphere half behind a wall (its obscured colour) and a citizen - drawn again
 	/// by <c>Graphics.Render( SceneObject )</c> with the outline shader, which native draws through its layer's view and a managed
 	/// frame from its mirror, the citizen with this frame's skinning.
@@ -273,18 +303,19 @@ internal static class GameScenes
 	/// the forward pass applies its result through a pipeline texture slot. Its history is the camera's, so compare it
 	/// isolated (<c>scenelab.exe -parity -isolated</c>).
 	/// </summary>
-	public static Scene AmbientOcclusion() => OcclusionStage( ao: true, ssr: false );
+	public static Scene AmbientOcclusion() => OcclusionStage( ao: true );
 
 	/// <summary>
-	/// Screen space reflections (<c>ScreenSpaceReflections</c>): the ambient occlusion scene reflected in its metal floor.
-	/// SSR reads the prepass's normals and roughness, last frame's colour and its own history. Compare it isolated.
+	/// Screen space reflections (<c>ScreenSpaceReflectionsPass</c>): the ambient occlusion scene reflected in its metal floor.
+	/// SSR reads the prepass's normals and roughness, last frame's colour and its own history. Compare it isolated. Every
+	/// camera renders it now, so the other occlusion scenes have it too.
 	/// </summary>
-	public static Scene ScreenSpaceReflections() => OcclusionStage( ao: false, ssr: true );
+	public static Scene ScreenSpaceReflections() => OcclusionStage( ao: false );
 
 	/// <summary>Both independent prepass effects in a small scene, without enough draws to enable worker recording.</summary>
-	public static Scene OcclusionAndReflections() => OcclusionStage( ao: true, ssr: true );
+	public static Scene OcclusionAndReflections() => OcclusionStage( ao: true );
 
-	static Scene OcclusionStage( bool ao, bool ssr )
+	static Scene OcclusionStage( bool ao )
 	{
 		var scene = Stage( out var camera, new Vector3( -200, -150, 110 ), new Vector3( 20, 20, 20 ) );
 		using var _ = scene.Push();
@@ -301,7 +332,6 @@ internal static class GameScenes
 		OnFloor( Prop( "Small Box", "models/dev/box.vmdl", new Vector3( 10, -40, 0 ), new Color( 0.4f, 0.9f, 0.4f ), scale: 0.3f ) );
 
 		if ( ao ) camera.GameObject.Components.Create<Sandbox.AmbientOcclusion>();
-		if ( ssr ) camera.GameObject.Components.Create<Sandbox.ScreenSpaceReflections>();
 		return scene;
 	}
 
@@ -1063,6 +1093,43 @@ internal static class GameScenes
 	}
 
 	/// <summary>
+	/// Dense smoke: 1500 big lit smoke sprites overlapping in the fog scene with an 8x8 grid of point lights, every eighth one
+	/// shadowed, for sprite lighting under heavy overdraw. Placed from a fixed seed, so captures repeat.
+	/// </summary>
+	public static Scene DenseSmoke()
+	{
+		var scene = VolumetricFog();
+		using var _ = scene.Push();
+
+		for ( int i = 0; i < 64; i++ )
+		{
+			var light = new GameObject( true, $"Smoke Light {i}" );
+			light.WorldPosition = new Vector3( (i % 8 - 3.5f) * 45, (i / 8 - 3.5f) * 45, 30 + (i % 3) * 30 );
+			var point = light.Components.Create<PointLight>();
+			point.LightColor = new ColorHsv( i * 47 % 360, 0.7f, 1 ).ToColor() * 0.5f;
+			point.Radius = 90;
+			point.Shadows = i % 8 == 0;
+		}
+
+		var sprite = Sprite.FromTexture( Texture.Load( "textures/particles/smoke/smoke_loop_a.vtex" ) );
+		var random = new Random( 1 );
+		for ( int i = 0; i < 1500; i++ )
+		{
+			var go = new GameObject( true, $"Smoke {i}" );
+			go.WorldPosition = new Vector3( random.Float( -170, 170 ), random.Float( -170, 170 ), random.Float( 10, 140 ) );
+			var renderer = go.Components.Create<SpriteRenderer>();
+			renderer.Sprite = sprite;
+			renderer.Size = random.Float( 50, 110 );
+			renderer.Color = new Color( 0.8f, 0.8f, 0.8f, 0.3f );
+			renderer.AlphaCutoff = 0;
+			renderer.Lighting = true;
+			renderer.IsSorted = true;
+		}
+
+		return scene;
+	}
+
+	/// <summary>
 	/// The volume moved, tinted and thinned, through its component.
 	/// </summary>
 	public static void ChangeVolumetricFog( Scene scene )
@@ -1410,6 +1477,50 @@ internal static class GameScenes
 
 		// Across the box's top edge and down its side
 		AddDecal( "Wrap", "textures/shapes/circle1.vtex", new Vector3( 40, 27.5f, 37.5f ), Rotation.LookAt( new Vector3( 0, 1, -1 ) ), 1.5f, new Color( 0.9f, 0.2f, 0.1f ), depth: 40 );
+
+		return scene;
+	}
+
+	/// <summary>
+	/// Envmaps and decals for benchmarking their loops in the forward shaders: glossy props under a 4x4 grid of
+	/// overlapping, feathered envmap probes, so neighbouring pixels blend different sets of envmaps, and an 8x8 grid of
+	/// overlapping decals over the floor and props.
+	/// </summary>
+	public static Scene EnvMapsAndDecals()
+	{
+		var scene = Stage( out var _camera );
+		using var _ = scene.Push();
+
+		for ( int x = 0; x < 6; x++ )
+			for ( int y = 0; y < 6; y++ )
+			{
+				var position = new Vector3( x * 50 - 125, y * 50 - 125, 15 );
+				Prop( $"Prop {x} {y}", (x + y) % 2 == 0 ? "models/dev/sphere.vmdl" : "models/dev/box.vmdl", position, new ColorHsv( (x * 6 + y) * 10, 0.5f, 1 ).ToColor(), "materials/dev/dev_metal_rough10.vmat", 0.3f );
+			}
+
+		var cubemap = Texture.Load( "textures/cubemaps/default.vtex" );
+		for ( int x = 0; x < 4; x++ )
+			for ( int y = 0; y < 4; y++ )
+			{
+				var go = new GameObject( true, $"EnvMap {x} {y}" );
+				go.WorldPosition = new Vector3( x * 80 - 120, y * 80 - 120, 60 );
+
+				var probe = go.Components.Create<EnvmapProbe>();
+				probe.Mode = EnvmapProbe.EnvmapProbeMode.CustomTexture;
+				probe.Texture = cubemap;
+				probe.Bounds = BBox.FromPositionAndSize( Vector3.Zero, new Vector3( 140, 140, 160 ) );
+				probe.Feathering = 0.3f;
+				probe.TintColor = new ColorHsv( (x * 4 + y) * 22, 0.4f, 1 ).ToColor();
+			}
+
+		string[] textures = ["textures/shapes/heart1.vtex", "textures/shapes/circle1.vtex", "textures/shapes/arrow1.vtex", "textures/dev/checkerboard.vtex"];
+		var down = Rotation.LookAt( Vector3.Down );
+		for ( int x = 0; x < 8; x++ )
+			for ( int y = 0; y < 8; y++ )
+			{
+				var decal = AddDecal( $"Decal {x} {y}", textures[(x + y) % textures.Length], new Vector3( x * 40 - 140, y * 40 - 140, 20 ), down, 3, new ColorHsv( (x * 8 + y) * 5, 0.6f, 1 ).ToColor(), depth: 60 );
+				decal.ColorMix = 0.7f;
+			}
 
 		return scene;
 	}

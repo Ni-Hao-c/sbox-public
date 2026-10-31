@@ -130,6 +130,8 @@ internal partial class GameInstanceDll : Engine.IGameInstanceDll
 
 		// The menu loaded its resources moments ago during startup, so there is nothing to reset yet.
 		var menuResourcesCurrent = !hadPreviousEnvironment && !Application.IsEditor;
+		// Bootstrap and the menu just built their type libraries, so the first game start has none to rebuild.
+		var firstStartup = !hadPreviousEnvironment && !Application.IsEditor;
 
 		using var scope = GlobalContext.GameScope();
 
@@ -180,7 +182,7 @@ internal partial class GameInstanceDll : Engine.IGameInstanceDll
 
 		Screen.UpdateFromEngine();
 
-		Game.InitTypeLibrary();
+		if ( !firstStartup ) Game.InitTypeLibrary();
 
 		UserPermission.Load();
 
@@ -220,7 +222,7 @@ internal partial class GameInstanceDll : Engine.IGameInstanceDll
 				return;
 
 			Game.TypeLibrary.AddAssembly( a.Assembly, true );
-			Game.NodeLibrary.AddAssembly( a.Assembly );
+			GlobalContext.Current.AddNodeAssemblyLater( a.Assembly, logErrors: false );
 			ConVarSystem.AddAssembly( a.Assembly, "game" );
 			Cloud.UpdateTypes( a.Assembly );
 			JsonUpgrader.UpdateUpgraders( TypeLibrary );
@@ -414,6 +416,9 @@ internal partial class GameInstanceDll : Engine.IGameInstanceDll
 	{
 		Analytics.GameClosed();
 		using var scope = GlobalContext.GameScope();
+
+		// A capture the game left armed - the pause menu took escape, or we got dropped
+		InputContext?.ResetTrapping();
 
 		if ( gameInstance is not null )
 		{

@@ -297,7 +297,9 @@ PS
 
 	Texture2D g_tFrameBufferCopyTexture < Attribute( "FrameBufferCopyTexture" ); SrgbRead( false ); >;
 
-	float g_FogStrength < Attribute( "g_FogStrength" ); >;
+	// Lit sprites' light, per froxel of the light clusters (ParticleLightingSystem)
+	Texture3D g_tParticleLighting < Attribute( "ParticleLighting" ); SrgbRead( false ); >;
+
 
 	// Performs UV Flipping
 	float2 GetUV(SpriteData sprite, float2 inUV)
@@ -513,32 +515,29 @@ PS
 		}
 		#endif
 
-		if(hasLighting)
+		if ( hasLighting )
 		{
-			FinalCombinerInput_t finalCombinerInput = {};
-			finalCombinerInput.vPositionWithOffsetWs.xyz = i.vPositionWithOffsetWs.xyz;
-			finalCombinerInput.vPositionWs.xyz = i.vPositionWithOffsetWs.xyz + g_vHighPrecisionLightingOffsetWs.xyz;
-			finalCombinerInput.vRoughness = 1;
-			finalCombinerInput.vNormalWs = i.vNormalWs;
-			finalCombinerInput.vPositionSs = i.vPositionSs;
-
-			LightingTerms_t lightingTerms = InitLightingTerms();
-			ComputeDirectLighting( lightingTerms, finalCombinerInput );
-			CalculateIndirectLighting( lightingTerms, finalCombinerInput ); 
-
-			float4 lighting = float4( 0.0, 0.0, 0.0, 1.0 );
-			lighting.rgb += lightingTerms.vDiffuse.rgb; 
-			lighting.rgb += lightingTerms.vIndirectDiffuse.rgb;
-
-			col *= lighting;
+			float3 worldPosition = i.vPositionWithOffsetWs.xyz + g_vHighPrecisionLightingOffsetWs.xyz;
+			float depth = clamp( dot( worldPosition - g_vCameraPositionWs, g_vCameraDirWs ), ClusterZParams.z, ClusterZParams.w );
+			float3 uvw = float3( CalculateViewportUv( i.vPositionSs.xy ), Cluster::DepthToSlice( depth ) * ClusterInvCounts.z );
+			col.rgb *= g_tParticleLighting.SampleLevel( g_sTrilinearClamp, uvw, 0 ).rgb;
 		}
 
+		float3 fogWorldPosition = i.vPositionWithOffsetWs.xyz + g_vHighPrecisionLightingOffsetWs.xyz;
+
+		if ( g_bFogEnabled )
+		{
+			#if D_BLEND == 1
+				col.a *= Fog::Transmittance( fogWorldPosition, i.vPositionSs.xy, fogStrength );
+			#else
+				col.rgb = Fog::Apply( fogWorldPosition, i.vPositionSs.xy, col.rgb, fogStrength );
+			#endif
+		}
+
+		// Mounted Titanfall 2 maps bind their own height fog independently of the native fog.
 		if ( fogStrength > 0 )
 		{
-			float4 fogged = DoAtmospherics( i.vPositionWithOffsetWs.xyz + g_vHighPrecisionLightingOffsetWs.xyz, i.vPositionSs.xy, col, D_BLEND == 1 );
-			col.rgb = lerp( col.rgb, fogged.rgb, fogStrength );
-			col.rgb = lerp( col.rgb, ApplyImportedHeightFog( col.rgb,
-				i.vPositionWithOffsetWs.xyz + g_vHighPrecisionLightingOffsetWs.xyz, D_BLEND == 1 ), fogStrength );
+			col.rgb = ApplyImportedHeightFog( col.rgb, fogWorldPosition, D_BLEND == 1 );
 		}
 
 		#if ( D_REFRACTION && S_MODE_DEPTH == 0 )

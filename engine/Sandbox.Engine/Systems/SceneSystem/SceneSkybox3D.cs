@@ -10,6 +10,10 @@ internal sealed class SceneSkybox3D : IValid
 	public Vector3 CameraOrigin { get; set; }
 	public Angles Angles { get; set; }
 	public float Scale { get; set; } = 16.0f;
+	public Fog FogOverride { get; set; }
+
+	internal Rendering.FogSetup? ResolveFog( SceneCamera camera ) =>
+		FogOverride.IsValid() ? FogOverride.GetSettings( camera.World, camera.RenderTags, camera.ExcludeTags ) : null;
 
 	public SceneSkybox3D( SceneWorld parentWorld, SceneWorld skyboxWorld )
 	{
@@ -18,6 +22,7 @@ internal sealed class SceneSkybox3D : IValid
 
 		ParentWorld.native.Add3DSkyboxWorld( SkyboxWorld );
 		ParentWorld.InternalSkyboxWorlds.Add( this );
+		ParentWorld.ActiveSkybox = this;
 	}
 
 	public void Update()
@@ -38,5 +43,6 @@ internal sealed class SceneSkybox3D : IValid
 		if ( ParentWorld.IsValid() )
 			ParentWorld.native.Remove3DSkyboxWorld( SkyboxWorld );
 		ParentWorld.InternalSkyboxWorlds.Remove( this );
+		ParentWorld.ActiveSkybox = null;
 	}
 }

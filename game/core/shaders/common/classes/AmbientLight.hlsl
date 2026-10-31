@@ -53,9 +53,10 @@ struct AmbientLight
         }
 
         // Iterate over environment maps in the tile
-        for (uint i = 0; i < range.Count; i++)
+        ClusterForEach( range )
         {
-            const uint index = Cluster::LoadItem( range, i );
+            // Wave-uniform by construction (WaveActiveMin in Cluster::Next), but Slang can't prove it, hence asDynamicUniform
+            const uint index = range.Item;
 
             // Transform world position to environment map local space
             const float3 localPos = mul(float4(WorldPosition, 1.0f), EnvMapWorldToLocal(index)).xyz;
@@ -83,7 +84,7 @@ struct AmbientLight
             // Compute diffuse lighting from environment map
             const float3 localNormal = mul(float4(WorldNormal, 0.0f), EnvMapWorldToLocal(index)).xyz;
 
-            float3 envMapColor = SampleEnvironmentMapLevel(WorldNormal, 1.0f, index);
+            float3 envMapColor = SampleEnvironmentMapLevel(localNormal, 1.0f, index, EnvMapTexture(asDynamicUniform(UniformIndex(index))));
 
             // Adjust for subsurface scattering if enabled
             /*#if (S_SUBSURFACE_SCATTERING == SUBSURFACE_SCATTERING_PREINTEGRATED)

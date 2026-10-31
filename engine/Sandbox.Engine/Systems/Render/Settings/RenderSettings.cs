@@ -23,7 +23,9 @@ public partial class RenderSettings
 	/// </summary>
 	internal void ApplyQualityProfiles()
 	{
+		MigrateStretchUpscaling();
 		MigratePostProcessSettings();
+		RenderScale = RenderScale;
 
 		Config.ApplyAll( this );
 	}
@@ -83,6 +85,16 @@ public partial class RenderSettings
 		}
 	}
 
+	public WaterQuality WaterQuality
+	{
+		get => VideoSettings.Get<WaterQuality>( "water.quality", WaterQuality.High );
+		set
+		{
+			VideoSettings.Set<WaterQuality>( "water.quality", value );
+			Config.SetGroupConVars( "WaterQuality", value.ToString() );
+		}
+	}
+
 	public float MotionBlurScale
 	{
 		get => VideoSettings.Get<float>( "motionblur.scale", 1.0f );
@@ -93,28 +105,54 @@ public partial class RenderSettings
 		}
 	}
 
+	const string UpscalerModeKey = "upscaler.mode";
+
 	public UpscalerMode UpscalerMode
 	{
-		get => VideoSettings.Get<UpscalerMode>( "upscaler.mode", UpscalerMode.Off );
+		get
+		{
+			var mode = VideoSettings.Get<UpscalerMode>( UpscalerModeKey, UpscalerMode.Off );
+			return mode == UpscalerMode.Stretch ? UpscalerMode.Off : mode;
+		}
 		set
 		{
-			VideoSettings.Set<UpscalerMode>( "upscaler.mode", value );
-			ConVarSystem.SetInt( "r_upscaling", (int)value, true );
+			var mode = value == UpscalerMode.Stretch ? UpscalerMode.Off : value;
+			VideoSettings.Set<UpscalerMode>( UpscalerModeKey, mode );
+			ConVarSystem.SetInt( "r_upscaling", (int)mode, true );
 		}
 	}
 
-	/// <summary>
-	/// Render-resolution scale used by Stretch (40-100%) and FSR1 (50-100%) modes.
-	/// </summary>
-	public float UpscalerRenderScale
+	void MigrateStretchUpscaling()
 	{
-		get => VideoSettings.Get<float>( "upscaler.render_scale", 0.75f );
+		if ( VideoSettings.Get<UpscalerMode>( UpscalerModeKey, UpscalerMode.Off ) != UpscalerMode.Stretch )
+			return;
+
+		UpscalerMode = UpscalerMode.Off;
+		VideoSettings.Save();
+	}
+
+	const string RenderScaleKey = "render.scale";
+
+	/// <summary>
+	/// Render-resolution scale used by Off (including MSAA and CMAA2) and FSR1 (40-100%).
+	/// </summary>
+	public float RenderScale
+	{
+		get => VideoSettings.Get<float>( RenderScaleKey, 1.0f );
 		set
 		{
 			float v = Math.Clamp( value, 0.4f, 1.0f );
-			VideoSettings.Set<float>( "upscaler.render_scale", v );
-			ConVarSystem.SetFloat( "r_upscaler_render_scale", v, true );
+			VideoSettings.Set<float>( RenderScaleKey, v );
+			ConVarSystem.SetFloat( "r_render_scale", v, true );
 		}
+	}
+
+	/// <summary>Render scale used by Off and FSR1 modes.</summary>
+	[Obsolete( "Use RenderScale" )]
+	public float UpscalerRenderScale
+	{
+		get => RenderScale;
+		set => RenderScale = value;
 	}
 
 	/// <summary>FSR1 RCAS sharpness in [0..1]. Only used when <see cref="UpscalerMode"/> is FSR1.</summary>
@@ -175,9 +213,9 @@ public partial class RenderSettings
 
 	/// <summary>
 	/// Returns whether the given <see cref="UpscalerMode"/> is usable on the current graphics
-	/// hardware. Off / Stretch / FSR1 / FSR3 are always available; DLSS requires NVIDIA RTX hardware.
-	/// Uses the cached device name so opening settings doesn't initialize NGX or its updater.
-	/// Hardware support does not guarantee that NGX SDK initialization will succeed.
+	/// device. Off / FSR1 / FSR3 are always available; Stretch is legacy and not selectable.
+	/// DLSS requires NVIDIA RTX hardware, read from the cached device name so opening settings
+	/// doesn't initialize NGX or its updater; hardware support does not guarantee NGX init succeeds.
 	/// </summary>
 	public static bool IsUpscalerModeSupported( UpscalerMode mode )
 	{
@@ -187,6 +225,7 @@ public partial class RenderSettings
 			// NvTelemetryAPI64. A settings catalog must not start that work on the UI thread.
 			UpscalerMode.DLSS => SystemInfo.Gpu?.Contains( "NVIDIA", StringComparison.OrdinalIgnoreCase ) == true
 				&& SystemInfo.Gpu.Contains( "RTX", StringComparison.OrdinalIgnoreCase ),
+			UpscalerMode.Stretch => false,
 			_ => true,
 		};
 	}
@@ -219,7 +258,7 @@ public partial class RenderSettings
 	public void ResetGraphicsConfig()
 	{
 		UpscalerMode = UpscalerMode.Off;
-		UpscalerRenderScale = 0.75f;
+		RenderScale = 1.0f;
 		Fsr1Sharpness = 0.25f;
 		Fsr3UpscalerQuality = Fsr3UpscalerQuality.Performance;
 		Fsr3Sharpness = 0.5f;

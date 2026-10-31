@@ -10,6 +10,7 @@ FEATURES
 	Feature( F_SOURCE_MOD2X, 0..1, "Source 1" );
 	Feature( F_SOURCE_WRITEZ, 0..1, "Source 1" );
 	Feature( F_SOURCE_ALPHA_SINE, 0..1, "Source 1" );
+	Feature( F_SOURCE_PROXIES, 0..1, "Source 1" );
 	Feature( F_SOURCE_TEXTURE_ANIMATION, 0..1, "Source 1" );
 }
 
@@ -57,8 +58,8 @@ VS
 	{
 		PixelInput i = ProcessVertex( v );
 		i.flSourceFrame = SourceFrame();
-		i.vTextureCoords.xy = SourceUv( i.vTextureCoords.xy, g_vSourceBaseTransformU, g_vSourceBaseTransformV, g_vSourceBaseScroll );
-		i.vSourceColor = float4( g_vSourceColorTint, SourceAlpha() )
+		i.vTextureCoords.xy = SourceUv( i.vTextureCoords.xy, g_vSourceBaseTransformU, g_vSourceBaseTransformV, g_vSourceBaseScroll, g_vSourceBaseProxyU, g_vSourceBaseProxyV );
+		i.vSourceColor = float4( SourceProxyVector( g_vSourceColorTint, g_vSourceColorTintProxy ), SourceAlpha() )
 			* lerp( float4( 1, 1, 1, 1 ), v.vSourceColor, g_flSourceVertexColor );
 		return FinalizeVertex( i );
 	}
@@ -98,7 +99,6 @@ PS
 	#endif
 	TextureAttribute( RepresentativeTexture, g_tColor );
 	float g_flSourceTextureAlphaPresent < Default( 1 ); >;
-	float g_flSourceFogEnabled < Default( 1 ); >;
 
 	float4 MainPs( PixelInput i ) : SV_Target0
 	{
@@ -110,13 +110,7 @@ PS
 		if ( g_bFogEnabled )
 		{
 			float3 world = i.vPositionWithOffsetWs.xyz + g_vHighPrecisionLightingOffsetWs.xyz;
-			float3 toCamera = world - g_vCameraPositionWs;
-			float visibility = GetVolumetricFogInfluence( world, i.vPositionSs.xy );
-			// Only fog opacity affects a multiplier; never sample the fog's color.
-			if ( dot( toCamera.xy, toCamera.xy ) > g_vGradientFogCullingParams.x && world.z < g_vGradientFogCullingParams.y )
-				visibility *= 1.0 - CalculateGradientFog( world, toCamera ).a;
-			if ( dot( toCamera, toCamera ) > g_vCubeFogCullingParams.x || world.z > g_vCubeFogCullingParams.y )
-				visibility *= 1.0 - CalculateCubemapFog( world, toCamera ).a;
+			float visibility = Fog::ModulationTransmittance( world, i.vPositionSs.xy );
 			result.rgb = lerp( S_SOURCE_MOD2X ? 0.5 : 1.0, result.rgb, saturate( visibility ) );
 		}
 		return result;

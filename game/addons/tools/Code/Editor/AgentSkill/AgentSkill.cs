@@ -19,7 +19,7 @@ internal static class AgentSkill
 		public string Message => $"{Output}{Error}".Trim();
 	}
 
-	static string Cli => System.IO.Path.Combine( Environment.CurrentDirectory, "bin", "managed", "sbox-cli.exe" );
+	static string Cli => System.IO.Path.Combine( Environment.CurrentDirectory, "bin", "managed", OperatingSystem.IsWindows() ? "sbox-cli.exe" : "sbox-cli" );
 
 	/// <summary>
 	/// Set when the user declines the startup prompt or removes the skill, so the editor stops asking.
@@ -84,7 +84,7 @@ internal static class AgentSkill
 	[Event( "editor.created" )]
 	static async void OnEditorCreated( EditorMainWindow window )
 	{
-		// Let the editor finish restoring its layout, and stay out of the way of the welcome tutorial.
+		// Let the editor finish restoring its layout.
 		await Task.Delay( 3000 );
 
 		var targets = await Task.Run( Status );
