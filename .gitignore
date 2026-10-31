@@ -11,9 +11,6 @@
 !*.sln
 !*.csproj
 !*.cs
-!engine/Mounting/Sandbox.Mounting.Titanfall2/Perf/MaterialVerification/*.csx
-!engine/Mounting/Sandbox.Mounting.Titanfall2/Perf/ParticleVerification/*.csx
-!engine/Mounting/Sandbox.Mounting.Titanfall2/Perf/CollisionVerification/*.csx
 !*.razor
 !engine/Mounting/Sandbox.Mounting.Titanfall2/Native/
 !engine/Mounting/Sandbox.Mounting.Titanfall2/Native/**/*.cpp

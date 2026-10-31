@@ -20,7 +20,6 @@
 
   <ItemGroup>
     <Compile Remove="Build/**" />
-    <Compile Remove="Perf/CollisionVerification/**" />
     <ProjectReference Include="..\..\Sandbox.Engine\Sandbox.Engine.csproj" />
     <ProjectReference Include="..\..\Sandbox.Filesystem\Sandbox.Filesystem.csproj" />
     <ProjectReference Include="..\..\Sandbox.System\Sandbox.System.csproj" />

@@ -9,7 +9,7 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="../**/*.cs" Exclude="../obj/**;../bin/**;../Build/**;../Perf/CollisionVerification/**" />
+    <Compile Include="../**/*.cs" Exclude="../obj/**;../bin/**;../Build/**" />
     <Reference Include="$(EngineRoot)/bin/managed/*.dll"><Private>false</Private></Reference>
   </ItemGroup>
   <Target Name="ValidateSteamSdk" BeforeTargets="ResolveReferences">
