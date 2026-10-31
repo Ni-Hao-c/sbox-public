@@ -27,6 +27,7 @@ sealed class RpakArchive
 	WeakReference<byte[]> _bufferCache;
 	readonly RpakPage[] _pages;
 	readonly string[] _streamingFiles;
+	readonly string[] _resolvedStreamingFiles;
 
 	public string FilePath { get; }
 	public IReadOnlyList<RpakAsset> Assets { get; }
@@ -37,6 +38,7 @@ sealed class RpakArchive
 		FilePath = filePath;
 		_pages = pages;
 		_streamingFiles = streamingFiles;
+		_resolvedStreamingFiles = new string[streamingFiles.Length];
 		Assets = assets;
 		if ( initialBuffer is not null ) _bufferCache = new WeakReference<byte[]>( initialBuffer );
 	}
@@ -99,6 +101,9 @@ sealed class RpakArchive
 
 			EnsureRange( bytes, offset, (long)segmentCount * 0x10 );
 			offset += (long)segmentCount * 0x10;
+			// The page table is 12 bytes per entry; validate it before reading so a
+			// truncated package reports a range error instead of an AsSpan exception.
+			EnsureRange( bytes, offset, (long)pageCount * 0x0C );
 			var pages = new RpakPage[pageCount];
 			for ( var index = 0; index < pageCount; index++ )
 			{
@@ -183,13 +188,13 @@ sealed class RpakArchive
 			return false;
 		}
 
-		var headerSize = checked((int)asset.HeaderStructSize);
-		if ( headerSize <= 0 || headerOffset + headerSize > bytes.Length )
+		if ( asset.HeaderStructSize == 0 || (long)headerOffset + asset.HeaderStructSize > bytes.Length )
 		{
-			error = $"Asset header size {headerSize} is invalid.";
+			error = $"Asset header size {asset.HeaderStructSize} is invalid.";
 			return false;
 		}
 
+		var headerSize = (int)asset.HeaderStructSize;
 		var header = new byte[headerSize];
 		Buffer.BlockCopy( bytes, headerOffset, header, 0, headerSize );
 		data = new RpakAssetData( header, null );
@@ -200,7 +205,7 @@ sealed class RpakArchive
 	{
 		data = null;
 		if ( !TryGetBuffer( out var bytes, out error ) ) return false;
-		if ( !TryResolve( _pages, pointer, bytes.Length, out var offset ) || length < 0 || offset + length > bytes.Length )
+		if ( !TryResolve( _pages, pointer, bytes.Length, out var offset ) || length < 0 || (long)offset + length > bytes.Length )
 		{
 			error = "RPAK page range is invalid.";
 			return false;
@@ -242,7 +247,26 @@ sealed class RpakArchive
 	public string GetStreamingFilePath( int index )
 	{
 		if ( index < 0 || index >= _streamingFiles.Length ) return null;
+		// Every streamed texture resolves its STARPAK; cache the probe result instead
+		// of repeating three GetFullPath/File.Exists probes per texture.
+		var resolved = System.Threading.Volatile.Read( ref _resolvedStreamingFiles[index] );
+		if ( resolved is not null ) return resolved;
+		resolved = ResolveStreamingFilePath( index );
+		if ( resolved is not null ) System.Threading.Volatile.Write( ref _resolvedStreamingFiles[index], resolved );
+		return resolved;
+	}
+
+	string ResolveStreamingFilePath( int index )
+	{
 		var relative = _streamingFiles[index].Replace( '/', Path.DirectorySeparatorChar ).Replace( '\\', Path.DirectorySeparatorChar );
+		// Streaming names come from the decompressed package, so they are game-relative
+		// paths and must never be able to select an arbitrary host file. The candidate
+		// bases below are fixed, which leaves rooted paths and ".." segments as the only
+		// way out; reject them the same way LooseAssetSource.TryReadPath does.
+		if ( string.IsNullOrWhiteSpace( relative ) || Path.IsPathRooted( relative )
+			|| relative.Contains( ':', StringComparison.Ordinal )
+			|| relative.Split( Path.DirectorySeparatorChar ).Any( static part => part == ".." ) )
+			return null;
 		var directory = Path.GetDirectoryName( FilePath )!;
 		var candidates = new[]
 		{
@@ -394,16 +418,16 @@ sealed class RpakArchive
 			if ( reader.ReadUInt32() != CacheMagic || reader.ReadInt32() != CacheVersion
 				|| reader.ReadInt64() != source.Length || reader.ReadInt64() != source.LastWriteTimeUtc.Ticks ) return false;
 
-			var pageCount = ReadCacheCount( reader, 1_000_000, "page" );
+			var pageCount = ReadCacheCount( reader, 1_000_000, 20, "page" );
 			var pages = new RpakPage[pageCount];
 			for ( var index = 0; index < pageCount; index++ )
 				pages[index] = new RpakPage( reader.ReadInt32(), reader.ReadInt32(), reader.ReadUInt32(), reader.ReadInt64() );
 
-			var streamCount = ReadCacheCount( reader, 4096, "stream" );
+			var streamCount = ReadCacheCount( reader, 4096, 1, "stream" );
 			var streamingFiles = new string[streamCount];
 			for ( var index = 0; index < streamCount; index++ ) streamingFiles[index] = reader.ReadString();
 
-			var assetCount = ReadCacheCount( reader, 10_000_000, "asset" );
+			var assetCount = ReadCacheCount( reader, 10_000_000, 42, "asset" );
 			var assets = new List<RpakAsset>( assetCount );
 			for ( var index = 0; index < assetCount; index++ )
 			{
@@ -425,12 +449,14 @@ sealed class RpakArchive
 
 	static void TryWriteCache( RpakArchive archive )
 	{
+		string temporaryPath = null;
 		try
 		{
 			var source = new FileInfo( archive.FilePath );
 			var cachePath = GetCachePath( archive.FilePath );
 			System.IO.Directory.CreateDirectory( Path.GetDirectoryName( cachePath )! );
-			var temporaryPath = cachePath + ".tmp";
+			// Unique name: two processes caching the same package must not share a temp file.
+			temporaryPath = $"{cachePath}.{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
 			using ( var stream = new FileStream( temporaryPath, FileMode.Create, FileAccess.Write, FileShare.None ) )
 			using ( var writer = new BinaryWriter( stream, Encoding.UTF8, false ) )
 			{
@@ -468,13 +494,25 @@ sealed class RpakArchive
 		catch
 		{
 			// A cache failure must never prevent mounting the original package.
+			// Remove a partial temp file so failed writes do not accumulate on disk.
+			try { if ( temporaryPath is not null && File.Exists( temporaryPath ) ) File.Delete( temporaryPath ); }
+			catch { }
 		}
 	}
 
-	static int ReadCacheCount( BinaryReader reader, int maximum, string kind )
+	/// <summary>
+	/// Reads a cached count. The index file only checks its magic/version and the source
+	/// file's size + mtime, so a truncated or corrupt index must not be able to ask for
+	/// millions of records before the first one is read: the count is also bounded by the
+	/// bytes that are actually left, using each record's minimum encoded size.
+	/// </summary>
+	static int ReadCacheCount( BinaryReader reader, int maximum, int minimumRecordBytes, string kind )
 	{
 		var count = reader.ReadInt32();
-		if ( count < 0 || count > maximum ) throw new InvalidDataException( $"Invalid cached {kind} count {count}." );
+		var remaining = reader.BaseStream.Length - reader.BaseStream.Position;
+		var available = remaining <= 0 ? 0 : (int)Math.Min( maximum, remaining / Math.Max( 1, minimumRecordBytes ) );
+		if ( count < 0 || count > available )
+			throw new InvalidDataException( $"Invalid cached {kind} count {count} for {remaining} remaining bytes." );
 		return count;
 	}
 

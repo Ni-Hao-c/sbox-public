@@ -19,6 +19,9 @@ public static class Titanfall2Mdl53AnimationReader
 	const byte AnimRawScale = 0x08;
 	const byte AnimNoRotation = 0x10;
 
+	/// <summary>Upper bound on authored frames; retail clips are far shorter (hundreds).</summary>
+	const int MaximumAnimationFrames = 1 << 16;
+
 	public readonly record struct BonePose( NumericsVector3 Position, NumericsQuaternion Rotation, NumericsVector3 Scale );
 
 	public sealed class DecodedAnimation
@@ -44,6 +47,10 @@ public static class Titanfall2Mdl53AnimationReader
 		var info = model.Animations[animationIndex];
 		var description = info.Animation;
 		var frameCount = Math.Max( description.FrameCount, 1 );
+		// Frames are allocated as frameCount arrays of bone poses before any frame is
+		// range-checked, so a corrupt count must be rejected before the allocation.
+		if ( frameCount > MaximumAnimationFrames )
+			throw new InvalidDataException( $"Animation '{info.Name}' declares {frameCount} frames (limit {MaximumAnimationFrames})." );
 		var boneCount = model.Bones.Length;
 		var delta = (description.Flags & StudioDelta) != 0;
 		var defaults = CreateDefaultPose( model, delta );
@@ -130,9 +137,9 @@ public static class Titanfall2Mdl53AnimationReader
 				localFrame -= section * description.SectionFrameCount;
 			}
 
-			var sectionOffset = checked(descriptionOffset + description.SectionOffset + section * sizeof(int));
-			EnsureRange( data, sectionOffset, sizeof(int) );
-			relativeOffset = BinaryPrimitives.ReadInt32LittleEndian( data.Slice( sectionOffset, sizeof(int) ) );
+			var sectionOffset = checked(descriptionOffset + description.SectionOffset + section * sizeof( int ));
+			EnsureRange( data, sectionOffset, sizeof( int ) );
+			relativeOffset = BinaryPrimitives.ReadInt32LittleEndian( data.Slice( sectionOffset, sizeof( int ) ) );
 		}
 
 		if ( relativeOffset <= 0 )
@@ -324,8 +331,8 @@ public static class Titanfall2Mdl53AnimationReader
 		int axisCount = 3 )
 	{
 		if ( axis < 0 || axis >= axisCount ) return 0.0f;
-		EnsureRange( data, pointerBase, axisCount * sizeof(short) );
-		var relativeOffset = ReadInt16( data, pointerBase + axis * sizeof(short) );
+		EnsureRange( data, pointerBase, axisCount * sizeof( short ) );
+		var relativeOffset = ReadInt16( data, pointerBase + axis * sizeof( short ) );
 		if ( relativeOffset <= 0 || scale == 0.0f ) return 0.0f;
 
 		var valueOffset = checked(pointerBase + relativeOffset);
@@ -339,13 +346,13 @@ public static class Titanfall2Mdl53AnimationReader
 			if ( remainingFrame < total )
 			{
 				var valueIndex = remainingFrame < valid ? remainingFrame + 1 : valid;
-				var sampleOffset = checked(valueOffset + valueIndex * sizeof(short));
-				EnsureRange( data, sampleOffset, sizeof(short) );
+				var sampleOffset = checked(valueOffset + valueIndex * sizeof( short ));
+				EnsureRange( data, sampleOffset, sizeof( short ) );
 				return ReadInt16( data, sampleOffset ) * scale;
 			}
 
 			remainingFrame -= total;
-			valueOffset = checked(valueOffset + (valid + 1) * sizeof(short));
+			valueOffset = checked(valueOffset + (valid + 1) * sizeof( short ));
 		}
 
 		throw new InvalidDataException( "MDL animation value stream exceeded the safety limit." );
@@ -412,8 +419,8 @@ public static class Titanfall2Mdl53AnimationReader
 
 	static NumericsQuaternion ReadQuaternion64( ReadOnlySpan<byte> data, int offset )
 	{
-		EnsureRange( data, offset, sizeof(ulong) );
-		var packed = BinaryPrimitives.ReadUInt64LittleEndian( data.Slice( offset, sizeof(ulong) ) );
+		EnsureRange( data, offset, sizeof( ulong ) );
+		var packed = BinaryPrimitives.ReadUInt64LittleEndian( data.Slice( offset, sizeof( ulong ) ) );
 		const ulong mask = (1UL << 21) - 1;
 		const float inverse = 1.0f / 1048576.5f;
 		var x = ((int)(packed & mask) - 1048576) * inverse;
@@ -450,20 +457,20 @@ public static class Titanfall2Mdl53AnimationReader
 
 	static short ReadInt16( ReadOnlySpan<byte> data, int offset )
 	{
-		EnsureRange( data, offset, sizeof(short) );
-		return BinaryPrimitives.ReadInt16LittleEndian( data.Slice( offset, sizeof(short) ) );
+		EnsureRange( data, offset, sizeof( short ) );
+		return BinaryPrimitives.ReadInt16LittleEndian( data.Slice( offset, sizeof( short ) ) );
 	}
 
 	static ushort ReadUInt16( ReadOnlySpan<byte> data, int offset )
 	{
-		EnsureRange( data, offset, sizeof(ushort) );
-		return BinaryPrimitives.ReadUInt16LittleEndian( data.Slice( offset, sizeof(ushort) ) );
+		EnsureRange( data, offset, sizeof( ushort ) );
+		return BinaryPrimitives.ReadUInt16LittleEndian( data.Slice( offset, sizeof( ushort ) ) );
 	}
 
 	static int ReadInt32( ReadOnlySpan<byte> data, int offset )
 	{
-		EnsureRange( data, offset, sizeof(int) );
-		return BinaryPrimitives.ReadInt32LittleEndian( data.Slice( offset, sizeof(int) ) );
+		EnsureRange( data, offset, sizeof( int ) );
+		return BinaryPrimitives.ReadInt32LittleEndian( data.Slice( offset, sizeof( int ) ) );
 	}
 
 	static float ReadSingle( ReadOnlySpan<byte> data, int offset )

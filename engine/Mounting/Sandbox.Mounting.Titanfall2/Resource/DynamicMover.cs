@@ -4,7 +4,7 @@
 /// create physics movers or submit changing geometry to NavMesh.
 /// </summary>
 [Library]
-public sealed class Titanfall2RotatingMover : Component, Component.DontExecuteOnServer
+public sealed class Titanfall2RotatingMover : Component, Component.DontExecuteOnServer, Sandbox.Internal.IUpdateSubscriber
 {
 	[Property, Hide]
 	public Vector3 Pivot { get; set; }

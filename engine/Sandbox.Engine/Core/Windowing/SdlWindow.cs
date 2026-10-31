@@ -143,10 +143,20 @@ internal sealed class SdlWindow : IDisposable
 		{
 			Sdl.DisplayMode mode = default;
 			var exclusive = width > 0 && height > 0 && Sdl.GetClosestFullscreenDisplayMode( SdlDisplay.ForWindow( Handle ), width, height, refreshRate, false, out mode );
-			// A saved resolution can become unavailable after changing displays. Null selects desktop fullscreen.
-			Check( Sdl.SetWindowFullscreenMode( Handle, exclusive ? (IntPtr)(&mode) : IntPtr.Zero ) );
+			// An enumerated mode can still be rejected by the display driver when applied.
 			// Exclusive modes can change in place, without restoring the desktop first.
-			Check( Sdl.SetWindowFullscreen( Handle, true ) );
+			if ( exclusive && (!Sdl.SetWindowFullscreenMode( Handle, (IntPtr)(&mode) ) || !Sdl.SetWindowFullscreen( Handle, true )) )
+			{
+				Log.Warning( $"SDL window: Couldn't apply exclusive fullscreen {width}x{height}: {Sdl.GetError()}. Falling back to desktop fullscreen." );
+				exclusive = false;
+			}
+
+			// A saved or enumerated resolution can become unavailable. Null restores desktop fullscreen.
+			if ( !exclusive )
+			{
+				Check( Sdl.SetWindowFullscreenMode( Handle, IntPtr.Zero ) );
+				Check( Sdl.SetWindowFullscreen( Handle, true ) );
+			}
 			fullscreenUsage = exclusive ? RenderDisplayModeUsage.ExclusiveFullscreen : RenderDisplayModeUsage.CooperativeFullscreen;
 		}
 		else

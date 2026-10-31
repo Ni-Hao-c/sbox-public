@@ -46,7 +46,7 @@ static class MilesBinkDecoder
 				error = errorBuffer.Length == 0 ? "Miles/Bink decode failed." : errorBuffer.ToString();
 				return false;
 			}
-			var byteCount = checked((int)((ulong)frames * channels * sizeof(short)));
+			var byteCount = checked((int)((ulong)frames * channels * sizeof( short )));
 			pcm = GC.AllocateUninitializedArray<byte>( byteCount );
 			Marshal.Copy( nativePcm, pcm, 0, byteCount );
 			return true;
@@ -81,7 +81,7 @@ static class MilesBinkDecoder
 				return false;
 			}
 
-			var directory = Path.GetDirectoryName( typeof(MilesBinkDecoder).Assembly.Location );
+			var directory = Path.GetDirectoryName( typeof( MilesBinkDecoder ).Assembly.Location );
 			var bridgePath = Path.Combine( directory ?? string.Empty, "titanfall2_miles.dll" );
 			if ( !File.Exists( bridgePath ) ) return Fail( $"Miles bridge is missing: {bridgePath}", out decode, out free, out error );
 			try

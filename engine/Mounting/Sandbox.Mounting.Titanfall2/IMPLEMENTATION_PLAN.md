@@ -1,6 +1,14 @@
 # Titanfall 2 挂载系统完善计划
 
+> 代码结构与性能开关索引见 [ARCHITECTURE.md](ARCHITECTURE.md)；本文件保留功能阶段的实施计划与验收记录。
+
 ## 当前实施进度（2026-07-22）
+
+> **2026-10-22 追加**：地图实体与音频已接线（不属于原 1–9 阶段）。
+> 解析侧新增 BSP `ENTITIES`/`ENTITY_PARTITIONS`、`_snd.ent`、`scripts/audio/audio_soundscapes.txt`；
+> 场景侧新增 `Titanfall2MapAudio`（71 个点声源 + 25 个声景区，实测天使城全部可解析并播放）。
+> 同时把默认关闭的 lightmap/探针 lump 改为按开关读取（省约 76 MB 读取 + 76 MB 拷贝）。
+> 细节与实测见 `D:\sbox\titanfall2-map-parsing-audit.md` §10。
 
 - 阶段一：已加入模型碰撞分类统计与固定自检样本；纹理到材质的 GUID/路径反向依赖已由统一材质描述层维护并纳入自检统计。
 - 阶段二：已完成 VPHY、hitbox、低面数渲染网格和高面数简化包围盒四级碰撞路径。对解包模型均匀抽样 202/1812 个：106 个 VPHY、8 个 hitbox、88 个 fallback，0 个解析错误，213 个 VPHY hull 均通过有限坐标和索引校验。

@@ -142,7 +142,16 @@ internal sealed partial class GameWindow : IDisposable
 		if ( size.x < 1 || size.y < 1 ) return;
 		window.Flush();
 
-		if ( !ApplyWindowMode( video.Window ) ) return;
+		try
+		{
+			if ( !ApplyWindowMode( video.Window ) ) return;
+		}
+		catch
+		{
+			// A rejected display mode is not a pending transition. Don't repeat it every frame.
+			if ( pendingMode == video ) pendingMode = null;
+			throw;
+		}
 		if ( !window.UpdateSwapChain( video.Multisample, video.VSync ) ) return;
 		if ( pendingMode == video ) pendingMode = null;
 	}

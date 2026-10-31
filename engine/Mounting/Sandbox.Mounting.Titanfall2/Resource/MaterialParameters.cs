@@ -37,7 +37,13 @@ readonly record struct Titanfall2MaterialParameters(
 	float FresnelStrength,
 	float DetailBlend,
 	float NormalScale,
-	float EnvironmentIntensity )
+	float EnvironmentIntensity,
+	float LayerBlendRamp = 0f,
+	float AlphaDistanceFadeScale = 0f,
+	float AlphaDistanceFadeBias = 1f,
+	float AlphaEdgeFadeExponent = 1f,
+	float AlphaEdgeFadeInner = 1f,
+	float AlphaEdgeFadeOuter = 1f )
 {
 	public static Titanfall2MaterialParameters Read( DxbcConstantBufferLayout layout, byte[] data, string shaderSetName )
 	{
@@ -50,7 +56,9 @@ readonly record struct Titanfall2MaterialParameters(
 		Read2( layout, data, "c_uvDistortion2Intensity", 0f, 0f, out var distortion2X, out var distortion2Y );
 		var glossScale = Read1( layout, data, "c_perfGloss", 1f );
 		Read3( layout, data, "c_perfSpecColor", 1f, 1f, 1f, out var specularR, out var specularG, out var specularB );
-		var detailBlend = Read1( layout, data, "c_layerBlendRamp", 0f );
+		// c_layerBlendRamp controls the two-surface blend. It is not the
+		// strength of a multiplicative detail-colour texture.
+		var detailBlend = 0f;
 		var opacity = Read1( layout, data, "c_opacity", 1f );
 		var alphaTestReference = Read1( layout, data, "c_alphaTestReference", 0.5f );
 
@@ -63,7 +71,13 @@ readonly record struct Titanfall2MaterialParameters(
 			distortionX, distortionY, distortion2X, distortion2Y,
 			Math.Clamp( glossScale, 0f, 16f ),
 			specularR, specularG, specularB,
-			1f, 1f, 0f, Math.Clamp( detailBlend, 0f, 1f ), 1f, 1f );
+			1f, 1f, 0f, Math.Clamp( detailBlend, 0f, 1f ), 1f, 1f,
+			Read1( layout, data, "c_layerBlendRamp", 0f ),
+			Read1( layout, data, "c_alphaDistanceFadeScale", 0f ),
+			Read1( layout, data, "c_alphaDistanceFadeBias", 1f ),
+			MathF.Max( 0f, Read1( layout, data, "c_alphaEdgeFadeExponent", 1f ) ),
+			Read1( layout, data, "c_alphaEdgeFadeInner", 1f ),
+			Read1( layout, data, "c_alphaEdgeFadeOuter", 1f ) );
 	}
 
 	static Titanfall2UvTransform ReadUv( DxbcConstantBufferLayout layout, byte[] data, int index, bool animated )
@@ -110,7 +124,7 @@ readonly record struct Titanfall2MaterialParameters(
 	static bool TryGetSpan( DxbcConstantBufferLayout layout, byte[] data, string name, int minimumSize, out ReadOnlySpan<byte> span )
 	{
 		span = default;
-		if ( layout is null || data is null || !layout.TryGetVariable( name, out var variable ) || variable.Size < minimumSize
+		if ( layout is null || data is null || !layout.TryGetVariable( name, out var variable ) || !variable.IsUsed || variable.Size < minimumSize
 			|| variable.StartOffset < 0 || variable.StartOffset > data.Length || minimumSize > data.Length - variable.StartOffset ) return false;
 		span = data.AsSpan( variable.StartOffset, minimumSize );
 		return true;

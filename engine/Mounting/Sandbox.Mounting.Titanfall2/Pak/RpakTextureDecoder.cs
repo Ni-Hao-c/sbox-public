@@ -16,8 +16,16 @@ static class RpakTextureDecoder
 			System.Threading.Interlocked.Increment( ref _failedTextures );
 			return false;
 		}
+		return TryCreate( decoded, out texture, out error );
+	}
+
+	internal static bool TryCreate( RpakTextureData decoded, out Texture texture, out string error )
+	{
+		texture = null;
+		error = null;
 		try
 		{
+			decoded = PrepareUpload( decoded );
 			if ( decoded.IsCube )
 			{
 				var builder = Texture.CreateCube( decoded.Width, decoded.Height, decoded.Format )
@@ -68,6 +76,18 @@ static class RpakTextureDecoder
 		}
 	}
 
+	// The native runtime upload currently leaves sub-block BC mips uninitialized
+	// (verified with constant-colour BC1 mips sampled on the GPU). Stop at the last
+	// complete 4x4 block so distant sampling clamps to valid authored texels.
+	// Keep the decoded/cache representation intact: this is an upload constraint,
+	// not a change to the RPAK layout or its 16-byte source mip alignment.
+	internal static RpakTextureData PrepareUpload( RpakTextureData decoded )
+	{
+		var upload = TextureMipUpload.Prepare( decoded.Width, decoded.Height, decoded.Format,
+			decoded.MipCount, decoded.ArraySize, decoded.Data );
+		return decoded with { MipCount = upload.MipCount, Data = upload.Data };
+	}
+
 	internal static RpakTextureStatistics GetStatistics() => new(
 		System.Threading.Interlocked.Read( ref _createdTextures ),
 		System.Threading.Interlocked.Read( ref _uploadedBytes ),
@@ -75,6 +95,22 @@ static class RpakTextureDecoder
 		Titanfall2StreamingSettings.TextureMaxDimension );
 
 	public static bool TryRead( RpakArchive archive, RpakAsset asset, out RpakTextureData texture, out string error )
+	{
+		// Malformed headers can overflow the checked mip-size math or the header
+		// size conversion; callers (texture loader Prepare/Load) do not catch.
+		try
+		{
+			return TryReadCore( archive, asset, out texture, out error );
+		}
+		catch ( Exception exception )
+		{
+			texture = default;
+			error = exception.Message;
+			return false;
+		}
+	}
+
+	static bool TryReadCore( RpakArchive archive, RpakAsset asset, out RpakTextureData texture, out string error )
 	{
 		texture = default;
 		error = null;

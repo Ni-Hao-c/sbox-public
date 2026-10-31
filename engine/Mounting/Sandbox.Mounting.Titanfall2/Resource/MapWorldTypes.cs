@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Sandbox.Mounting.PerfKit;
 
 /// <summary>Vertex layout used by imported Titanfall 2 world meshes.</summary>
 [StructLayout( LayoutKind.Sequential )]
@@ -26,18 +27,21 @@ sealed record RuntimeLightmapPage(
 	Texture SkyB,
 	Texture RealTimeA,
 	Texture RealTimeB,
-	Texture RealTimeC );
+	Texture RealTimeC,
+	Texture SunChannels );
 
 sealed class RuntimeLightmaps
 {
 	public IReadOnlyList<RuntimeLightmapPage> Pages { get; }
 	public IReadOnlyList<IDisposable> OwnedResources { get; }
+	public Color SkyColor { get; }
 
-	public RuntimeLightmaps( IReadOnlyList<RuntimeLightmapPage> pages )
+	public RuntimeLightmaps( IReadOnlyList<RuntimeLightmapPage> pages, Color skyColor )
 	{
 		Pages = pages;
+		SkyColor = skyColor;
 		OwnedResources = pages
-			.SelectMany( static page => new[] { page.SkyA, page.SkyB, page.RealTimeA, page.RealTimeB, page.RealTimeC } )
+			.SelectMany( static page => new[] { page.SkyA, page.SkyB, page.RealTimeA, page.RealTimeB, page.RealTimeC, page.SunChannels } )
 			.Where( static texture => texture is not null )
 			.Cast<IDisposable>()
 			.ToArray();
@@ -60,9 +64,18 @@ readonly record struct WorldRenderCell( int X, int Y, int Z )
 
 sealed record WorldRenderChunk( WorldRenderCell Cell, Model Model );
 
+/// <summary>
+/// Aggregated world geometry (one model per material, one fragment per spatial cell).
+/// The shape and the building logic live in <see cref="MountedAggregateBuilder"/>, so the
+/// mount only carries the result; see that type for why the grouping beats per-cell models.
+/// </summary>
 sealed record WorldBuildResult(
 	IReadOnlyList<WorldRenderChunk> WorldChunks,
+	IReadOnlyList<WorldRenderChunk> TranslucentChunks,
 	IReadOnlyList<WorldRenderChunk> DecalChunks,
 	IReadOnlyList<WorldRenderChunk> GodrayChunks,
+	IReadOnlyList<WorldRenderChunk> WaterChunks,
+	IReadOnlyList<MountedAggregate> WorldAggregates,
 	Model CollisionModel,
-	IReadOnlyList<IDisposable> OwnedResources );
+	IReadOnlyList<IDisposable> OwnedResources,
+	IReadOnlyList<WorldRenderChunk> ShadowOnlyChunks = null );

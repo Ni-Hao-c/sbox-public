@@ -62,7 +62,7 @@ static class LzhamDecoder
 				return false;
 			}
 
-			var assemblyDirectory = Path.GetDirectoryName( typeof(LzhamDecoder).Assembly.Location );
+			var assemblyDirectory = Path.GetDirectoryName( typeof( LzhamDecoder ).Assembly.Location );
 			var bridgePath = Path.Combine( assemblyDirectory ?? string.Empty, "titanfall2_lzham.dll" );
 			if ( !File.Exists( bridgePath ) )
 			{

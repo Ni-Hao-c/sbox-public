@@ -86,6 +86,7 @@ public sealed class SceneSpriteSystem : GameObjectSystem<SceneSpriteSystem>
 		{
 			particleSystem.RenderTexture?.MarkUsed( ushort.MaxValue );
 			particleSystem.RefractionNormalTexture?.MarkUsed( ushort.MaxValue );
+			particleSystem.ColorRamp?.MarkUsed( ushort.MaxValue );
 			if ( particleSystem is ParticleTextRenderer text ) text.PrepareText();
 
 			var particleRenderer = (ParticleRenderer)particleSystem;

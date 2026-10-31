@@ -24,7 +24,12 @@ class LegacyMaterialLoader( string materialName ) : ResourceLoader<Titanfall2Mou
 	internal static Material CreateUnlitTwoTexture( Titanfall2Mount host, string resourcePath,
 		Titanfall2VmtDefinition definition, Titanfall2MaterialMetadata metadata, Action<string> warn )
 	{
-		var shader = metadata.Mode switch
+		var texture2 = definition.GetTexture( "$texture2" );
+		var secondTexture = LoadTexture( host, texture2 );
+		// Live Fire's fake-sky screens put skies/skycube in the second layer.
+		// Binding that resource to Texture2D produces an opaque black ceiling.
+		var cubeLayer2 = secondTexture is { Depth: 6 } && metadata.Mode == Titanfall2MaterialMode.Opaque;
+		var shader = cubeLayer2 ? "shaders/titanfall2_vmt_unlit_two_texture_cube.shader" : metadata.Mode switch
 		{
 			Titanfall2MaterialMode.Additive => "shaders/titanfall2_vmt_unlit_two_texture_additive.shader",
 			Titanfall2MaterialMode.Opaque => "shaders/titanfall2_vmt_unlit_two_texture_opaque.shader",
@@ -32,18 +37,23 @@ class LegacyMaterialLoader( string materialName ) : ResourceLoader<Titanfall2Mou
 		};
 		var material = Material.Create( resourcePath, shader );
 		material.Set( "g_tTexture1", Texture.Transparent );
-		material.Set( "g_tTexture2", Texture.Transparent );
+		if ( !cubeLayer2 ) material.Set( "g_tTexture2", Texture.Transparent );
 
 		var texture1 = definition.GetTexture( "$basetexture" );
-		var texture2 = definition.GetTexture( "$texture2" );
 		var texture1Animated = definition.TryGetAnimatedTexture( false, out var texture1FrameRate );
 		var texture2Animated = definition.TryGetAnimatedTexture( true, out var texture2FrameRate );
 		var hasTexture1 = BindLayerTexture( host, warn, material, "g_tTexture1", texture1, texture1Animated, texture1FrameRate,
 			"g_flVmtTexture1FrameCount", "g_flVmtTexture1FrameRate" );
-		var hasTexture2 = BindLayerTexture( host, warn, material, "g_tTexture2", texture2, texture2Animated, texture2FrameRate,
-			"g_flVmtTexture2FrameCount", "g_flVmtTexture2FrameRate" );
+		var hasTexture2 = cubeLayer2
+			? material.Set( "g_tCubeTexture2", secondTexture )
+			: BindLayerTexture( host, warn, material, "g_tTexture2", texture2, texture2Animated, texture2FrameRate,
+				"g_flVmtTexture2FrameCount", "g_flVmtTexture2FrameRate" );
 		material.Set( "g_flVmtHasTexture1", hasTexture1 ? 1f : 0f );
 		material.Set( "g_flVmtHasTexture2", hasTexture2 ? 1f : 0f );
+		// UnlitTwoTexture modulates two 2D textures independently of vertex tint
+		// and framebuffer blending. Blue War Games screens omit $vertcoloristint
+		// but still multiply their image and noise, just like the orange grids.
+		material.Set( "g_flVmtMultiplyLayers", !cubeLayer2 && hasTexture1 && hasTexture2 && !definition.GetBool( "$addlayers" ) ? 1f : 0f );
 
 		var color1 = NormalizeColor( definition.GetVector( "$color", definition.GetVector( "$layercolor1", WhiteVector ) ) );
 		var color2 = NormalizeColor( definition.GetVector( "$color2", definition.GetVector( "$layercolor2", WhiteVector ) ) );
@@ -68,6 +78,17 @@ class LegacyMaterialLoader( string materialName ) : ResourceLoader<Titanfall2Mou
 		material.Set( "g_flVmtFresnelSharpness", MathF.Max( 0.001f, definition.GetFloat( "$fresnelsharpness1", 5f ) ) );
 		material.Set( "g_flVmtFresnelInnerStrength", definition.GetFloat( "$fresnelinnerstrength1", 1f ) );
 		material.Set( "g_flVmtFresnelOuterStrength", definition.GetFloat( "$fresnelouterstrength1", 1f ) );
+		var expressions = definition.GetRuntimeExpressions();
+		if ( expressions.Any( static expression => expression.Type.Equals( "TextureTransform", StringComparison.OrdinalIgnoreCase )
+			|| expression.Type.Equals( "TextureScroll", StringComparison.OrdinalIgnoreCase ) ) )
+		{
+			// These proxies are evaluated in source order on the CPU, including
+			// intermediate vector variables. Do not scroll or jitter them again in HLSL.
+			material.Set( "g_vVmtTexture1Scroll", Vector4.Zero );
+			material.Set( "g_vVmtTexture2Scroll", Vector4.Zero );
+			material.Set( "g_flVmtNoiseEnabled", 0f );
+		}
+		Titanfall2MaterialAnimationRegistry.Register( material, resourcePath, expressions );
 		return material;
 	}
 

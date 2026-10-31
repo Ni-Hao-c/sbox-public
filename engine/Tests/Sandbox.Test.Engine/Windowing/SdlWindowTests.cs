@@ -3,6 +3,7 @@ using Sandbox.Engine;
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace EngineTests;
@@ -13,7 +14,9 @@ public unsafe class SdlWindowTests
 	static RenderDeviceInfo_t chainMode;
 	static Vector2 pixelSize;
 	static bool failCreate, failUpdate, modeAvailable, fullscreen, renderTargetsReady;
+	static bool failExclusiveMode, failExclusiveFullscreen, failDesktopFullscreen;
 	static int updates, fullscreenExits;
+	static int fullscreenRequests;
 	static IntPtr fullscreenMode;
 	static readonly List<string> destroyed = new();
 	static readonly List<string> creation = new();
@@ -146,12 +149,62 @@ public unsafe class SdlWindowTests
 		Assert.AreEqual( 0, fullscreenExits );
 	} );
 
+	[DataTestMethod]
+	[DataRow( true, false )]
+	[DataRow( false, true )]
+	public void RejectedExclusiveModeFallsBackToDesktopFullscreen( bool rejectMode, bool rejectFullscreen ) => WithWindow( window =>
+	{
+		modeAvailable = true;
+		failExclusiveMode = rejectMode;
+		failExclusiveFullscreen = rejectFullscreen;
+		Assert.IsTrue( window.SetFullscreen( true, 2560, 1600 ) );
+		Assert.IsTrue( fullscreen );
+		Assert.AreEqual( IntPtr.Zero, fullscreenMode, "A rejected exclusive mode must be cleared before retrying fullscreen." );
+		window.CreateSwapChain( "Test", RenderMultisampleType.RENDER_MULTISAMPLE_NONE, false );
+		Assert.AreEqual( RenderDisplayModeUsage.CooperativeFullscreen, chainMode.m_nModeUsage );
+	} );
+
+	[TestMethod]
+	public void RecoveredExclusiveModeIsAppliedOnlyOnce() => WithWindow( window =>
+	{
+		modeAvailable = failExclusiveFullscreen = true;
+		var gameWindow = (GameWindow)RuntimeHelpers.GetUninitializedObject( typeof( GameWindow ) );
+		typeof( GameWindow ).GetField( "window", BindingFlags.NonPublic | BindingFlags.Instance ).SetValue( gameWindow, window );
+		gameWindow.QueueVideoMode( new( new( true, false, 2560, 1600 ), false, RenderMultisampleType.RENDER_MULTISAMPLE_NONE ) );
+		gameWindow.ApplyPendingMode();
+		Assert.AreEqual( RenderDisplayModeUsage.CooperativeFullscreen, chainMode.m_nModeUsage );
+		Assert.AreEqual( 2, fullscreenRequests );
+		gameWindow.ApplyPendingMode();
+		Assert.AreEqual( 2, fullscreenRequests, "A successful fallback must complete the pending request." );
+	} );
+
+	[TestMethod]
+	public void FailedWindowModeIsNotRetriedEveryFrame() => WithWindow( window =>
+	{
+		modeAvailable = true;
+		failExclusiveFullscreen = failDesktopFullscreen = true;
+		var gameWindow = (GameWindow)RuntimeHelpers.GetUninitializedObject( typeof( GameWindow ) );
+		typeof( GameWindow ).GetField( "window", BindingFlags.NonPublic | BindingFlags.Instance ).SetValue( gameWindow, window );
+		var video = new GameWindow.VideoMode( new( true, false, 2560, 1600 ), false, RenderMultisampleType.RENDER_MULTISAMPLE_NONE );
+		gameWindow.QueueVideoMode( video );
+		Assert.ThrowsException<InvalidOperationException>( gameWindow.ApplyPendingMode );
+		var requests = fullscreenRequests;
+		Assert.IsTrue( requests > 0 );
+		gameWindow.ApplyPendingMode();
+		Assert.AreEqual( requests, fullscreenRequests, "A rejected request must not block every subsequent frame." );
+
+		gameWindow.QueueVideoMode( video );
+		Assert.ThrowsException<InvalidOperationException>( gameWindow.ApplyPendingMode );
+		Assert.IsTrue( fullscreenRequests > requests, "An explicit new request must still be allowed." );
+	} );
+
 	static void WithWindow( Action<SdlWindow> test )
 	{
 		var getSize = Sdl.__N.globalSdl_GetWindowSizeInPixels;
 		var flags = Sdl.__N.globalSdl_GetWindowFlags;
 		var destroyWindow = Sdl.__N.globalSdl_DestroyWindow;
 		var sync = Sdl.__N.globalSdl_SyncWindow;
+		var error = Sdl.__N.globalSdl_GetError;
 		var getDisplay = Sdl.__N.globalSdl_GetDisplayForWindow;
 		var closest = Sdl.__N.globalSdl_GetClosestFullscreenDisplayMode;
 		var setMode = Sdl.__N.globalSdl_SetWindowFullscreenMode;
@@ -171,6 +224,7 @@ public unsafe class SdlWindowTests
 			Sdl.__N.globalSdl_GetWindowFlags = &GetFlags;
 			Sdl.__N.globalSdl_DestroyWindow = &DestroyWindow;
 			Sdl.__N.globalSdl_SyncWindow = &Sync;
+			Sdl.__N.globalSdl_GetError = &GetError;
 			Sdl.__N.globalSdl_GetDisplayForWindow = &GetDisplay;
 			Sdl.__N.globalSdl_GetClosestFullscreenDisplayMode = (delegate* unmanaged< uint, int, int, float, int, out Sdl.DisplayMode, int >)(delegate* unmanaged< uint, int, int, float, int, Sdl.DisplayMode*, int >)&GetClosest;
 			Sdl.__N.globalSdl_SetWindowFullscreenMode = &SetMode;
@@ -186,7 +240,8 @@ public unsafe class SdlWindowTests
 			chainMode = default;
 			pixelSize = new Vector2( 800, 600 );
 			failCreate = failUpdate = fullscreen = modeAvailable = renderTargetsReady = false;
-			updates = fullscreenExits = 0;
+			failExclusiveMode = failExclusiveFullscreen = failDesktopFullscreen = false;
+			updates = fullscreenExits = fullscreenRequests = 0;
 			fullscreenMode = IntPtr.Zero;
 			destroyed.Clear();
 			creation.Clear();
@@ -199,6 +254,7 @@ public unsafe class SdlWindowTests
 			Sdl.__N.globalSdl_GetWindowFlags = flags;
 			Sdl.__N.globalSdl_DestroyWindow = destroyWindow;
 			Sdl.__N.globalSdl_SyncWindow = sync;
+			Sdl.__N.globalSdl_GetError = error;
 			Sdl.__N.globalSdl_GetDisplayForWindow = getDisplay;
 			Sdl.__N.globalSdl_GetClosestFullscreenDisplayMode = closest;
 			Sdl.__N.globalSdl_SetWindowFullscreenMode = setMode;
@@ -223,6 +279,8 @@ public unsafe class SdlWindowTests
 	[UnmanagedCallersOnly]
 	static int Sync( IntPtr window ) => 1;
 	[UnmanagedCallersOnly]
+	static IntPtr GetError() => IntPtr.Zero;
+	[UnmanagedCallersOnly]
 	static uint GetDisplay( IntPtr window ) => 1;
 	[UnmanagedCallersOnly]
 	static int GetClosest( uint display, int width, int height, float refresh, int highDensity, Sdl.DisplayMode* mode )
@@ -231,9 +289,16 @@ public unsafe class SdlWindowTests
 		return modeAvailable ? 1 : 0;
 	}
 	[UnmanagedCallersOnly]
-	static int SetMode( IntPtr window, IntPtr mode ) { fullscreenMode = mode; return 1; }
+	static int SetMode( IntPtr window, IntPtr mode ) { fullscreenMode = mode; return mode != IntPtr.Zero && failExclusiveMode ? 0 : 1; }
 	[UnmanagedCallersOnly]
-	static int SetFullscreen( IntPtr window, int value ) { fullscreen = value != 0; if ( !fullscreen ) fullscreenExits++; return 1; }
+	static int SetFullscreen( IntPtr window, int value )
+	{
+		fullscreenRequests++;
+		if ( value != 0 && (fullscreenMode != IntPtr.Zero ? failExclusiveFullscreen : failDesktopFullscreen) ) return 0;
+		fullscreen = value != 0;
+		if ( !fullscreen ) fullscreenExits++;
+		return 1;
+	}
 	[UnmanagedCallersOnly]
 	static void Flush() => creation.Add( "flush" );
 	[UnmanagedCallersOnly]

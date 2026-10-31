@@ -72,6 +72,9 @@ public sealed partial class ParticleSpriteRenderer : ParticleRenderer, Component
 	[Group( "Rendering" )]
 	[Property] public bool Lighting { get; set; }
 
+	/// <summary>Optional color lookup sampled with the animated texture's red and green channels.</summary>
+	[Property, Group( "Rendering" )] public Texture ColorRamp { get; set; }
+
 	/// <summary>
 	/// Indicates whether the sprite is opaque, optimizing rendering by skipping sorting.
 	/// </summary>

@@ -85,9 +85,10 @@ public class EffectsTests
 	[TestMethod]
 	public void SpriteRefractionGpuLayout()
 	{
-		Assert.AreEqual( 148, Marshal.SizeOf<Sandbox.Rendering.SpriteBatchSceneObject.SpriteData>() );
+		Assert.AreEqual( 152, Marshal.SizeOf<Sandbox.Rendering.SpriteBatchSceneObject.SpriteData>() );
 		Assert.AreEqual( 140, (int)Marshal.OffsetOf<Sandbox.Rendering.SpriteBatchSceneObject.SpriteData>( "NormalTextureHandle" ) );
 		Assert.AreEqual( 144, (int)Marshal.OffsetOf<Sandbox.Rendering.SpriteBatchSceneObject.SpriteData>( "RefractionStrength" ) );
+		Assert.AreEqual( 148, (int)Marshal.OffsetOf<Sandbox.Rendering.SpriteBatchSceneObject.SpriteData>( "ColorRampTextureHandle" ) );
 	}
 
 	/// <summary>

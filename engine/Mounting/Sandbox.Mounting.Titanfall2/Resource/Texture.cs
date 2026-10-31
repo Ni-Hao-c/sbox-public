@@ -5,21 +5,81 @@ class Titanfall2TextureLoader( ITitanfall2AssetSource source, bool animatedVtfAt
 {
 	readonly ITitanfall2AssetSource _source = source;
 	readonly bool _animatedVtfAtlas = animatedVtfAtlas;
+	readonly object _prepareLock = new();
+	PreparedTexture _prepared;
+	Action<long> _releaseBudget;
+	bool _loaded;
+
+	sealed record PreparedTexture( RpakTextureData? Packed, byte[] Bytes, string Error )
+	{
+		public long Length => Packed?.Data?.LongLength ?? Bytes?.LongLength ?? 0;
+	}
+
+	PreparedTexture ReadData()
+	{
+		if ( _source is RpakTextureAssetSource packed )
+		{
+			var identity = Titanfall2StreamingSettings.ProcessedCache
+				? $"{Host.ContentFingerprint}|{Path}|texture:{Titanfall2StreamingSettings.TextureMaxDimension}" : null;
+			if ( identity is not null && Titanfall2TextureCache.TryRead( identity, out var cached ) ) return new( cached, null, null );
+			if ( !packed.TryReadTexture( out var texture, out var error ) ) return new( null, null, error );
+			if ( identity is not null ) Titanfall2TextureCache.Write( identity, texture );
+			return new( texture, null, null );
+		}
+		return _source.TryReadAllBytes( out var bytes, out var readError )
+			? new( null, bytes, null ) : new( null, null, readError );
+	}
+
+	// Only CPU data may be prepared by a worker. Texture creation stays in Load().
+	internal void Prepare( Func<long, bool> reserve, Action<long> release )
+	{
+		lock ( _prepareLock )
+		{
+			if ( _loaded || _prepared is not null ) return;
+			var data = ReadData();
+			var withinBudget = reserve( data.Length );
+			_prepared = data;
+			// Keep an over-budget payload instead of dropping it. The bytes are already
+			// decoded, so discarding them would only force Load() to decode the same
+			// texture again on the main thread; the pool still stops starting new jobs
+			// until this one is consumed.
+			_releaseBudget = withinBudget ? release : null;
+		}
+	}
+
+	internal void ClearPreparation()
+	{
+		lock ( _prepareLock )
+		{
+			if ( _prepared is not null ) _releaseBudget?.Invoke( _prepared.Length );
+			_prepared = null;
+			_releaseBudget = null;
+		}
+	}
 
 	protected override object Load()
 	{
-		if ( _source is ITitanfall2TextureSource packedTexture )
+		PreparedTexture prepared;
+		lock ( _prepareLock )
 		{
-			if ( packedTexture.TryCreateTexture( out var runtimeTexture, out var packedError ) ) return runtimeTexture;
+			prepared = _prepared ?? ReadData();
+			ClearPreparation();
+			_loaded = true;
+		}
+		if ( prepared.Error is not null )
+		{
+			Titanfall2Log.Warning( $"Failed to read Titanfall 2 texture '{Path}': {prepared.Error}" );
+			return Texture.White;
+		}
+		if ( prepared.Packed is { } packedTexture )
+		{
+			if ( RpakTextureDecoder.TryCreate( packedTexture, out var runtimeTexture, out var packedError ) ) return runtimeTexture;
 			Titanfall2Log.Warning( $"Failed to decode Titanfall 2 RPAK texture '{Path}': {packedError}" );
 			return Texture.White;
 		}
 
-		if ( !_source.TryReadAllBytes( out var data, out var error ) )
-		{
-			Titanfall2Log.Warning( $"Failed to read Titanfall 2 texture '{Path}': {error}" );
-			return Texture.White;
-		}
+		var data = prepared.Bytes;
+		string error;
 
 		if ( VtfTextureDecoder.IsVtf( data ) )
 		{
@@ -29,9 +89,6 @@ class Titanfall2TextureLoader( ITitanfall2AssetSource source, bool animatedVtfAt
 		}
 
 		if ( TryLoadDds( data, out var tex ) )
-			return tex;
-
-		if ( TryLoadTga( data, out tex ) )
 			return tex;
 
 		Titanfall2Log.Warning( $"Unsupported texture format: {Path}" );
@@ -54,17 +111,5 @@ class Titanfall2TextureLoader( ITitanfall2AssetSource source, bool animatedVtfAt
 			tex = null;
 			return false;
 		}
-	}
-
-	static bool TryLoadTga( byte[] data, out Texture tex )
-	{
-		tex = null;
-		if ( data.Length < 18 )
-			return false;
-
-		if ( data[2] != 2 && data[2] != 3 && data[2] != 10 )
-			return false;
-
-		return false;
 	}
 }

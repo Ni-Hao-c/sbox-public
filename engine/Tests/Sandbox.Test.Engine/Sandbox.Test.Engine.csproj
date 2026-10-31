@@ -12,6 +12,7 @@
 	</ItemGroup>
 
 	<ItemGroup>
+		<ProjectReference Include="..\..\Mounting\Sandbox.Mounting.Titanfall2\Sandbox.Mounting.Titanfall2.csproj" />
 		<ProjectReference Include="..\..\Sandbox.Bind\Sandbox.Bind.csproj" />
 		<ProjectReference Include="..\..\Sandbox.Generator\Sandbox.Generator.csproj" />
 		<ProjectReference Include="..\..\Sandbox.System\Sandbox.System.csproj" />

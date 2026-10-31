@@ -33,6 +33,8 @@ COMMON
 struct VertexInput
 {
 	#include "common/vertexinput.hlsl"
+	float4 vColor : COLOR0 < Semantic( Color ); >;
+	uint nT2InstanceIndex : SV_InstanceID;
 };
 
 struct PixelInput
@@ -42,6 +44,7 @@ struct PixelInput
 	float3 vNormalOs : TEXCOORD15;
 	float4 vTangentUOs_flTangentVSign : TANGENT	< Semantic( TangentU_SignV ); >;
 	float4 vProbeTint : COLOR1;
+	nointerpolation uint nT2ProbeInstance : TEXCOORD12;
 };
 
 VS
@@ -51,8 +54,10 @@ VS
 	PixelInput MainVs( VertexInput v )
 	{
 		PixelInput i = ProcessVertex( v );
+		i.vVertexColor *= float4( SrgbGammaToLinear( v.vColor.rgb ), v.vColor.a );
 		i.vPositionOs = v.vPositionOs.xyz;
 		i.vProbeTint = GetExtraPerInstanceShaderData( v.nInstanceTransformID ).vTint;
+		i.nT2ProbeInstance = v.nT2InstanceIndex;
 
 		VS_DecodeObjectSpaceNormalAndTangent( v, i.vNormalOs, i.vTangentUOs_flTangentVSign );
 
@@ -84,15 +89,16 @@ PS
 	CreateInputTexture2D( Distortion, Linear, 8, "None", "_distortion", ",0/,0/0", Default4( 0.50, 0.50, 0.00, 1.00 ) );
 	Texture2D g_tDetail < Channel( RGBA, Box( Detail ), Srgb ); OutputFormat( DXT5 ); SrgbRead( true ); >;
 	Texture2D g_tDistortion < Channel( RGBA, Box( Distortion ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
-	TextureCube g_tEnvironment < Attribute( "g_tEnvironment" ); >;
-	float g_flT2GlossScale < Attribute( "g_flT2GlossScale" ); Default( 1.0 ); >;
-	float4 g_vT2SpecularTint < Attribute( "g_vT2SpecularTint" ); Default4( 1.0, 1.0, 1.0, 1.0 ); >;
-	float g_flT2EmissiveStrength < Attribute( "g_flT2EmissiveStrength" ); Default( 1.0 ); >;
-	float g_flT2DetailBlend < Attribute( "g_flT2DetailBlend" ); Default( 0.0 ); >;
-	float4 g_vT2UvDistortion < Attribute( "g_vT2UvDistortion" ); Default4( 0.0, 0.0, 0.0, 0.0 ); >;
-	float g_flT2HasEnvironment < Attribute( "g_flT2HasEnvironment" ); Default( 0.0 ); >;
-	float g_flT2EnvironmentIntensity < Attribute( "g_flT2EnvironmentIntensity" ); Default( 1.0 ); >;
-	float g_flT2FresnelStrength < Attribute( "g_flT2FresnelStrength" ); Default( 0.0 ); >;
+	CreateInputTextureCube( Environment, Srgb, 8, "None", "_cube", "Reflection", Default4( 0, 0, 0, 1 ) );
+	CreateTextureCube( g_tEnvironment ) < Channel( RGBA, Box( Environment ), Srgb ); OutputFormat( RGBA8888 ); SrgbRead( true ); >;
+	float g_flT2GlossScale < Default( 1.0 ); >;
+	float4 g_vT2SpecularTint < Default4( 1.0, 1.0, 1.0, 1.0 ); >;
+	float g_flT2EmissiveStrength < Default( 1.0 ); >;
+	float g_flT2DetailBlend < Default( 0.0 ); >;
+	float4 g_vT2UvDistortion < Default4( 0.0, 0.0, 0.0, 0.0 ); >;
+	float g_flT2HasEnvironment < Default( 0.0 ); >;
+	float g_flT2EnvironmentIntensity < Default( 1.0 ); >;
+	float g_flT2FresnelStrength < Default( 0.0 ); >;
 	float2 T2ApplyDistortion( float2 uv ) { float2 vector = Tex2DS( g_tDistortion, g_sAniso, uv ).rg * 2.0 - 1.0; return uv + vector * g_vT2UvDistortion.xy; }
 	float3 T2ApplyDetail( float3 albedo, float2 uv ) { float3 detail = Tex2DS( g_tDetail, g_sAniso, uv ).rgb * 2.0; return albedo * lerp( float3( 1.0, 1.0, 1.0 ), detail, saturate( g_flT2DetailBlend ) ); }
 	float T2Roughness( float gloss ) { return 1.0 - saturate( gloss * max( 0.0, g_flT2GlossScale ) ); }
@@ -107,12 +113,12 @@ PS
 		return g_tEnvironment.SampleLevel( g_sAniso, reflectionDirection, saturate( roughness ) * 5.0 ).rgb * strength;
 	}
 
-	float4 g_vT2Uv1RotScale < Attribute( "g_vT2Uv1RotScale" ); Default4( 1.0, 0.0, 0.0, 1.0 ); >;
-	float4 g_vT2Uv1Translate < Attribute( "g_vT2Uv1Translate" ); Default4( 0.0, 0.0, 0.0, 0.0 ); >;
-	float4 g_vT2AlbedoTint < Attribute( "g_vT2AlbedoTint" ); Default4( 1.0, 1.0, 1.0, 1.0 ); >;
-	float4 g_vT2EmissiveTint < Attribute( "g_vT2EmissiveTint" ); Default4( 1.0, 1.0, 1.0, 1.0 ); >;
-	float g_flT2MaterialOpacity < Attribute( "g_flT2MaterialOpacity" ); Default( 1.0 ); >;
-	float g_flT2AlphaTestReference < Attribute( "g_flT2AlphaTestReference" ); Default( 0.5 ); >;
+	float4 g_vT2Uv1RotScale < Default4( 1.0, 0.0, 0.0, 1.0 ); >;
+	float4 g_vT2Uv1Translate < Default4( 0.0, 0.0, 0.0, 0.0 ); >;
+	float4 g_vT2AlbedoTint < Default4( 1.0, 1.0, 1.0, 1.0 ); >;
+	float4 g_vT2EmissiveTint < Default4( 1.0, 1.0, 1.0, 1.0 ); >;
+	float g_flT2MaterialOpacity < Default( 1.0 ); >;
+	float g_flT2AlphaTestReference < Default( 0.5 ); >;
 
 	float2 T2Uv1( float2 uv )
 	{
@@ -120,12 +126,17 @@ PS
 		return transformed + g_vT2Uv1Translate.xy * lerp( 1.0, g_flTime, saturate( g_vT2Uv1Translate.z ) );
 	}
 
+	float g_flUseVertexColor < Default( 0 ); >;
+	#define T2_HAS_PROBE_INDEX
+	#include "titanfall2_surface.hlsl"
+
 	float4 MainPs( PixelInput i ) : SV_Target0
 	{
 		float2 uv = T2ApplyDistortion( T2Uv1( i.vTextureCoords.xy ) );
 		Material m = Material::Init();
 		m.Albedo = float3( 1, 1, 1 );
-		m.Normal = float3( 0, 0, 1 );
+		// Keep initialization finite; the decoded normal is assigned before lighting.
+		m.Normal = normalize( i.vNormalWs );
 		m.Roughness = 1;
 		m.Metalness = 0;
 		m.AmbientOcclusion = 1;
@@ -134,14 +145,15 @@ PS
 		m.Emission = float3( 0, 0, 0 );
 		m.Transmission = 0;
 
-		float4 albedo = Tex2DS( g_tAlbedo, g_sAniso, uv );
-		float gloss = Tex2DS( g_tGloss, g_sAniso, uv ).r;
-		float3 specular = Tex2DS( g_tSpecular, g_sAniso, uv ).rgb;
-		float ao = Tex2DS( g_tAO, g_sAniso, uv ).r;
-		float opacity = Tex2DS( g_tOpacity, g_sAniso, uv ).r;
-		float4 emissive = Tex2DS( g_tEmissive, g_sAniso, uv );
+		float4 albedo; float gloss; float3 specular; float3 surfaceNormal;
+		T2ReadSurface( i, uv, albedo, gloss, specular, surfaceNormal );
+		float2 rawUv = i.vTextureCoords.xy;
+		float ao = Tex2DS( g_tAO, g_sAniso, T2SurfaceUv( rawUv, uv, g_vT2AuxUvChannels.z ) ).r;
+		float opacity = Tex2DS( g_tOpacity, g_sAniso, T2SurfaceUv( rawUv, uv, g_vT2AuxUvChannels.x ) ).r;
+		float3 emissive = T2ReadEmissive( rawUv, uv );
 
-		m.Albedo = T2ApplyDetail( albedo.xyz, uv ) * g_vT2AlbedoTint.rgb * i.vProbeTint.rgb;
+		m.Normal = surfaceNormal;
+		m.Albedo = T2ApplyDetail( albedo.xyz, uv ) * g_vT2AlbedoTint.rgb * lerp( float3( 1, 1, 1 ), i.vVertexColor.rgb, g_flUseVertexColor ) * i.vProbeTint.rgb;
 		m.Roughness = T2Roughness( gloss );
 		m.Metalness = T2Metalness( specular );
 		m.AmbientOcclusion = ao;
@@ -149,13 +161,9 @@ PS
 		m.Emission = emissive.xyz * g_vT2EmissiveTint.rgb * g_flT2EmissiveStrength * i.vProbeTint.rgb;
 		m.Emission += T2Environment( i.vPositionWithOffsetWs + g_vHighPrecisionLightingOffsetWs.xyz, m.Normal, m.Roughness );
 
-		// Titanfall's packed tangent stream is not reconstructed by ModelLoader yet.
-		// Using a tangent-space normal map without that basis produces a zero normal
-		// and turns the entire model black, so use the decoded vertex normal for now.
-		m.Normal = i.vNormalWs;
 		m.TextureCoords = uv;
 
-		float4 shade = ShadingModelStandard::Shade( i, m );
+		float4 shade = T2ShadeSurface( i, m, specular * g_vT2SpecularTint.rgb );
 		return shade;
 	}
 }

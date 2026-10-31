@@ -65,7 +65,8 @@ sealed class Titanfall2VmtDefinition
 			GetBool( "$vertexcolor" ),
 			GetBool( "$vertexalpha" ),
 			ShaderName.Contains( "Unlit", StringComparison.OrdinalIgnoreCase )
-				|| ShaderName.Equals( "Basic", StringComparison.OrdinalIgnoreCase ),
+				|| ShaderName.Equals( "Basic", StringComparison.OrdinalIgnoreCase )
+				|| ShaderName.Equals( "SpriteCard", StringComparison.OrdinalIgnoreCase ),
 			inferred.IsWater );
 	}
 
@@ -111,9 +112,11 @@ sealed class Titanfall2VmtDefinition
 		foreach ( var proxy in EnumerateProxies( "TextureScroll" ) )
 		{
 			var target = GetBlockRawString( proxy, "texturescrollvar" ) ?? string.Empty;
+			if ( !target.Equals( "$basetexturetransform", StringComparison.OrdinalIgnoreCase )
+				&& !target.Equals( "$texture2transform", StringComparison.OrdinalIgnoreCase ) ) continue;
 			var targetsSecond = target.Contains( "texture2", StringComparison.OrdinalIgnoreCase );
 			if ( targetsSecond != texture2 ) continue;
-			var rate = GetBlockFloat( proxy, "texturescrollrate", 0f );
+			var rate = GetBlockFloat( proxy, "texturescrollrate", 1f );
 			var angle = GetBlockFloat( proxy, "texturescrollangle", 0f ) * MathF.PI / 180f;
 			velocity = new Vector2( MathF.Cos( angle ) * rate, MathF.Sin( angle ) * rate );
 			return true;
@@ -183,9 +186,11 @@ sealed class Titanfall2VmtDefinition
 		var expressions = new List<Titanfall2RuntimeExpression>();
 		foreach ( var pair in _root.Values )
 		{
-			if ( !pair.Key.StartsWith( '$' ) || !TryParseFloat( pair.Value, out var value ) ) continue;
-			expressions.Add( new Titanfall2RuntimeExpression(
-				"Constant", pair.Key, null, null, new Vector4( value, 0f, 0f, 0f ) ) );
+			if ( !pair.Key.StartsWith( '$' ) ) continue;
+			if ( TryParseFloat( pair.Value, out var value ) )
+				expressions.Add( new Titanfall2RuntimeExpression( "Constant", pair.Key, null, null, new Vector4( value, 0f, 0f, 0f ) ) );
+			else if ( TryParseVector( pair.Value, out var vector ) )
+				expressions.Add( new Titanfall2RuntimeExpression( "VectorConstant", pair.Key, null, null, vector ) );
 		}
 
 		foreach ( var proxies in _root.Children.Where( static child => child.Name.Equals( "Proxies", StringComparison.OrdinalIgnoreCase ) ) )
@@ -202,24 +207,54 @@ sealed class Titanfall2VmtDefinition
 					?? GetBlockRawString( proxy, "srcvar" );
 				var sourceB = GetBlockRawString( proxy, "srcvar2" )
 					?? GetBlockRawString( proxy, "sourcevar2" );
+				string sourceC = null;
+				string sourceD = null;
+				if ( type.Equals( "TextureTransform", StringComparison.OrdinalIgnoreCase ) )
+				{
+					sourceA = GetBlockRawString( proxy, "translatevar" );
+					sourceB = GetBlockRawString( proxy, "rotatevar" );
+					sourceC = GetBlockRawString( proxy, "scalevar" );
+				}
+				else if ( type.Equals( "TextureScroll", StringComparison.OrdinalIgnoreCase ) )
+				{
+					sourceA = GetBlockRawString( proxy, "texturescrollrate" );
+					sourceB = GetBlockRawString( proxy, "texturescrollangle" );
+					sourceC = GetBlockRawString( proxy, "texturescale" );
+				}
+				if ( type.Equals( "LessOrEqual", StringComparison.OrdinalIgnoreCase ) )
+				{
+					sourceC = GetBlockRawString( proxy, "lessEqualVar" );
+					sourceD = GetBlockRawString( proxy, "greaterVar" );
+				}
 				var parameters = type.ToLowerInvariant() switch
 				{
 					"currenttime" => new Vector4( GetBlockFloat( proxy, "scale", 1f ), 0f, 0f, 0f ),
 					"linearramp" => new Vector4( GetBlockFloat( proxy, "initialvalue", 0f ), GetBlockFloat( proxy, "rate", 1f ), 0f, 0f ),
 					"sine" => new Vector4( GetBlockFloat( proxy, "sinemin", 0f ), GetBlockFloat( proxy, "sinemax", 1f ),
-						MathF.Max( 0.0001f, GetBlockFloat( proxy, "sineperiod", 1f ) ), GetBlockFloat( proxy, "timeoffset", 0f ) ),
+						GetBlockFloat( proxy, "sineperiod", 1f ), GetBlockFloat( proxy, "timeoffset", 0f ) ),
 					"clamp" => new Vector4( GetBlockFloat( proxy, "min", 0f ), GetBlockFloat( proxy, "max", 1f ), 0f, 0f ),
 					"remapvalclamped" => new Vector4( GetBlockFloat( proxy, "sourcemin", 0f ), GetBlockFloat( proxy, "sourcemax", 1f ),
 						GetBlockFloat( proxy, "resultmin", 0f ), GetBlockFloat( proxy, "resultmax", 1f ) ),
+					"wrapminmax" => new Vector4( GetBlockFloat( proxy, "minval", 0f ), GetBlockFloat( proxy, "maxval", 1f ), 0f, 0f ),
+					"exponential" => new Vector4( GetBlockFloat( proxy, "scale", 1f ), GetBlockFloat( proxy, "offset", 0f ),
+						GetBlockFloat( proxy, "minval", -float.MaxValue ), GetBlockFloat( proxy, "maxval", float.MaxValue ) ),
+					"gaussiannoise" => new Vector4( GetBlockFloat( proxy, "mean", 0f ), GetBlockFloat( proxy, "halfwidth", 1f ),
+						GetBlockFloat( proxy, "minval", -float.MaxValue ), GetBlockFloat( proxy, "maxval", float.MaxValue ) ),
 					"uniformnoise" => new Vector4( GetBlockFloat( proxy, "minval", 0f ), GetBlockFloat( proxy, "maxval", 1f ), 0f, 0f ),
 					"entityrandom" => new Vector4( GetBlockFloat( proxy, "scale", 1f ), GetBlockFloat( proxy, "minval", 0f ),
 						GetBlockFloat( proxy, "maxval", 1f ), 0f ),
-					"texturescroll" => new Vector4( GetBlockFloat( proxy, "texturescrollrate", 0f ),
-						GetBlockFloat( proxy, "texturescrollangle", 0f ), 0f, 0f ),
+					"texturescroll" => new Vector4( GetBlockFloat( proxy, "texturescrollrate", 1f ),
+						GetBlockFloat( proxy, "texturescrollangle", 0f ), GetBlockFloat( proxy, "texturescale", 1f ), 0f ),
+					"texturetransform" => new Vector4( ResolveBlockVector( proxy, "translatevar", Vector4.Zero ).x,
+						ResolveBlockVector( proxy, "translatevar", Vector4.Zero ).y,
+						ResolveBlockFloat( proxy, "rotatevar", 0f ), ResolveBlockFloat( proxy, "scalevar", 1f ) ),
 					_ => Vector4.Zero
 				};
-				if ( string.IsNullOrWhiteSpace( target ) && type is not ("TextureTransform" or "AnimatedTexture") ) continue;
-				expressions.Add( new Titanfall2RuntimeExpression( type, target, sourceA, sourceB, parameters ) );
+				// Source proxy names are case-insensitive; compare the same way as the branches above.
+				if ( string.IsNullOrWhiteSpace( target )
+					&& !type.Equals( "TextureTransform", StringComparison.OrdinalIgnoreCase )
+					&& !type.Equals( "AnimatedTexture", StringComparison.OrdinalIgnoreCase ) ) continue;
+				expressions.Add( new Titanfall2RuntimeExpression( type, target, sourceA, sourceB, parameters, sourceC, sourceD ) );
 			}
 		}
 		return expressions;
@@ -345,9 +380,16 @@ static class Titanfall2VmtReader
 		}
 	}
 
-	static bool TryReadBlock( TokenReader reader, Titanfall2VmtDefinition.VmtBlock block, out string error )
+	static bool TryReadBlock( TokenReader reader, Titanfall2VmtDefinition.VmtBlock block, out string error, int depth = 0 )
 	{
 		error = null;
+		// Nested blocks recurse; a corrupt file of repeated "k {" would otherwise
+		// end in an uncatchable StackOverflowException instead of a parse error.
+		if ( depth > 64 )
+		{
+			error = $"VMT block '{block.Name}' is nested too deeply.";
+			return false;
+		}
 		while ( reader.TryRead( out var key ) )
 		{
 			if ( key == "}" ) return true;
@@ -364,7 +406,7 @@ static class Titanfall2VmtReader
 			if ( value == "{" )
 			{
 				var child = new Titanfall2VmtDefinition.VmtBlock( key );
-				if ( !TryReadBlock( reader, child, out error ) ) return false;
+				if ( !TryReadBlock( reader, child, out error, depth + 1 ) ) return false;
 				block.Children.Add( child );
 			}
 			else if ( value == "}" )

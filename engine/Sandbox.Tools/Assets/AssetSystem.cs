@@ -1,4 +1,4 @@
-﻿using NativeEngine;
+using NativeEngine;
 using System;
 using System.Collections.Concurrent;
 using System.ComponentModel;
@@ -14,13 +14,18 @@ public static partial class AssetSystem
 	static Logger log = new Logger( "AssetSystem" );
 
 	[SkipHotload]
-	static Dictionary<ulong, Asset> allAssets = new();
+	static readonly ConcurrentDictionary<ulong, Asset> allAssets = new();
 
 	[SkipHotload] static ConcurrentDictionary<string, Asset> assetsByPath = new( StringComparer.OrdinalIgnoreCase );
 	static readonly Lock MountedAssetLock = new();
 
 	/// <summary>
 	/// All the assets that are being tracked by the asset system. Does not include deleted assets.
+	/// The backing dictionary is concurrent on purpose: mounted asset sources add to it from an async
+	/// continuation while the main thread enumerates this view, and enumerating a plain Dictionary
+	/// during a write throws "Collection was modified" for callers that do not copy it first
+	/// (see CloudAsset.GetAssetReferenceSources). Copying here would instead allocate the whole
+	/// asset list on every call, and would still enumerate the live dictionary while copying.
 	/// </summary>
 	public static IEnumerable<Asset> All => allAssets.Values.Where( x => !x.IsDeleted );
 	static bool HasChanges;
@@ -103,7 +108,7 @@ public static partial class AssetSystem
 
 		// Can it ever come back??
 		UpdateQueue.Remove( a );
-		allAssets.Remove( index );
+		allAssets.TryRemove( index, out _ );
 		a.OnRemoved();
 
 	}

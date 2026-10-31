@@ -39,10 +39,19 @@ static class Titanfall2CollisionFilter
 
 	internal static bool ShouldIncludeMaterial( string materialName, Titanfall2MaterialMetadata metadata )
 	{
-		if ( metadata.IsDecal || MaterialLoader.IsGodrayMaterial( materialName ) )
+		// Retail CM marks liquid volumes 0x20 and block-light tool faces 0x480; neither
+		// contains a player-solid bit, so their render faces must not become floors or walls.
+		if ( metadata.IsDecal || metadata.IsWater || MaterialLoader.IsGodrayMaterial( materialName )
+			|| IsNonSolidToolName( materialName ) )
 			return false;
 
 		return !IsVisualEffectName( materialName );
+	}
+
+	internal static bool IsNonSolidToolName( string value )
+	{
+		if ( string.IsNullOrWhiteSpace( value ) ) return false;
+		return value.Replace( '\\', '/' ).Contains( "tools/toolsblocklight", StringComparison.OrdinalIgnoreCase );
 	}
 
 	internal static bool IsVisualEffectName( string value )

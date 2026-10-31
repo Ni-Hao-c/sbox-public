@@ -331,6 +331,15 @@ static class PakFileDecoder
 			return false;
 		}
 		if ( distance == 0 ) return true;
+		// Non-overlapping matches are a plain block copy; only overlapping (pattern
+		// replicating) matches need the forward byte loop. This runs for every match
+		// of every compressed RPAK, so the per-byte loop dominated decode time.
+		var copyCount = Math.Max( count, physicalCount );
+		if ( distance >= (ulong)copyCount && outputPosition + (uint)copyCount <= (ulong)output.Length )
+		{
+			output.AsSpan( (int)(outputPosition - distance), copyCount ).CopyTo( output.AsSpan( (int)outputPosition, copyCount ) );
+			return true;
+		}
 		for ( var index = 0; index < count; index++ )
 			output[(int)outputPosition + index] = output[(int)(outputPosition - distance) + index];
 		for ( var index = count; index < physicalCount; index++ )

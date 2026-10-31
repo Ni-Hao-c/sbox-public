@@ -1,0 +1,135 @@
+HEADER
+{
+	Description = "Titanfall 2 legacy UnlitTwoTexture with a projected sky cubemap";
+}
+
+FEATURES
+{
+	#include "common/features.hlsl"
+}
+
+MODES
+{
+	Forward();
+	Depth();
+}
+
+COMMON
+{
+	#define S_TRANSLUCENT 0
+	#define S_RENDER_BACKFACES 1
+
+	#include "common/shared.hlsl"
+	#include "procedural.hlsl"
+
+	#define CUSTOM_MATERIAL_INPUTS
+}
+
+struct VertexInput
+{
+	#include "common/vertexinput.hlsl"
+	float4 vColor : COLOR0 < Semantic( Color ); >;
+};
+
+struct PixelInput
+{
+	#include "common/pixelinput.hlsl"
+};
+
+VS
+{
+	#include "common/vertex.hlsl"
+
+	PixelInput MainVs( VertexInput v )
+	{
+		PixelInput i = ProcessVertex( v );
+		i.vVertexColor *= float4( SrgbGammaToLinear( v.vColor.rgb ), v.vColor.a );
+		return FinalizeVertex( i );
+	}
+}
+
+PS
+{
+	#include "common/pixel.hlsl"
+	#include "common/imported_height_fog.hlsl"
+
+	CreateInputTexture2D( Texture1, Srgb, 8, "None", "_color", ",0/,0/0", Default4( 0.0, 0.0, 0.0, 1.0 ) );
+	CreateInputTextureCube( CubeTexture2, Srgb, 8, "None", "_cube", ",0/,0/0", Default4( 0.0, 0.0, 0.0, 1.0 ) );
+	Texture2D g_tTexture1 < Channel( RGBA, Box( Texture1 ), Srgb ); OutputFormat( DXT5 ); SrgbRead( true ); >;
+	CreateTextureCube( g_tCubeTexture2 ) < Channel( RGBA, Box( CubeTexture2 ), Srgb ); OutputFormat( RGBA8888 ); SrgbRead( true ); >;
+
+	// These are Material.Set parameters, not per-scene-object RenderAttributes.
+	float4 g_vVmtColor1 < Default4( 1.0, 1.0, 1.0, 1.0 ); >;
+	float4 g_vVmtColor2 < Default4( 1.0, 1.0, 1.0, 1.0 ); >;
+	float4 g_vVmtTexture1Transform < Default4( 1.0, 0.0, 0.0, 0.0 ); >;
+	float4 g_vVmtTexture2Transform < Default4( 1.0, 0.0, 0.0, 0.0 ); >;
+	float4 g_vVmtTexture1Scroll < Default4( 0.0, 0.0, 0.0, 0.0 ); >;
+	float4 g_vVmtTexture2Scroll < Default4( 0.0, 0.0, 0.0, 0.0 ); >;
+	float4 g_vVmtNoiseMinimum < Default4( 0.0, 0.0, 0.0, 0.0 ); >;
+	float4 g_vVmtNoiseMaximum < Default4( 0.0, 0.0, 0.0, 0.0 ); >;
+	float g_flVmtLayerAlpha1 < Default( 1.0 ); >;
+	float g_flVmtLayerAlpha2 < Default( 1.0 ); >;
+	float g_flVmtHasTexture1 < Default( 0.0 ); >;
+	float g_flVmtHasTexture2 < Default( 0.0 ); >;
+	float g_flVmtUseVertexColor < Default( 0.0 ); >;
+	float g_flVmtTexture1FrameCount < Default( 1.0 ); >;
+	float g_flVmtTexture2FrameCount < Default( 1.0 ); >;
+	float g_flVmtTexture1FrameRate < Default( 0.0 ); >;
+	float g_flVmtTexture2FrameRate < Default( 0.0 ); >;
+	float g_flVmtNoiseEnabled < Default( 0.0 ); >;
+	float g_flVmtNoiseRate < Default( 30.0 ); >;
+	float g_flVmtFresnelEnabled < Default( 0.0 ); >;
+	float g_flVmtFresnelSharpness < Default( 5.0 ); >;
+	float g_flVmtFresnelInnerStrength < Default( 1.0 ); >;
+	float g_flVmtFresnelOuterStrength < Default( 1.0 ); >;
+
+	float2 VmtRandom2( float seed )
+	{
+		return frac( sin( float2( seed * 12.9898 + 78.233, seed * 39.3468 + 11.135 ) ) * 43758.5453 );
+	}
+
+	float2 VmtTransformUv( float2 uv, float4 transform, float4 scroll, float2 noise )
+	{
+		float sine = sin( transform.y );
+		float cosine = cos( transform.y );
+		float2 centered = (uv - 0.5) * transform.x;
+		float2 rotated = float2( centered.x * cosine - centered.y * sine, centered.x * sine + centered.y * cosine );
+		return rotated + 0.5 + transform.zw + scroll.xy * g_flTime + noise;
+	}
+
+	float2 VmtAtlasUv( float2 uv, float frameCount, float frameRate )
+	{
+		float count = max( 1.0, floor( frameCount + 0.5 ) );
+		float frame = frameRate > 0.0 ? fmod( floor( g_flTime * frameRate ), count ) : 0.0;
+		return float2( frac( uv.x ), (frac( uv.y ) + frame) / count );
+	}
+
+	float4 MainPs( PixelInput i ) : SV_Target0
+	{
+		if ( DepthNormals::WantsDepthNormals() ) return DepthNormals::Output( normalize( i.vNormalWs ), 1, 1 );
+		float noiseStep = floor( g_flTime * max( 0.001, g_flVmtNoiseRate ) );
+		float2 noise = lerp( g_vVmtNoiseMinimum.xy, g_vVmtNoiseMaximum.xy, VmtRandom2( noiseStep ) )
+			* saturate( g_flVmtNoiseEnabled );
+		float2 uv1 = VmtTransformUv( i.vTextureCoords.xy, g_vVmtTexture1Transform, g_vVmtTexture1Scroll, 0.0 );
+		float2 uv2 = VmtTransformUv( i.vTextureCoords.xy, g_vVmtTexture2Transform, g_vVmtTexture2Scroll, noise );
+		float4 layer1 = Tex2DS( g_tTexture1, g_sAniso, VmtAtlasUv( uv1, g_flVmtTexture1FrameCount, g_flVmtTexture1FrameRate ) );
+		float3 worldPosition = i.vPositionWithOffsetWs + g_vHighPrecisionLightingOffsetWs.xyz;
+		float3 viewDirection = normalize( g_vCameraPositionWs.xyz - worldPosition );
+		// This is a view through a screen, not a reflection in its surface normal.
+		float3 layer2 = g_tCubeTexture2.SampleLevel( g_sBilinearClamp, -viewDirection, 0 ).rgb;
+		float3 vertexTint = lerp( float3( 1.0, 1.0, 1.0 ), i.vVertexColor.rgb, saturate( g_flVmtUseVertexColor ) );
+		float hasTexture1 = saturate( g_flVmtHasTexture1 );
+		float hasTexture2 = saturate( g_flVmtHasTexture2 );
+		float edge = pow( 1.0 - saturate( abs( dot( normalize( i.vNormalWs ), viewDirection ) ) ),
+			max( 0.001, g_flVmtFresnelSharpness ) );
+		float fresnelStrength = lerp( g_flVmtFresnelInnerStrength, g_flVmtFresnelOuterStrength, edge );
+		float3 color = (layer1.rgb * g_vVmtColor1.rgb * g_flVmtLayerAlpha1 * hasTexture1
+			+ layer2 * g_vVmtColor2.rgb * g_flVmtLayerAlpha2 * hasTexture2) * vertexTint;
+		color *= lerp( 1.0, fresnelStrength, saturate( g_flVmtFresnelEnabled ) );
+
+		// Opaque VMTs often use the texture alpha channel for packed auxiliary
+		// data. TextureScroll only changes UVs and must not turn such surfaces
+		// into translucent geometry.
+		return float4( ApplyImportedHeightFog( color, worldPosition ), 1.0 );
+	}
+}

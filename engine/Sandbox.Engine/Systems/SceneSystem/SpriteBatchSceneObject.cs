@@ -23,6 +23,7 @@ internal sealed class SpriteBatchSceneObject : SceneCustomObject
 	private static readonly uint[] ZeroUint = [0];
 	private readonly GpuBuffer<uint> SpriteAtomicCounter;
 	private readonly CommandList _commandList = new( "SpriteBatch" );
+	private readonly Scene _scene;
 
 	private static Material SpriteMaterial = Material.FromShader( "sprite/sprite_ps.shader" );
 
@@ -83,6 +84,7 @@ internal sealed class SpriteBatchSceneObject : SceneCustomObject
 		/// Maximum distortion in render pixels before normal-map scaling, independent of opacity.
 		/// </summary>
 		public float RefractionStrength;
+		public int ColorRampTextureHandle;
 		public SpriteData()
 		{
 
@@ -212,6 +214,7 @@ internal sealed class SpriteBatchSceneObject : SceneCustomObject
 
 	public SpriteBatchSceneObject( Scene scene ) : base( scene.SceneWorld )
 	{
+		_scene = scene;
 		InitializeSpriteMesh();
 
 		// GPU buffers
@@ -642,6 +645,9 @@ internal sealed class SpriteBatchSceneObject : SceneCustomObject
 		var attributes = RenderAttributes.Pool.Get();
 		try
 		{
+			// Custom draws supply their own attribute block. Preserve scene-level
+			// shader data such as imported height fog before adding batch inputs.
+			_scene.RenderAttributes.MergeTo( attributes );
 			attributes.SetCombo( "D_BLEND", _renderAdditive ? 1 : 0 );
 			attributes.SetCombo( "D_OPAQUE", _renderOpaque ? 1 : 0 );
 			attributes.SetCombo( "D_TEXT", _renderHasText ? 1 : 0 );

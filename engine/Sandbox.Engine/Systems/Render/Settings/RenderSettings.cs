@@ -175,17 +175,18 @@ public partial class RenderSettings
 
 	/// <summary>
 	/// Returns whether the given <see cref="UpscalerMode"/> is usable on the current graphics
-	/// device. Off / Stretch / FSR1 / FSR3 are always available; DLSS requires NVIDIA hardware
-	/// with NGX support and is queried from the native render device.
+	/// hardware. Off / Stretch / FSR1 / FSR3 are always available; DLSS requires NVIDIA RTX hardware.
+	/// Uses the cached device name so opening settings doesn't initialize NGX or its updater.
+	/// Hardware support does not guarantee that NGX SDK initialization will succeed.
 	/// </summary>
 	public static bool IsUpscalerModeSupported( UpscalerMode mode )
 	{
-		// UpscalerType from src/public/rendersystem/iupscaler.h: NONE=0, AMD_FSR3=2, NVIDIA_DLSS=3.
-		const int UPSCALER_NVIDIA_DLSS = 3;
-
 		return mode switch
 		{
-			UpscalerMode.DLSS => NativeEngine.RenderDeviceManager.IsUpscalerSupported( UPSCALER_NVIDIA_DLSS ),
+			// The native capability query lazily initializes NGX and can wait indefinitely in
+			// NvTelemetryAPI64. A settings catalog must not start that work on the UI thread.
+			UpscalerMode.DLSS => SystemInfo.Gpu?.Contains( "NVIDIA", StringComparison.OrdinalIgnoreCase ) == true
+				&& SystemInfo.Gpu.Contains( "RTX", StringComparison.OrdinalIgnoreCase ),
 			_ => true,
 		};
 	}

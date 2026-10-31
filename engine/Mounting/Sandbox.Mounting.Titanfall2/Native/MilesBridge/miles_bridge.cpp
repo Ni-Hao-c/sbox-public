@@ -79,6 +79,7 @@ struct CaptureContext
 std::mutex g_decodeMutex;
 MilesApi g_api;
 bool g_started = false;
+std::uint32_t g_eventSessionCount = 0;
 std::wstring g_loadedRoot;
 
 void SetError(char* destination, std::uint32_t capacity, const std::string& message)
@@ -123,6 +124,7 @@ bool LoadApi(const wchar_t* gameRoot, std::string& error)
 
 	const std::wstring root(gameRoot);
 	if (g_started && _wcsicmp(root.c_str(), g_loadedRoot.c_str()) == 0) return true;
+	if (g_eventSessionCount != 0) { error = "An event session is using a different installed Miles runtime."; return false; }
 	UnloadApi();
 
 	const auto bin = root + L"\\bin\\x64_retail";
@@ -244,10 +246,34 @@ extern "C" __declspec(dllexport) int __cdecl tf2_miles_decode(
 		SetError(errorBuffer, errorCapacity, "The decoded BCF stream is too large.");
 		return 0;
 	}
+	// The frame count is an unvalidated uint32 from a 24-byte header; the size check above
+	// only rejects arithmetic overflow, so a corrupt header could request tens of GB and
+	// value-initialise them before the decode timeout can fire.
+	constexpr std::uint64_t MaximumDecodeSeconds = 15 * 60;
+	if (static_cast<std::uint64_t>(frames) > static_cast<std::uint64_t>(rate16) * MaximumDecodeSeconds)
+	{
+		SetError(errorBuffer, errorCapacity, "The decoded BCF stream exceeds the supported length.");
+		return 0;
+	}
 
 	std::lock_guard<std::mutex> guard(g_decodeMutex);
 	std::string error;
-	if (!LoadApi(gameRoot, error))
+	bool loaded = false;
+	try
+	{
+		loaded = LoadApi(gameRoot, error);
+	}
+	catch (const std::exception& exception)
+	{
+		SetError(errorBuffer, errorCapacity, exception.what());
+		return 0;
+	}
+	catch (...)
+	{
+		SetError(errorBuffer, errorCapacity, "Unable to load the installed Miles runtime.");
+		return 0;
+	}
+	if (!loaded)
 	{
 		SetError(errorBuffer, errorCapacity, error);
 		return 0;
@@ -336,3 +362,5 @@ extern "C" __declspec(dllexport) void __cdecl tf2_miles_free(void* memory)
 {
 	std::free(memory);
 }
+
+#include "miles_events.inl"

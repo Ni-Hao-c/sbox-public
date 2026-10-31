@@ -77,7 +77,7 @@ public static class Titanfall2Mdl53PhysicsReader
 		{
 			EnsureRangeWithin( data, surfaceOffset, 32, physicsEnd );
 			var surfaceByteCount = ReadInt32( data, surfaceOffset );
-			var nextSurfaceOffset = checked(surfaceOffset + surfaceByteCount + sizeof(int));
+			var nextSurfaceOffset = checked(surfaceOffset + surfaceByteCount + sizeof( int ));
 			if ( surfaceByteCount < 76 || nextSurfaceOffset > physicsEnd )
 				throw new InvalidDataException( "Embedded VPHY surface has an invalid size." );
 
@@ -317,7 +317,7 @@ public static class Titanfall2Mdl53PhysicsReader
 			var triangleOffset = checked(ledgeOffset + compactLedgeHeaderSize + triangleIndex * compactTriangleSize);
 			for ( var edgeIndex = 0; edgeIndex < 3; ++edgeIndex )
 			{
-				var sourcePointIndex = ReadUInt16( data, triangleOffset + 4 + edgeIndex * sizeof(uint) );
+				var sourcePointIndex = ReadUInt16( data, triangleOffset + 4 + edgeIndex * sizeof( uint ) );
 				if ( !pointIndices.TryGetValue( sourcePointIndex, out var targetPointIndex ) )
 				{
 					var sourcePointOffset = checked(ledgeOffset + pointOffset + sourcePointIndex * compactPointSize);
@@ -351,26 +351,26 @@ public static class Titanfall2Mdl53PhysicsReader
 
 	static short ReadInt16( ReadOnlySpan<byte> data, int offset )
 	{
-		EnsureRange( data, offset, sizeof(short) );
-		return BinaryPrimitives.ReadInt16LittleEndian( data.Slice( offset, sizeof(short) ) );
+		EnsureRange( data, offset, sizeof( short ) );
+		return BinaryPrimitives.ReadInt16LittleEndian( data.Slice( offset, sizeof( short ) ) );
 	}
 
 	static ushort ReadUInt16( ReadOnlySpan<byte> data, int offset )
 	{
-		EnsureRange( data, offset, sizeof(ushort) );
-		return BinaryPrimitives.ReadUInt16LittleEndian( data.Slice( offset, sizeof(ushort) ) );
+		EnsureRange( data, offset, sizeof( ushort ) );
+		return BinaryPrimitives.ReadUInt16LittleEndian( data.Slice( offset, sizeof( ushort ) ) );
 	}
 
 	static int ReadInt32( ReadOnlySpan<byte> data, int offset )
 	{
-		EnsureRange( data, offset, sizeof(int) );
-		return BinaryPrimitives.ReadInt32LittleEndian( data.Slice( offset, sizeof(int) ) );
+		EnsureRange( data, offset, sizeof( int ) );
+		return BinaryPrimitives.ReadInt32LittleEndian( data.Slice( offset, sizeof( int ) ) );
 	}
 
 	static uint ReadUInt32( ReadOnlySpan<byte> data, int offset )
 	{
-		EnsureRange( data, offset, sizeof(uint) );
-		return BinaryPrimitives.ReadUInt32LittleEndian( data.Slice( offset, sizeof(uint) ) );
+		EnsureRange( data, offset, sizeof( uint ) );
+		return BinaryPrimitives.ReadUInt32LittleEndian( data.Slice( offset, sizeof( uint ) ) );
 	}
 
 	static float ReadSingle( ReadOnlySpan<byte> data, int offset )

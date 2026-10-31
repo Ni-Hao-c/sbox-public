@@ -11,6 +11,9 @@
 !*.sln
 !*.csproj
 !*.cs
+!engine/Mounting/Sandbox.Mounting.Titanfall2/Perf/MaterialVerification/*.csx
+!engine/Mounting/Sandbox.Mounting.Titanfall2/Perf/ParticleVerification/*.csx
+!engine/Mounting/Sandbox.Mounting.Titanfall2/Perf/CollisionVerification/*.csx
 !*.razor
 !engine/Mounting/Sandbox.Mounting.Titanfall2/Native/
 !engine/Mounting/Sandbox.Mounting.Titanfall2/Native/**/*.cpp
@@ -106,3 +109,6 @@ engine/TestResults/
 /game/tools
 /game/aftermath_dumps
 /game/gamecache
+
+# Local test projects, scripts and logs
+/.tmp/

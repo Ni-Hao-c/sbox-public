@@ -1,20 +1,25 @@
+using Titanfall2;
+
 /// <summary>Runtime mount for the locally installed Steam version of Titanfall 2.</summary>
 public partial class Titanfall2Mount : BaseGameMount
 {
 	const long AppId = 1237970;
 	static object _registeredTypeLibrary;
 	string _root;
-	readonly Dictionary<ulong, string> _texturePaths = new();
+	// Material prefetch workers read these two while the mount may fill or clear them
+	// (remount/shutdown), so they are concurrent rather than plain dictionaries.
+	readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, string> _texturePaths = new();
 	readonly Dictionary<ulong, string> _shaderSetNames = new();
 	readonly Dictionary<ulong, MountedAssetSource> _shaderSetSources = new();
 	readonly Dictionary<ulong, MountedAssetSource> _shaderSources = new();
 	readonly Dictionary<ulong, DxbcShaderReflection> _shaderReflections = new();
 	readonly Dictionary<ulong, string> _shaderReflectionErrors = new();
 	readonly Dictionary<string, string> _materialPaths = new( StringComparer.OrdinalIgnoreCase );
-	readonly Dictionary<string, MountedAssetSource> _materialSources = new( StringComparer.OrdinalIgnoreCase );
+	readonly System.Collections.Concurrent.ConcurrentDictionary<string, MountedAssetSource> _materialSources = new( StringComparer.OrdinalIgnoreCase );
 	readonly Dictionary<string, ITitanfall2AssetSource> _legacyMaterialSources = new( StringComparer.OrdinalIgnoreCase );
 	readonly Dictionary<string, ITitanfall2AssetSource> _legacyTextureSources = new( StringComparer.OrdinalIgnoreCase );
 	readonly Dictionary<string, ITitanfall2AssetSource> _modelSources = new( StringComparer.OrdinalIgnoreCase );
+	readonly List<Titanfall2BrushModelSource> _brushModelSources = new();
 	readonly Dictionary<string, Titanfall2VmtDefinition> _legacyMaterialDefinitions = new( StringComparer.OrdinalIgnoreCase );
 	readonly Dictionary<string, string> _legacyMaterialErrors = new( StringComparer.OrdinalIgnoreCase );
 	readonly Dictionary<string, string> _legacyAnimatedTexturePaths = new( StringComparer.OrdinalIgnoreCase );
@@ -22,6 +27,15 @@ public partial class Titanfall2Mount : BaseGameMount
 	readonly Dictionary<string, Titanfall2MaterialDescriptor> _materialDescriptors = new( StringComparer.OrdinalIgnoreCase );
 	readonly Dictionary<ulong, List<Titanfall2MaterialTextureReference>> _textureGuidDependencies = new();
 	readonly Dictionary<string, List<Titanfall2MaterialTextureReference>> _texturePathDependencies = new( StringComparer.OrdinalIgnoreCase );
+	readonly Dictionary<string, ITitanfall2AssetSource> _soundFileSources = new( StringComparer.OrdinalIgnoreCase );
+	readonly Dictionary<string, MilesSoundAsset> _milesSoundAssets = new( StringComparer.OrdinalIgnoreCase );
+	readonly Dictionary<string, SoundFile> _soundFileCache = new( StringComparer.OrdinalIgnoreCase );
+	readonly Dictionary<string, double> _soundFailureRetryAfter = new( StringComparer.OrdinalIgnoreCase );
+	readonly object _soundCacheLock = new();
+	int _failedSoundLookups;
+	MilesBankArchive _milesArchive;
+	ITitanfall2AssetSource _soundscapeScriptSource;
+	Dictionary<string, string> _soundscapeLoops;
 	readonly Dictionary<string, Texture[]> _legacyParticleTextureFrames = new( StringComparer.OrdinalIgnoreCase );
 	readonly Dictionary<string, float> _legacyParticleSheetFrameRates = new( StringComparer.OrdinalIgnoreCase );
 	readonly Dictionary<string, Sprite> _legacyParticleSprites = new( StringComparer.OrdinalIgnoreCase );
@@ -51,12 +65,18 @@ public partial class Titanfall2Mount : BaseGameMount
 
 	protected override Task Mount( MountContext context )
 	{
+		_contentFingerprint = null;
 		EnsureRuntimeTypesRegistered();
+		Titanfall2CollisionDiagnostics.RegisterConsoleCommands();
 		var registered = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
 		// Titanfall 2 resolves native RPAK MATL/TXTR assets before legacy VMT/VTF
 		// search paths. Register RPAK first so VPK assets only fill missing names.
 		MountRpakResources( context, registered );
 		MountVpkResources( context, registered );
+		// Retail supplies a cubemap without a Source 2 sky material. Wrap it in the
+		// native sky shader so both the main view and the 3D skybox use mounted art.
+		if ( _legacyTextureSources.ContainsKey( "skies/skycube" ) && registered.Add( "skies/skycube.vmat" ) )
+			context.Add( ResourceType.Material, "skies/skycube", new Titanfall2SkyMaterialLoader() );
 		MountMilesSounds( context, registered );
 		IsMounted = true;
 		if ( Environment.GetEnvironmentVariable( "SBOX_TITANFALL2_SELFTEST" ) == "1" ) _ = RunSelfTest();
@@ -65,11 +85,46 @@ public partial class Titanfall2Mount : BaseGameMount
 
 	protected override void Shutdown()
 	{
-		ReleaseSceneResources();
+		ReleaseSoundEventSessions();
+		Titanfall2CollisionDiagnostics.UnregisterConsoleCommands();
+		ReleaseMountCaches();
+		foreach ( var source in _brushModelSources ) source.Dispose();
+		_brushModelSources.Clear();
 		ResetParticleCatalog();
 		_modelSources.Clear();
+		_texturePaths.Clear();
+		_shaderSetNames.Clear();
+		_shaderSetSources.Clear();
+		_shaderSources.Clear();
+		_materialPaths.Clear();
+		_materialSources.Clear();
+		_legacyMaterialSources.Clear();
+		_legacyTextureSources.Clear();
+		_legacyAnimatedTexturePaths.Clear();
+		lock ( _materialMetadataLock )
+		{
+			// Background material loads write these under the same lock.
+			_legacyMaterialDefinitions.Clear();
+			_legacyMaterialErrors.Clear();
+			_materialMetadata.Clear();
+		}
+		lock ( _shaderReflectionLock )
+		{
+			_shaderReflections.Clear();
+			_shaderReflectionErrors.Clear();
+		}
 		MaterialLoader.ShutdownSharedResources();
 		StarPakIndex.Clear();
+		lock ( _soundCacheLock )
+		{
+			_soundFileCache.Clear();
+			_soundFailureRetryAfter.Clear();
+		}
+		_milesSoundAssets.Clear();
+		_soundFileSources.Clear();
+		_milesArchive = null;
+		_soundscapeScriptSource = null;
+		_soundscapeLoops = null;
 		lock ( _materialDescriptorLock )
 		{
 			_materialDescriptors.Clear();
@@ -78,7 +133,7 @@ public partial class Titanfall2Mount : BaseGameMount
 		}
 	}
 
-	internal void ReleaseSceneResources()
+	void ReleaseMountCaches()
 	{
 		var particleSheets = 0;
 		var particleTextures = 0;
@@ -86,16 +141,288 @@ public partial class Titanfall2Mount : BaseGameMount
 		{
 			particleSheets = _legacyParticleTextureFrames.Count;
 			particleTextures = _legacyParticleTextureFrames.Values.Sum( static frames => frames?.Length ?? 0 );
-			foreach ( var frames in _legacyParticleTextureFrames.Values )
-				foreach ( var texture in frames ) texture?.Dispose();
+			// Live sprites can outlast a mount refresh. Drop our references rather
+			// than invalidating textures still referenced by those scene instances.
+			// Their resource wrappers release native handles after the last user dies.
 			_legacyParticleTextureFrames.Clear();
 			_legacyParticleSheetFrameRates.Clear();
 			_legacyParticleSprites.Clear();
 		}
 		var rpakCache = RpakArchive.GetCacheStatistics();
 		RpakArchive.ClearStrongBufferCache();
-		Log.Info( $"Titanfall 2 scene caches released: {particleSheets} particle sheets/{particleTextures} textures, "
+		Log.Info( $"Titanfall 2 mount caches released: {particleSheets} particle sheets/{particleTextures} textures, "
 			+ $"{rpakCache.StrongBuffers} RPAK buffers/{rpakCache.StrongBufferBytes / (1024.0 * 1024.0):0.0} MB." );
+	}
+
+	/// <summary>
+	/// Resolves a map-authored sound name to a playable <see cref="SoundFile"/>.
+	/// Names come from <c>ambient_generic.soundName</c> and soundscape <c>playlooping</c>
+	/// entries, so both the BCF bank (<c>sound/&lt;name&gt;</c>) and loose <c>.wav</c> entries
+	/// are searched. Files are cached per loop flag because looping is baked into the sound file.
+	/// </summary>
+	internal bool TryGetSoundFile( string soundName, bool loop, out SoundFile soundFile, out string error )
+	{
+		soundFile = null;
+		error = null;
+
+		try
+		{
+			if ( string.IsNullOrWhiteSpace( soundName ) )
+			{
+				error = "empty sound name";
+				return false;
+			}
+
+			var key = NormalizeSoundKey( soundName );
+			var cacheKey = loop ? key + "|loop" : key;
+			lock ( _soundCacheLock )
+			{
+				if ( _soundFileCache.TryGetValue( cacheKey, out soundFile ) ) return true;
+				// A missing/failed sound used to be cached as a permanent null, so one
+				// transient Miles decode failure silenced it for the whole mount. Retry
+				// after the same backoff the model loader uses.
+				if ( _soundFailureRetryAfter.TryGetValue( cacheKey, out var retryAt )
+					&& Titanfall2Log.ElapsedSeconds < retryAt )
+				{
+					error = $"sound '{soundName}' is unavailable";
+					return false;
+				}
+			}
+
+			var created = LoadSoundFile( key, loop, out error );
+			lock ( _soundCacheLock )
+			{
+				if ( created is not null )
+				{
+					_soundFileCache[cacheKey] = created;
+					_soundFailureRetryAfter.Remove( cacheKey );
+				}
+				else
+				{
+					_soundFailureRetryAfter[cacheKey] = Titanfall2Log.ElapsedSeconds + Titanfall2StreamingSettings.ModelFailureRetrySeconds;
+				}
+			}
+			soundFile = created;
+			return created is not null;
+		}
+		catch ( Exception exception )
+		{
+			error = exception.Message;
+			return false;
+		}
+	}
+
+	SoundFile LoadSoundFile( string key, bool loop, out string error )
+	{
+		error = null;
+
+		if ( _milesArchive is not null && TryFindMilesAsset( key, out var asset ) )
+		{
+			if ( !_milesArchive.TryReadBcf( asset, out var bcf, out var readError ) )
+			{
+				error = readError;
+			}
+			else if ( !_milesArchive.TryDecode( bcf, out var pcm, out var rate, out var channels, out var decodeError ) )
+			{
+				error = decodeError;
+			}
+			else
+			{
+				var sound = SoundFile.FromPcm( key, pcm, new SoundFile.PcmOptions
+				{
+					Channels = channels,
+					Rate = rate,
+					Bits = 16,
+					Loop = loop
+				} );
+				if ( sound is not null ) return sound;
+				error = "SoundFile.FromPcm returned null";
+			}
+		}
+
+		if ( _soundFileSources.TryGetValue( key + ".wav", out var source ) )
+		{
+			if ( !source.TryReadAllBytes( out var data, out var wavError ) )
+			{
+				error = wavError;
+			}
+			else
+			{
+				var sound = SoundFile.FromWav( key + ".wav", data, new SoundFile.LoadOptions { Loop = loop } );
+				if ( sound is not null ) return sound;
+				error = "SoundFile.FromWav returned null";
+			}
+		}
+
+		error ??= $"sound '{key}' was not found";
+		if ( _failedSoundLookups++ < 4 )
+		{
+			var tail = StripSoundPrefix( key );
+			var samples = _milesSoundAssets.Keys
+				.Where( existing => existing.Contains( tail, StringComparison.OrdinalIgnoreCase ) )
+				.Take( 4 );
+			Titanfall2Log.Warning( $"Titanfall 2 sound lookup missed '{key}' "
+				+ $"({_milesSoundAssets.Count} bank entries / {_soundFileSources.Count} loose wav entries; "
+				+ $"bank keys containing '{tail}': {string.Join( " | ", samples )})." );
+		}
+		return null;
+	}
+
+	/// <summary>
+	/// Finds the bank record for a sound name. Entity names are flat while the bank can store
+	/// them under a path, so an exact lookup is followed by a suffix match.
+	/// </summary>
+	bool TryFindMilesAsset( string key, out MilesSoundAsset asset )
+	{
+		if ( _milesSoundAssets.TryGetValue( key, out asset ) ) return true;
+
+		var bareKey = StripSoundPrefix( key );
+
+		// 1: exact bare name (entity names already match most point emitters).
+		foreach ( var pair in _milesSoundAssets )
+		{
+			if ( !StripSoundPrefix( pair.Key ).Equals( bareKey, StringComparison.OrdinalIgnoreCase ) ) continue;
+			asset = pair.Value;
+			return true;
+		}
+
+		// 2: authored logical name resolved to a bank variant. Map soundscapes reference
+		//    "amb_x_INT_SmallRoom" while the bank stores channel/format variants such as
+		//    "amb_x_int_smallroom_6ch_v1_lp". Prefer the shortest variant so the generic
+		//    loop wins over special-purpose ones.
+		MilesSoundAsset best = null;
+		string bestKey = null;
+		foreach ( var pair in _milesSoundAssets )
+		{
+			var bare = StripSoundPrefix( pair.Key );
+			if ( bare.Length <= bareKey.Length ) continue;
+			if ( !bare.StartsWith( bareKey, StringComparison.OrdinalIgnoreCase ) ) continue;
+			if ( bare[bareKey.Length] != '_' ) continue;
+			if ( bestKey is not null && bare.Length >= bestKey.Length ) continue;
+			best = pair.Value;
+			bestKey = bare;
+		}
+
+		if ( best is not null )
+		{
+			asset = best;
+			return true;
+		}
+
+		// 3: the bank's string table contains authored sound event names ("amb_x_INT_SmallRoom",
+		//    "amb_angelcity_emitter_dockwater_02") that are not source records. The sources are
+		//    channel/format variants ("..._6ch_v1_lp", "amb_emit_..._1ch_02"), so fall back to a
+		//    token score: equal tokens count fully, tokens sharing a 4 character stem
+		//    ("emitter"/"emit") count partially, and numbers must match exactly.
+		var queryTokens = Tokenize( bareKey );
+		if ( queryTokens.Length > 0 )
+		{
+			var bestScore = 0.55;
+			foreach ( var pair in _milesSoundAssets )
+			{
+				var bare = StripSoundPrefix( pair.Key );
+				var score = ScoreTokens( queryTokens, Tokenize( bare ) );
+				if ( score < bestScore ) continue;
+				if ( score == bestScore && bestKey is not null && bare.Length >= bestKey.Length ) continue;
+				bestScore = score;
+				bestKey = bare;
+				best = pair.Value;
+			}
+
+			if ( best is not null )
+			{
+				if ( Titanfall2Log.VerboseLogging )
+					Titanfall2Log.Info( $"Titanfall 2 sound '{key}' resolved to bank source '{bestKey}' (score {bestScore:0.00})." );
+				asset = best;
+				return true;
+			}
+		}
+
+		asset = null;
+		return false;
+	}
+
+	static string[] Tokenize( string value )
+		=> value.ToLowerInvariant().Split( ['_', '-', '.', '/', ' '], StringSplitOptions.RemoveEmptyEntries );
+
+	static double ScoreTokens( string[] query, string[] candidate )
+	{
+		if ( query.Length == 0 || candidate.Length == 0 ) return 0;
+
+		double score = 0;
+		foreach ( var token in query )
+		{
+			var best = 0.0;
+			foreach ( var other in candidate )
+			{
+				if ( token == other )
+				{
+					best = 1.0;
+					break;
+				}
+
+				if ( token.Length >= 4 && other.Length >= 4
+					&& string.CompareOrdinal( token, 0, other, 0, 4 ) == 0 )
+				{
+					best = Math.Max( best, 0.8 );
+				}
+			}
+
+			score += best;
+		}
+
+		return score / query.Length;
+	}
+
+	static string StripSoundPrefix( string path )
+		=> path.StartsWith( "sound/", StringComparison.OrdinalIgnoreCase ) ? path["sound/".Length..] : path;
+
+	/// <summary>Maps a <c>trigger_soundscape.play_event</c> soundscape name to its looping sound.</summary>
+	internal int MilesSoundCount => _milesSoundAssets.Count;
+	internal int WavSoundCount => _soundFileSources.Count;
+
+	internal bool TryGetSoundscapeLoop( string soundscapeName, out string soundName )
+	{
+		soundName = null;
+		if ( string.IsNullOrWhiteSpace( soundscapeName ) ) return false;
+
+		EnsureSoundscapeLoops();
+		return _soundscapeLoops.TryGetValue( soundscapeName.Trim(), out soundName )
+			&& !string.IsNullOrWhiteSpace( soundName );
+	}
+
+	/// <summary>Returns the loop of a soundscape, falling back to the soundscape name itself.</summary>
+	internal string ResolveSoundscapeLoop( string soundscapeName )
+		=> TryGetSoundscapeLoop( soundscapeName, out var soundName ) ? soundName : soundscapeName;
+
+	void EnsureSoundscapeLoops()
+	{
+		if ( _soundscapeLoops is not null ) return;
+
+		_soundscapeLoops = new Dictionary<string, string>( StringComparer.OrdinalIgnoreCase );
+		if ( _soundscapeScriptSource is null ) return;
+		if ( !_soundscapeScriptSource.TryReadAllBytes( out var bytes, out var readError ) )
+		{
+			Titanfall2Log.Warning( $"Unable to read the Titanfall 2 soundscape script: {readError}" );
+			return;
+		}
+
+		foreach ( var pair in Titanfall2SoundscapeScript.Parse( System.Text.Encoding.UTF8.GetString( bytes ) ) )
+			_soundscapeLoops[pair.Key] = pair.Value;
+	}
+
+	static string NormalizeSoundKey( string name )
+	{
+		var normalized = name.Replace( '\\', '/' ).Trim().Trim( '/' ).Trim( '"' );
+		foreach ( var extension in new[] { ".vsnd", ".wav" } )
+		{
+			if ( normalized.EndsWith( extension, StringComparison.OrdinalIgnoreCase ) )
+				normalized = normalized[..^extension.Length];
+		}
+
+		return normalized.StartsWith( "sound/", StringComparison.OrdinalIgnoreCase )
+			? normalized
+			: "sound/" + normalized;
 	}
 
 	internal void EnsureRuntimeTypesRegistered()
@@ -139,9 +466,11 @@ public partial class Titanfall2Mount : BaseGameMount
 			return;
 		}
 
+		_milesArchive = archive;
 		var sounds = 0;
 		foreach ( var asset in archive.Assets )
 		{
+			_milesSoundAssets[asset.ResourceName] = asset;
 			if ( !registered.Add( asset.ResourceName + ".vsnd" ) ) continue;
 			context.Add( ResourceType.Sound, asset.ResourceName, new MilesSoundLoader( archive, asset ) );
 			sounds++;
@@ -154,8 +483,11 @@ public partial class Titanfall2Mount : BaseGameMount
 		var vpkDirectory = Path.Combine( _root, "vpk" );
 		_legacyMaterialSources.Clear();
 		_legacyTextureSources.Clear();
-		_legacyMaterialDefinitions.Clear();
-		_legacyMaterialErrors.Clear();
+		lock ( _materialMetadataLock )
+		{
+			_legacyMaterialDefinitions.Clear();
+			_legacyMaterialErrors.Clear();
+		}
 		_legacyAnimatedTexturePaths.Clear();
 		_modelSources.Clear();
 		ResetParticleCatalog();
@@ -178,6 +510,7 @@ public partial class Titanfall2Mount : BaseGameMount
 		var environmentEntitySources = new Dictionary<string, ITitanfall2AssetSource>( StringComparer.OrdinalIgnoreCase );
 		var particleEntitySources = new Dictionary<string, ITitanfall2AssetSource>( StringComparer.OrdinalIgnoreCase );
 		var scriptEntitySources = new Dictionary<string, ITitanfall2AssetSource>( StringComparer.OrdinalIgnoreCase );
+		var soundEntitySources = new Dictionary<string, ITitanfall2AssetSource>( StringComparer.OrdinalIgnoreCase );
 		foreach ( var archive in archives )
 		{
 			foreach ( var entry in archive.Entries )
@@ -191,6 +524,8 @@ public partial class Titanfall2Mount : BaseGameMount
 					particleEntitySources.TryAdd( particleMapName, new VpkAssetSource( archive, entry, vpkResolver ) );
 				else if ( TryGetEntityMapName( entry.Path, "_script", out var scriptMapName ) )
 					scriptEntitySources.TryAdd( scriptMapName, new VpkAssetSource( archive, entry, vpkResolver ) );
+				else if ( TryGetEntityMapName( entry.Path, "_snd", out var soundMapName ) )
+					soundEntitySources.TryAdd( soundMapName, new VpkAssetSource( archive, entry, vpkResolver ) );
 			}
 		}
 
@@ -207,6 +542,13 @@ public partial class Titanfall2Mount : BaseGameMount
 					// expose the mirrored directory through mount://titanfall2.
 					hiddenDepotEntries++;
 					continue;
+				}
+
+				// The soundscape script is the only definition of a trigger_soundscape's loop.
+				if ( _soundscapeScriptSource is null
+					&& entry.Path.Equals( "scripts/audio/audio_soundscapes.txt", StringComparison.OrdinalIgnoreCase ) )
+				{
+					_soundscapeScriptSource = new VpkAssetSource( archive, entry, vpkResolver );
 				}
 
 				var extension = Path.GetExtension( entry.Path ).ToLowerInvariant();
@@ -256,17 +598,50 @@ public partial class Titanfall2Mount : BaseGameMount
 						environmentEntitySources.TryGetValue( mapName, out var environmentEntitySource );
 						particleEntitySources.TryGetValue( mapName, out var particleEntitySource );
 						scriptEntitySources.TryGetValue( mapName, out var scriptEntitySource );
+						soundEntitySources.TryGetValue( mapName, out var soundEntitySource );
 						context.Add( ResourceType.Scene, entry.Path, new MapLoader(
 							source,
 							spawnEntitySource,
 							environmentEntitySource,
 							particleEntitySource,
-							scriptEntitySource ) );
+							scriptEntitySource,
+							soundEntitySource ) );
+						// Additive path contract: the legacy preview scene keeps its cameras
+						// and spawns; games can request only mounted world assets.
+						context.Add( ResourceType.Scene, entry.Path + ".world", new MapLoader(
+							source, spawnEntitySource, environmentEntitySource, particleEntitySource,
+							scriptEntitySource, soundEntitySource, pureWorld: true ) );
+						try
+						{
+							var brushCount = Titanfall2BrushModelSource.ReadCount( source );
+							if ( brushCount > 0 )
+							{
+								var brushSource = new Titanfall2BrushModelSource( source, environmentEntitySource );
+								_brushModelSources.Add( brushSource );
+								for ( var index = 1; index <= brushCount; index++ )
+									context.Add( ResourceType.Model, $"{entry.Path}/brush/{index}", new Titanfall2BrushModelLoader( brushSource, index ) );
+							}
+						}
+						catch ( Exception exception )
+						{
+							Log.Warning( $"Cannot register BSP inline models for {entry.Path}: {exception.Message}" );
+						}
 						break;
 					case ".mdl":
 					case ".rmdl":
 						_modelSources.TryAdd( NormalizeModelSourcePath( entry.Path ), source );
 						context.Add( ResourceType.Model, entry.Path, new ModelLoader( source ) );
+						// The native resource is one .t2static model that carries every LOD.
+						var allLodsPath = ModelLoader.GetStaticInstanceAllLodsPath( entry.Path );
+						if ( registered.Add( allLodsPath ) )
+							context.Add( ResourceType.Model, allLodsPath, new ModelLoader( source, staticInstance: true, allLods: true ) );
+						// The per-LOD resources stay registered as well, whichever mode is active
+						// when the map mounts. A resource that was not registered here cannot be
+						// loaded later, and the LOD mode is a runtime A/B switch: registering only
+						// the active mode's paths would make the switch one-way and silently fall
+						// back to the full non-instanced model for every band of the other mode.
+						// Both sets are lazy, so the unused one costs a loader entry per model and
+						// no read until something asks for it.
 						for ( var lod = 0; lod < ModelLoader.StaticInstanceLodCount; lod++ )
 						{
 							var staticInstancePath = ModelLoader.GetStaticInstancePath( entry.Path, lod );
@@ -275,6 +650,7 @@ public partial class Titanfall2Mount : BaseGameMount
 						}
 						break;
 					case ".wav":
+						_soundFileSources[NormalizeSoundKey( entry.Path ) + ".wav"] = source;
 						context.Add( ResourceType.Sound, entry.Path, new SoundLoader( source ) );
 						break;
 				}
@@ -282,7 +658,7 @@ public partial class Titanfall2Mount : BaseGameMount
 		}
 		Log.Info( $"Titanfall 2 VPK mounted: {archives.Count} archives, {legacyMaterials} fallback VMT materials, "
 			+ $"{legacyTextures} fallback VTF textures and {ParticleFileCount} PCF particle libraries "
-			+ $"({particleEntitySources.Count} map FX and {scriptEntitySources.Count} script partitions; "
+			+ $"({particleEntitySources.Count} map FX, {scriptEntitySources.Count} script and {soundEntitySources.Count} sound partitions; "
 			+ $"{hiddenDepotEntries} depot mirror entries hidden; RPAK names retained at higher priority)." );
 	}
 
@@ -395,13 +771,15 @@ public partial class Titanfall2Mount : BaseGameMount
 		return match.Success && int.TryParse( match.Groups[1].Value, out var rank ) ? rank : 0;
 	}
 
+	internal bool TryGetModelSource( string modelPath, out ITitanfall2AssetSource source ) =>
+		_modelSources.TryGetValue( NormalizeModelSourcePath( modelPath ), out source );
 	internal bool TryGetTexturePath( ulong guid, out string path ) => _texturePaths.TryGetValue( guid, out path );
 	internal bool TryGetShaderSetName( ulong guid, out string name ) => _shaderSetNames.TryGetValue( guid, out name );
 	internal bool TryGetMaterialPath( string name, out string path ) => _materialPaths.TryGetValue( name, out path );
 	internal bool TryGetLegacyAnimatedTexturePath( string name, out string path ) =>
 		_legacyAnimatedTexturePaths.TryGetValue( Titanfall2LegacyPath.NormalizeTextureName( name ), out path );
 
-	internal void RegisterMaterialDescriptor( Titanfall2MaterialDescriptor descriptor )
+	internal void RegisterMaterialDescriptor( Titanfall2MaterialDescriptor descriptor, bool persist = true )
 	{
 		if ( descriptor is null || string.IsNullOrWhiteSpace( descriptor.Name ) ) return;
 		lock ( _materialDescriptorLock )
@@ -416,6 +794,7 @@ public partial class Titanfall2Mount : BaseGameMount
 					AddDependency( _texturePathDependencies, binding.TexturePath, reference );
 			}
 		}
+		if ( persist && descriptor.SourceKind == Titanfall2MaterialSourceKind.Rpak ) WriteMaterialCache( descriptor );
 	}
 
 	internal bool TryGetMaterialDescriptor( string name, out Titanfall2MaterialDescriptor descriptor )
@@ -442,7 +821,8 @@ public partial class Titanfall2Mount : BaseGameMount
 		{
 			if ( _textureGuidDependencies.TryGetValue( guid, out var found ) )
 			{
-				references = found;
+				// Copy under the lock: background material loads can still append to the list.
+				references = found.ToArray();
 				return true;
 			}
 		}
@@ -468,7 +848,7 @@ public partial class Titanfall2Mount : BaseGameMount
 				_texturePathDependencies.Count,
 				bindings.Length,
 				bindings.Count( binding => binding.Reflected ),
-				bindings.Count( binding => binding.Semantic == Titanfall2TextureSemantic.Unknown ) );
+				bindings.Count( binding => binding.Semantic == Titanfall2TextureSemantic.Unknown ));
 		}
 	}
 
@@ -635,6 +1015,12 @@ public partial class Titanfall2Mount : BaseGameMount
 		lock ( _materialMetadataLock )
 		{
 			if ( _materialMetadata.TryGetValue( name, out metadata ) ) return true;
+		}
+		if ( TryGetCachedMaterialDescriptor( name, out var cached ) )
+		{
+			metadata = cached.Metadata;
+			lock ( _materialMetadataLock ) _materialMetadata.TryAdd( name, metadata );
+			return true;
 		}
 		if ( !_materialSources.TryGetValue( name, out var source ) )
 		{

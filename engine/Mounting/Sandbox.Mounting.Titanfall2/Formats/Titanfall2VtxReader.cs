@@ -202,6 +202,7 @@ public static class Titanfall2VtxReader
 		if ( header.LodCount <= 0 || header.MaterialReplacementListOffset <= 0 )
 			return Array.Empty<MaterialReplacementListInfo>();
 
+		EnsureTable<VtxMaterialReplacementListHeader>( data, header.MaterialReplacementListOffset, header.LodCount );
 		var lists = new MaterialReplacementListInfo[header.LodCount];
 		for ( int i = 0; i < lists.Length; i++ )
 		{
@@ -225,6 +226,7 @@ public static class Titanfall2VtxReader
 			return Array.Empty<MaterialReplacementInfo>();
 
 		int replacementBase = listOffset + listHeader.ReplacementOffset;
+		EnsureTable<VtxMaterialReplacementHeader>( data, replacementBase, listHeader.ReplacementCount );
 		var replacements = new MaterialReplacementInfo[listHeader.ReplacementCount];
 		for ( int i = 0; i < replacements.Length; i++ )
 		{
@@ -248,6 +250,7 @@ public static class Titanfall2VtxReader
 		if ( header.BodyPartCount <= 0 || header.BodyPartOffset <= 0 )
 			return Array.Empty<BodyPartInfo>();
 
+		EnsureTable<VtxBodyPartHeader>( data, header.BodyPartOffset, header.BodyPartCount );
 		var bodyParts = new BodyPartInfo[header.BodyPartCount];
 		for ( int i = 0; i < bodyParts.Length; i++ )
 		{
@@ -272,6 +275,7 @@ public static class Titanfall2VtxReader
 			return Array.Empty<ModelInfo>();
 
 		int modelBase = bodyPartOffset + bodyPart.ModelOffset;
+		EnsureTable<VtxModelHeader>( data, modelBase, bodyPart.ModelCount );
 		var models = new ModelInfo[bodyPart.ModelCount];
 		for ( int i = 0; i < models.Length; i++ )
 		{
@@ -296,6 +300,7 @@ public static class Titanfall2VtxReader
 			return Array.Empty<LodInfo>();
 
 		int lodBase = modelOffset + model.LodOffset;
+		EnsureTable<VtxModelLodHeader>( data, lodBase, model.LodCount );
 		var lods = new LodInfo[model.LodCount];
 		for ( int i = 0; i < lods.Length; i++ )
 		{
@@ -320,6 +325,7 @@ public static class Titanfall2VtxReader
 			return Array.Empty<MeshInfo>();
 
 		int meshBase = lodOffset + lod.MeshOffset;
+		EnsureTable<VtxMeshHeader>( data, meshBase, lod.MeshCount );
 		var meshes = new MeshInfo[lod.MeshCount];
 		for ( int i = 0; i < meshes.Length; i++ )
 		{
@@ -344,6 +350,7 @@ public static class Titanfall2VtxReader
 			return Array.Empty<StripGroupInfo>();
 
 		int stripGroupBase = meshOffset + mesh.StripGroupHeaderOffset;
+		EnsureTable<VtxStripGroupHeader>( data, stripGroupBase, mesh.StripGroupCount );
 		var stripGroups = new StripGroupInfo[mesh.StripGroupCount];
 		for ( int i = 0; i < stripGroups.Length; i++ )
 		{
@@ -351,14 +358,15 @@ public static class Titanfall2VtxReader
 			EnsureReadable<VtxStripGroupHeader>( data, offset );
 
 			var stripGroup = Titanfall2Mdl53Binary.ReadStruct<VtxStripGroupHeader>( data, offset );
+			var indices = ParseIndices( data, offset, stripGroup );
 			stripGroups[i] = new StripGroupInfo
 			{
 				Index = i,
 				Header = stripGroup,
 				Vertices = ParseVertices( data, offset, stripGroup ),
-				Indices = ParseIndices( data, offset, stripGroup ),
+				Indices = indices,
 				TopologyIndices = ParseTopologyIndices( data, offset, stripGroup.TopologyOffset, stripGroup.TopologyIndexCount ),
-				Strips = ParseStrips( data, offset, stripGroup )
+				Strips = ParseStrips( data, offset, stripGroup, indices )
 			};
 		}
 
@@ -371,6 +379,7 @@ public static class Titanfall2VtxReader
 			return Array.Empty<VtxVertex>();
 
 		int vertexBase = stripGroupOffset + stripGroup.VertexOffset;
+		EnsureTable<VtxVertex>( data, vertexBase, stripGroup.VertexCount );
 		var vertices = new VtxVertex[stripGroup.VertexCount];
 		for ( int i = 0; i < vertices.Length; i++ )
 		{
@@ -393,24 +402,35 @@ public static class Titanfall2VtxReader
 			return Array.Empty<ushort>();
 
 		int offset = baseOffset + relativeOffset;
-		int byteLength = checked( count * sizeof(ushort) );
+		int byteLength = checked(count * sizeof( ushort ));
 		EnsureRange( data, offset, byteLength );
 
 		var indices = new ushort[count];
 		for ( int i = 0; i < indices.Length; i++ )
 		{
-			indices[i] = Titanfall2Mdl53Binary.ReadStruct<ushort>( data, offset + (i * sizeof(ushort)) );
+			indices[i] = Titanfall2Mdl53Binary.ReadStruct<ushort>( data, offset + (i * sizeof( ushort )) );
 		}
 
 		return indices;
 	}
 
-	private static StripInfo[] ParseStrips( ReadOnlySpan<byte> data, int stripGroupOffset, VtxStripGroupHeader stripGroup )
+	private static ushort[] ParseStripIndices( ushort[] indices, VtxStripHeader strip )
+	{
+		// Unlike the group's byte offset, a strip's IndexOffset is an element
+		// index into its group's index buffer. Zero is a valid first strip.
+		if ( strip.IndexOffset < 0 || strip.IndexCount < 0
+			|| strip.IndexOffset > indices.Length || strip.IndexCount > indices.Length - strip.IndexOffset )
+			throw new InvalidOperationException( "VTX strip is outside its group's index buffer." );
+		return indices.AsSpan( strip.IndexOffset, strip.IndexCount ).ToArray();
+	}
+
+	private static StripInfo[] ParseStrips( ReadOnlySpan<byte> data, int stripGroupOffset, VtxStripGroupHeader stripGroup, ushort[] indices )
 	{
 		if ( stripGroup.StripCount <= 0 || stripGroup.StripOffset <= 0 )
 			return Array.Empty<StripInfo>();
 
 		int stripBase = stripGroupOffset + stripGroup.StripOffset;
+		EnsureTable<VtxStripHeader>( data, stripBase, stripGroup.StripCount );
 		var strips = new StripInfo[stripGroup.StripCount];
 		for ( int i = 0; i < strips.Length; i++ )
 		{
@@ -422,7 +442,7 @@ public static class Titanfall2VtxReader
 			{
 				Index = i,
 				Header = strip,
-				Indices = ParseTopologyIndices( data, offset, strip.IndexOffset, strip.IndexCount ),
+				Indices = ParseStripIndices( indices, strip ),
 				TopologyIndices = ParseTopologyIndices( data, offset, strip.TopologyOffset, strip.TopologyIndexCount ),
 				BoneStateChanges = ParseBoneStateChanges( data, offset, strip )
 			};
@@ -437,6 +457,7 @@ public static class Titanfall2VtxReader
 			return Array.Empty<VtxBoneStateChange>();
 
 		int boneStateBase = stripOffset + strip.BoneStateChangeOffset;
+		EnsureTable<VtxBoneStateChange>( data, boneStateBase, strip.BoneStateChangeCount );
 		var changes = new VtxBoneStateChange[strip.BoneStateChangeCount];
 		for ( int i = 0; i < changes.Length; i++ )
 		{
@@ -456,6 +477,13 @@ public static class Titanfall2VtxReader
 	private static void EnsureReadable<T>( ReadOnlySpan<byte> data, int offset ) where T : unmanaged
 	{
 		EnsureRange( data, offset, SizeOf<T>() );
+	}
+
+	// Validate a whole table before allocating it; counts come straight from the file.
+	private static void EnsureTable<T>( ReadOnlySpan<byte> data, int offset, int count ) where T : unmanaged
+	{
+		if ( offset < 0 || count < 0 || (long)count * SizeOf<T>() > data.Length - (long)offset )
+			throw new InvalidOperationException( $"VTX table is outside the buffer. Offset={offset}, Count={count}, Stride={SizeOf<T>()}, Buffer={data.Length}" );
 	}
 
 	private static void EnsureRange( ReadOnlySpan<byte> data, int offset, int length )

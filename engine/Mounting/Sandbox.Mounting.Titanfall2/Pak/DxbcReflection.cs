@@ -1,7 +1,11 @@
 using System.Buffers.Binary;
 using System.Text;
 
-readonly record struct DxbcVariable( int StartOffset, int Size );
+readonly record struct DxbcVariable( int StartOffset, int Size, uint Flags = 2 )
+{
+	// D3D_SVF_USED: RDEF also retains unused fields and their arbitrary CPU values.
+	public bool IsUsed => (Flags & 2) != 0;
+}
 
 readonly record struct DxbcResourceBinding(
 	string Name,
@@ -67,7 +71,12 @@ sealed class DxbcShaderReflection
 		foreach ( var resource in resources )
 		{
 			if ( !resource.IsTexture || resource.BindPoint < 0 ) continue;
-			for ( var offset = 0; offset < Math.Max( 1, resource.BindCount ); offset++ )
+			// RDEF allows a 65536-wide bind count from container data. Expanding that would
+			// be billions of dictionary probes, so only the slots a material can address
+			// are registered (texture arrays in retail shaders are single digit).
+			const int MaximumExpandedBindings = 64;
+			var count = Math.Clamp( resource.BindCount, 1, MaximumExpandedBindings );
+			for ( var offset = 0; offset < count; offset++ )
 				_texturesByBindPoint.TryAdd( resource.BindPoint + offset, resource with { BindPoint = resource.BindPoint + offset } );
 		}
 	}
@@ -167,7 +176,7 @@ sealed class DxbcShaderReflection
 					var size = I32( dxbc, variableEntry + 8 );
 					if ( startOffset < 0 || size < 0 || startOffset > bufferSize || size > bufferSize - startOffset
 						|| !TryReadString( dxbc, rdefOffset, blobSize, I32( dxbc, variableEntry ), out var variableName ) ) continue;
-					variables.TryAdd( variableName, new DxbcVariable( startOffset, size ) );
+					variables.TryAdd( variableName, new DxbcVariable( startOffset, size, U32( dxbc, variableEntry + 12 ) ) );
 				}
 				constantBuffers.TryAdd( name, new DxbcConstantBufferLayout( bufferSize, variables ) );
 			}

@@ -335,7 +335,11 @@ static class StartupLoadProject
 		var projectDir = Path.GetFullPath( Project.Current.RootDirectory.FullName );
 
 		var sw = Stopwatch.StartNew();
-		var gr = AssetSystem.All.Where( x => x.AssetType == AssetType.Shader && x.HasSourceFile && Path.GetFullPath( x.AbsoluteSourcePath ).StartsWith( projectDir, StringComparison.OrdinalIgnoreCase ) ).ToArray();
+		// Mounted assets can report a source without a local filesystem path.
+		// Only physical project shaders participate in this startup compile.
+		var gr = AssetSystem.All.Where( x => x.AssetType == AssetType.Shader && x.HasSourceFile
+			&& !string.IsNullOrWhiteSpace( x.AbsoluteSourcePath )
+			&& Path.GetFullPath( x.AbsoluteSourcePath ).StartsWith( projectDir, StringComparison.OrdinalIgnoreCase ) ).ToArray();
 		if ( gr.Length == 0 ) return;
 
 		var options = new ShaderCompileOptions();

@@ -58,6 +58,7 @@ COMMON
 		uint CameraFade;
 		int NormalTextureHandle;
 		float RefractionStrength;
+		int ColorRampTextureHandle;
 	};
 
 	StructuredBuffer<SpriteData> Sprites < Attribute( "Sprites" ); >;
@@ -264,6 +265,7 @@ PS
 {
 	#define CUSTOM_MATERIAL_INPUTS 1
 	#include "common/pixel.hlsl"
+	#include "common/imported_height_fog.hlsl"
 	#if ( D_TEXT )
 		#include "ui/text.hlsl"
 	#endif
@@ -415,6 +417,13 @@ PS
 			}
 		}
 
+		// Match SpriteCard: look up RG after the animation frames have blended.
+		if ( sprite.ColorRampTextureHandle != 0 )
+		{
+			Texture2D ramp = Bindless::GetTexture2DSrgb( sprite.ColorRampTextureHandle );
+			textureColor.rgb = ramp.SampleLevel( g_sBilinearClamp, textureColor.rg, 0 ).rgb;
+		}
+
 		// Unpack exponent and flags from packed int
 		uint hasLighting = 0;
 		uint exp = 0;
@@ -524,10 +533,12 @@ PS
 			col *= lighting;
 		}
 
-		if ( fogStrength > 0 ) 
+		if ( fogStrength > 0 )
 		{
 			float4 fogged = DoAtmospherics( i.vPositionWithOffsetWs.xyz + g_vHighPrecisionLightingOffsetWs.xyz, i.vPositionSs.xy, col, D_BLEND == 1 );
 			col.rgb = lerp( col.rgb, fogged.rgb, fogStrength );
+			col.rgb = lerp( col.rgb, ApplyImportedHeightFog( col.rgb,
+				i.vPositionWithOffsetWs.xyz + g_vHighPrecisionLightingOffsetWs.xyz, D_BLEND == 1 ), fogStrength );
 		}
 
 		#if ( D_REFRACTION && S_MODE_DEPTH == 0 )

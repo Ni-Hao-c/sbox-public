@@ -72,6 +72,27 @@ public class ParticleEffectTest
 	}
 
 	/// <summary>
+	/// Rates below one particle per second must accumulate instead of rounding to zero.
+	/// </summary>
+	[TestMethod]
+	public void RateEmission_PreservesFractionalRates()
+	{
+		var scene = new Scene();
+		using var sceneScope = scene.Push();
+		var go = scene.CreateObject();
+		var effect = go.Components.Create<ParticleEffect>();
+		effect.Lifetime = 30f;
+		var emitter = go.Components.Create<ParticleSphereEmitter>();
+		emitter.Burst = 0f;
+		emitter.Rate = 0.25f;
+		emitter.Duration = 30f;
+		emitter.Loop = false;
+		emitter.ResetEmitter();
+		for ( var i = 0; i < 300; i++ ) effect.Step( 1f / 30f );
+		Assert.AreEqual( 3, effect.ParticleCount );
+	}
+
+	/// <summary>
 	/// MaxParticles caps the total particle count. A burst larger than the cap stops emitting
 	/// once the effect is full, and a continuous Rate can never push the count above the cap
 	/// on subsequent ticks. The emitter is reset after configuration so the snapshotted
@@ -844,6 +865,29 @@ public class ParticleEffectTest
 		renderer.Refraction = false;
 		batched.ProcessParticlesDirectly( upload );
 		Assert.AreEqual( 0, upload[0].NormalTextureHandle );
+	}
+
+	[TestMethod]
+	public void SpriteRenderer_ColorRampUploadClearsReusedSlots()
+	{
+		var scene = new Scene();
+		using var sceneScope = scene.Push();
+		var renderer = scene.CreateObject().Components.Create<ParticleSpriteRenderer>();
+		renderer.Sprite = Sprite.FromTexture( Texture.White );
+		renderer.ColorRamp = Texture.White;
+		renderer.Refraction = true;
+		renderer.NormalTexture = Texture.Black;
+		renderer.ParticleEffect.Emit( Vector3.Zero, 0 );
+		var upload = new SpriteBatchSceneObject.SpriteData[1];
+		IBatchedParticleSpriteRenderer batched = renderer;
+		Assert.AreEqual( 1, batched.ProcessParticlesDirectly( upload ).SpriteCount );
+		Assert.AreEqual( Texture.White.Index, upload[0].ColorRampTextureHandle );
+		Assert.AreEqual( Texture.Black.Index, upload[0].NormalTextureHandle );
+
+		renderer.ColorRamp = null;
+		batched.ProcessParticlesDirectly( upload );
+		Assert.AreEqual( 0, upload[0].ColorRampTextureHandle );
+		Assert.AreEqual( Texture.Black.Index, upload[0].NormalTextureHandle );
 	}
 
 	/// <summary>

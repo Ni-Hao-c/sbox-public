@@ -11,7 +11,7 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 {
 	static readonly Sandbox.Diagnostics.Logger Log = new( "Titanfall2Particles" );
 	const int DataMagic = 0x58465054; // TPFX
-	const int DataVersion = 2;
+	const int DataVersion = 3;
 	const int MaximumEntityCount = 100_000;
 
 	[Property, Hide]
@@ -29,9 +29,20 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 	readonly List<RuntimeEntity> _pending = [];
 	readonly List<SpawnedEntity> _spawned = [];
 	readonly Stopwatch _statusTimer = new();
-	readonly Stopwatch _activationTimer = new();
+	// Reusable budget/probe timers: this path runs every frame and Stopwatch.StartNew()
+	// allocates, so they are created once and restarted in place.
+	readonly Stopwatch _spawnTimer = new();
+	readonly Stopwatch _spawnProbe = new();
+	readonly Stopwatch _warmupProbe = new();
+	// Frustum planes are tested against the effect's influence sphere grown by this
+	// margin, which covers sprites past the estimate and the camera turning between frames.
+	const float SleepFrustumMargin = 256f;
+	const float WakeWarmupStep = 1f / 15f;
+	// Milliseconds spent warming woken effects in the current frame.
+	double _warmupMilliseconds;
 	bool _initialized;
 	bool _completionLogged;
+	bool _catalogResolved;
 	int _failed;
 	int _failureLogs;
 
@@ -45,6 +56,14 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 	}
 
 	protected override void OnAwake() => InitializeEntities();
+
+	protected override void OnEnabled() => RefreshActivation();
+
+	protected override void OnDisabled()
+	{
+		foreach ( var entity in _spawned )
+			if ( entity.GameObject.IsValid() ) entity.GameObject.Enabled = false;
+	}
 
 	protected override void OnUpdate()
 	{
@@ -62,18 +81,25 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 		}
 
 		SpawnAvailable( mount );
-		if ( _pending.Count > 0 && mount.IsParticleCatalogComplete )
+		if ( _pending.Count > 0 && mount.IsParticleCatalogComplete && !_catalogResolved )
 		{
-			_failed += _pending.Count;
-			foreach ( var entity in _pending.Take( 16 - Math.Min( 16, _failureLogs ) ) )
+			_catalogResolved = true;
+			// A completed catalog only proves which names are missing. Valid
+			// systems can still be queued behind this frame's creation budget.
+			for ( var index = _pending.Count - 1; index >= 0; --index )
 			{
-				Titanfall2Log.Warning( $"Titanfall 2 particle definition '{entity.EffectName}' was not found for '{MapPath}'." );
-				_failureLogs++;
+				var entity = _pending[index];
+				if ( mount.TryGetParticleDefinition( entity.EffectName, out _ ) ) continue;
+				_pending.RemoveAt( index );
+				_failed++;
+				if ( _failureLogs++ < 16 )
+					Titanfall2Log.Warning( $"Titanfall 2 particle definition '{entity.EffectName}' was not found for '{MapPath}'." );
 			}
-			_pending.Clear();
 		}
 
-		if ( _activationTimer.Elapsed.TotalSeconds >= 0.25 ) RefreshActivation();
+		// Every frame: a woken effect must be enabled before it reaches the screen, and
+		// the pass is one distance and one frustum test per retained system.
+		RefreshActivation();
 		if ( !_completionLogged && _pending.Count == 0 )
 		{
 			_completionLogged = true;
@@ -101,16 +127,14 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 
 	void InitializeEntities()
 	{
-		if ( _initialized ) return;
+		if ( _initialized || string.IsNullOrWhiteSpace( EncodedEntities ) ) return;
 		_initialized = true;
-		if ( string.IsNullOrWhiteSpace( EncodedEntities ) ) return;
 		try
 		{
 			_pending.AddRange( Decode( EncodedEntities ) );
 			var anchor = GetAnchor();
 			_pending.Sort( ( left, right ) => left.Position.DistanceSquared( anchor ).CompareTo( right.Position.DistanceSquared( anchor ) ) );
 			_statusTimer.Start();
-			_activationTimer.Start();
 			Log.Info( $"Titanfall 2 particle streamer ready: {_pending.Count} active map FX; "
 				+ $"{Titanfall2StreamingSettings.ParticleLibrariesPerFrame} PCFs/frame, "
 				+ $"{Titanfall2StreamingSettings.ParticleInstancesPerFrame} systems/frame ({MapPath})." );
@@ -125,11 +149,11 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 	void SpawnAvailable( Titanfall2Mount mount )
 	{
 		if ( _pending.Count == 0 ) return;
-		var timer = Stopwatch.StartNew();
+		_spawnTimer.Restart();
 		var created = 0;
 		for ( var index = 0; index < _pending.Count
 			&& created < Titanfall2StreamingSettings.ParticleInstancesPerFrame
-			&& timer.Elapsed.TotalMilliseconds < Titanfall2StreamingSettings.ParticleInstanceFrameBudgetMilliseconds; )
+			&& _spawnTimer.Elapsed.TotalMilliseconds < Titanfall2StreamingSettings.ParticleInstanceFrameBudgetMilliseconds; )
 		{
 			var entity = _pending[index];
 			if ( !mount.TryGetParticleDefinition( entity.EffectName, out var definition ) )
@@ -139,8 +163,13 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 			}
 
 			_pending.RemoveAt( index );
+			// One system creation can decode a VTF sprite sheet and build materials and
+			// models, so it is measured on its own rather than relying on the budget
+			// check above, which only runs between entities.
+			_spawnProbe.Restart();
 			if ( SpawnEntity( mount, entity, definition ) ) created++;
 			else _failed++;
+			Titanfall2Log.ReportSpike( _spawnProbe, "particle system '{0}'", entity.EffectName );
 		}
 	}
 
@@ -148,10 +177,28 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 	{
 		var gameObject = new GameObject( GameObject, true,
 			string.IsNullOrWhiteSpace( entity.TargetName ) ? entity.EffectName : entity.TargetName );
+		gameObject.Flags |= GameObjectFlags.NotSaved;
 		gameObject.WorldPosition = entity.Position;
 		gameObject.WorldRotation = entity.Rotation;
 		gameObject.WorldScale = Vector3.One * entity.Scale;
-		if ( !Titanfall2ParticleFactory.TryCreate( gameObject, mount, definition, out var createdSystems, out var error ) )
+		var points = gameObject.AddComponent<Titanfall2ParticleControlPoints>();
+		foreach ( var point in entity.ControlPoints ) points.SetControlPoint( point.Index, point.Position );
+		bool createdSystem;
+		int createdSystems;
+		string error;
+		var systems = new List<Titanfall2ParticleFactory.CreatedSystem>();
+		try
+		{
+			createdSystem = Titanfall2ParticleFactory.TryCreate( gameObject, mount, definition, out createdSystems, out error, systems );
+		}
+		catch ( Exception exception )
+		{
+			// This runs from OnUpdate: a malformed PCF must not escape the frame callback.
+			createdSystem = false;
+			createdSystems = 0;
+			error = exception.Message;
+		}
+		if ( !createdSystem )
 		{
 			gameObject.Destroy();
 			if ( _failureLogs++ < 16 ) Titanfall2Log.Warning( $"Unable to create Titanfall 2 particle '{entity.EffectName}': {error}" );
@@ -159,25 +206,91 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 		}
 
 		var alwaysActive = IsGlobalEffect( entity.EffectName );
-		var spawned = new SpawnedEntity( gameObject, entity.Position, alwaysActive, createdSystems );
+		var influenceRadius = Titanfall2ParticleFactory.GetInfluenceRadius( definition ) * entity.Scale;
+		// A system tree is drawn while any of its systems is, so the tree keeps the largest
+		// draw distance and sleep time of its members.
+		var drawDistance = 0f;
+		var sleepTime = 0f;
+		var warmup = new List<(ParticleEffect Effect, float Seconds)>();
+		foreach ( var system in systems )
+		{
+			drawDistance = MathF.Max( drawDistance, system.Definition.MaxDrawDistance * entity.Scale );
+			sleepTime = MathF.Max( sleepTime, system.Definition.SleepWhenNotDrawnTime );
+			var seconds = system.Definition.Looping
+				? MathF.Min( Titanfall2StreamingSettings.ParticleWakeWarmupSeconds,
+					MathF.Max( system.Definition.WarmupTime, system.Definition.LifetimeMaximum ) )
+				: 0f;
+			if ( seconds > 0f && system.Effect.IsValid() ) warmup.Add( (system.Effect, seconds) );
+		}
+		var spawned = new SpawnedEntity( gameObject, entity.Position, alwaysActive, createdSystems, influenceRadius,
+			drawDistance + influenceRadius, sleepTime, warmup.ToArray() );
 		_spawned.Add( spawned );
-		ApplyActivation( spawned, GetAnchor() );
+		// A new system was just warmed by the factory; it only needs its initial state.
+		ApplyActivation( spawned, GetAnchor(), GetViewFrustum(), Time.Now, false );
 		return true;
 	}
 
 	void RefreshActivation()
 	{
-		_activationTimer.Restart();
+		_warmupMilliseconds = 0;
 		var anchor = GetAnchor();
-		foreach ( var entity in _spawned ) ApplyActivation( entity, anchor );
+		var frustum = GetViewFrustum();
+		var now = Time.Now;
+		foreach ( var entity in _spawned ) ApplyActivation( entity, anchor, frustum, now, true );
 	}
 
-	static void ApplyActivation( SpawnedEntity entity, Vector3 anchor )
+	/// <summary>
+	/// The camera frustum for the sleep test, or null when sleeping is off or there is no
+	/// camera to test against.
+	/// </summary>
+	Frustum? GetViewFrustum()
+	{
+		if ( !Titanfall2StreamingSettings.ParticleSleepWhenNotDrawn ) return null;
+		var camera = Scene?.Camera;
+		return camera.IsValid() ? camera.GetFrustum() : null;
+	}
+
+	void ApplyActivation( SpawnedEntity entity, Vector3 anchor, Frustum? frustum, float now, bool warm )
 	{
 		if ( !entity.GameObject.IsValid() || entity.GameObject.IsDestroyed ) return;
-		var radius = Titanfall2StreamingSettings.ParticleActivationRadius;
-		var wanted = entity.AlwaysActive || entity.Position.DistanceSquared( anchor ) <= radius * radius;
-		if ( entity.GameObject.Enabled != wanted ) entity.GameObject.Enabled = wanted;
+		var wanted = entity.AlwaysActive || IsWanted( entity, anchor, frustum, now );
+		if ( entity.GameObject.Enabled == wanted ) return;
+		entity.GameObject.Enabled = wanted;
+		if ( wanted && warm ) WarmUp( entity );
+	}
+
+	static bool IsWanted( SpawnedEntity entity, Vector3 anchor, Frustum? frustum, float now )
+	{
+		var radius = Titanfall2StreamingSettings.ParticleActivationRadius + entity.InfluenceRadius;
+		if ( Titanfall2StreamingSettings.ParticleDrawDistance ) radius = MathF.Min( radius, entity.DrawDistance );
+		if ( entity.Position.DistanceSquared( anchor ) > radius * radius ) return false;
+		if ( frustum is not { } view ) return true;
+
+		if ( view.IsInside( entity.Position, entity.InfluenceRadius + SleepFrustumMargin, true ) )
+		{
+			entity.LastVisibleTime = now;
+			return true;
+		}
+		return now - entity.LastVisibleTime < entity.SleepTime;
+	}
+
+	/// <summary>
+	/// Disabling an effect clears its particles, so a looping effect that wakes would refill
+	/// from empty in plain view. It is stepped forward a little instead, within a per-frame
+	/// budget so turning around does not stall on many wakes at once.
+	/// </summary>
+	void WarmUp( SpawnedEntity entity )
+	{
+		if ( entity.Warmup.Length == 0 ) return;
+		if ( _warmupMilliseconds >= Titanfall2StreamingSettings.ParticleWakeWarmupBudgetMilliseconds ) return;
+		_warmupProbe.Restart();
+		foreach ( var (effect, seconds) in entity.Warmup )
+		{
+			if ( !effect.IsValid() || !effect.Active ) continue;
+			for ( var remaining = seconds; remaining > 0f; remaining -= WakeWarmupStep )
+				effect.Step( MathF.Min( remaining, WakeWarmupStep ) );
+		}
+		_warmupMilliseconds += _warmupProbe.Elapsed.TotalMilliseconds;
 	}
 
 	Vector3 GetAnchor() => Scene?.Camera.IsValid() == true ? Scene.Camera.WorldPosition : FallbackAnchor;
@@ -212,6 +325,13 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 				writer.Write( entity.Rotation.yaw );
 				writer.Write( entity.Rotation.roll );
 				writer.Write( entity.Scale );
+				var points = entity.ControlPoints ?? Array.Empty<Titanfall2ParticleMapControlPoint>();
+				writer.Write( points.Count );
+				foreach ( var point in points )
+				{
+					writer.Write( point.Index );
+					writer.Write( point.Position.x ); writer.Write( point.Position.y ); writer.Write( point.Position.z );
+				}
 			}
 		}
 		return Convert.ToBase64String( stream.GetBuffer(), 0, checked((int)stream.Length) );
@@ -222,7 +342,8 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 		using var stream = new MemoryStream( Convert.FromBase64String( encoded ), false );
 		using var reader = new BinaryReader( stream, System.Text.Encoding.UTF8, false );
 		if ( reader.ReadInt32() != DataMagic ) throw new InvalidDataException( "Particle entity data has an invalid signature." );
-		if ( reader.ReadInt32() != DataVersion ) throw new InvalidDataException( "Particle entity data has an unsupported version." );
+		var version = reader.ReadInt32();
+		if ( version is < 2 or > DataVersion ) throw new InvalidDataException( "Particle entity data has an unsupported version." );
 		var count = reader.ReadInt32();
 		if ( count < 0 || count > MaximumEntityCount ) throw new InvalidDataException( $"Invalid particle entity count {count}." );
 		for ( var index = 0; index < count; index++ )
@@ -232,20 +353,69 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 			var position = new Vector3( reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle() );
 			var rotation = new Angles( reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle() );
 			var scale = Math.Clamp( reader.ReadSingle(), 0.001f, 1000f );
-			yield return new RuntimeEntity( effectName, targetName, position, rotation, scale );
+			var points = Array.Empty<Titanfall2ParticleMapControlPoint>();
+			if ( version >= 3 )
+			{
+				var pointCount = reader.ReadInt32();
+				if ( pointCount is < 0 or > 64 ) throw new InvalidDataException( "Particle control point count is invalid." );
+				points = new Titanfall2ParticleMapControlPoint[pointCount];
+				for ( var point = 0; point < pointCount; ++point )
+				{
+					var id = reader.ReadInt32();
+					var location = new Vector3( reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle() );
+					if ( id is < 0 or > 63 || !Titanfall2ParticleControlPoints.IsFinite( location ) )
+						throw new InvalidDataException( "Particle control point is invalid." );
+					points[point] = new( id, location );
+				}
+			}
+			yield return new RuntimeEntity( effectName, targetName, position, rotation, scale, points );
 		}
 	}
 
-	readonly record struct RuntimeEntity( string EffectName, string TargetName, Vector3 Position, Angles Rotation, float Scale );
-	readonly record struct SpawnedEntity( GameObject GameObject, Vector3 Position, bool AlwaysActive, int SystemCount );
+	readonly record struct RuntimeEntity( string EffectName, string TargetName, Vector3 Position, Angles Rotation, float Scale,
+		IReadOnlyList<Titanfall2ParticleMapControlPoint> ControlPoints );
+	sealed class SpawnedEntity( GameObject gameObject, Vector3 position, bool alwaysActive, int systemCount, float influenceRadius,
+		float drawDistance, float sleepTime, (ParticleEffect Effect, float Seconds)[] warmup )
+	{
+		public GameObject GameObject { get; } = gameObject;
+		public Vector3 Position { get; } = position;
+		public bool AlwaysActive { get; } = alwaysActive;
+		public int SystemCount { get; } = systemCount;
+		public float InfluenceRadius { get; } = influenceRadius;
+		/// <summary>Distance from <see cref="Position"/> beyond which no system in the tree is drawn.</summary>
+		public float DrawDistance { get; } = drawDistance;
+		public float SleepTime { get; } = sleepTime;
+		public (ParticleEffect Effect, float Seconds)[] Warmup { get; } = warmup;
+		/// <summary>Starts at creation, so a new system gets its full sleep time before it can sleep.</summary>
+		public float LastVisibleTime { get; set; } = Time.Now;
+	}
 }
 
 static class Titanfall2ParticleFactory
 {
 	const int MaximumChildDepth = 8;
 
+	internal static float GetRadiusLimit( Titanfall2ParticleDefinition definition ) =>
+		definition.MaterialName?.StartsWith( "particle/smoke/", StringComparison.OrdinalIgnoreCase ) == true
+			? MathF.Max( Titanfall2StreamingSettings.ParticleMaximumRadius, Titanfall2StreamingSettings.ParticleAtmosphereMaximumRadius )
+			: Titanfall2StreamingSettings.ParticleMaximumRadius;
+
+	internal static float GetInfluenceRadius( Titanfall2ParticleDefinition definition )
+	{
+		var radius = MathF.Max( definition.RadiusMinimum * definition.RadiusMultiplierMinimum,
+			definition.RadiusMaximum * definition.RadiusMultiplierMaximum );
+		if ( definition.RadiusScale is { } scale ) radius *= MathF.Max( 1, MathF.Max( scale.StartScale, scale.EndScale ) );
+		foreach ( var remap in definition.DistanceRemaps.Where( remap => remap.Field == 3 && remap.ScaleInitialRange ) )
+			radius *= MathF.Max( 1, MathF.Max( remap.OutputMin, remap.OutputMax ) );
+		var offset = MathF.Max( definition.PositionMinimum.Length, definition.PositionMaximum.Length );
+		return Math.Clamp( radius, 0, GetRadiusLimit( definition ) ) + MathF.Min( Titanfall2StreamingSettings.ParticleMaximumEmitterExtent,
+			MathF.Max( offset, definition.ShapeMaximum ) );
+	}
+
+	internal readonly record struct CreatedSystem( ParticleEffect Effect, Titanfall2ParticleDefinition Definition );
+
 	internal static bool TryCreate( GameObject entityObject, Titanfall2Mount mount,
-		Titanfall2ParticleDefinition definition, out int createdSystems, out string error )
+		Titanfall2ParticleDefinition definition, out int createdSystems, out string error, List<CreatedSystem> systems = null )
 	{
 		createdSystems = 0;
 		error = null;
@@ -256,12 +426,12 @@ static class Titanfall2ParticleFactory
 		}
 
 		var stack = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
-		if ( !CreateDefinition( entityObject, mount, definition, stack, 0, ref createdSystems, out error ) ) return false;
+		if ( !CreateDefinition( entityObject, mount, definition, stack, 0, ref createdSystems, out error, systems ) ) return false;
 		return createdSystems > 0;
 	}
 
 	static bool CreateDefinition( GameObject parent, Titanfall2Mount mount, Titanfall2ParticleDefinition definition,
-		HashSet<string> stack, int depth, ref int createdSystems, out string error )
+		HashSet<string> stack, int depth, ref int createdSystems, out string error, List<CreatedSystem> systems )
 	{
 		error = null;
 		if ( depth > MaximumChildDepth )
@@ -277,20 +447,40 @@ static class Titanfall2ParticleFactory
 
 		var gameObject = new GameObject( parent, true, definition.Name );
 		gameObject.LocalTransform = Transform.Zero;
+		var controlPoints = gameObject.AddComponent<Titanfall2ParticleControlPoints>();
+		controlPoints.Configure( parent.Components.GetInAncestorsOrSelf<Titanfall2ParticleControlPoints>(), definition.ControlPoints );
 		var effect = gameObject.AddComponent<ParticleEffect>();
 		ConfigureEffect( effect, definition );
-		ConfigureEmitter( gameObject, definition );
-		var hasRenderer = ConfigureRenderer( gameObject, mount, definition );
-		createdSystems++;
+		Titanfall2ParticleGeometry geometry = null;
+		if ( definition.OrientationType == 2 || definition.Path.HasValue || definition.Visibility.HasValue || definition.EndCapLifetime || definition.DistanceRemaps.Count > 0
+			|| definition.ColorRemaps.Count > 0 || definition.ScalarRemaps.Count > 0 || definition.RandomFadeIn.HasValue || definition.RandomFadeOut.HasValue || definition.PositionWarpMinimum != Vector3.One
+			|| definition.PositionWarpMaximum != Vector3.One || (definition.Renderer & Titanfall2ParticleRenderer.Trail) != 0 )
+		{
+			geometry = gameObject.AddComponent<Titanfall2ParticleGeometry>();
+			geometry.Configure( definition, controlPoints, CreateStretch( definition ) );
+		}
+		ConfigureEmitter( gameObject, definition, controlPoints );
+		var hasRenderer = ConfigureRenderer( gameObject, mount, definition, geometry );
+		var hasChildren = false;
 
 		foreach ( var childName in definition.Children.Distinct( StringComparer.OrdinalIgnoreCase ) )
 		{
 			if ( !mount.TryGetParticleDefinition( childName, out var childDefinition ) ) continue;
-			_ = CreateDefinition( gameObject, mount, childDefinition, stack, depth + 1, ref createdSystems, out _ );
+			hasChildren |= CreateDefinition( gameObject, mount, childDefinition, stack, depth + 1, ref createdSystems, out _, systems );
 		}
 
 		stack.Remove( definition.Name );
-		if ( hasRenderer || definition.Children.Count > 0 ) return true;
+		if ( hasRenderer || hasChildren )
+		{
+			// PCFs can author a pre-roll so low-rate fog emitters start filled.
+			// Small steps preserve their normal lifetime curves and operator order.
+			for ( var remaining = definition.WarmupTime; remaining > 0f; remaining -= 1f / 30f )
+				effect.Step( MathF.Min( remaining, 1f / 30f ) );
+			createdSystems++;
+			systems?.Add( new CreatedSystem( effect, definition ) );
+			return true;
+		}
+		gameObject.Destroy();
 		error = $"Particle '{definition.Name}' has no supported renderer or child system.";
 		return false;
 	}
@@ -298,7 +488,7 @@ static class Titanfall2ParticleFactory
 	static void ConfigureEffect( ParticleEffect effect, Titanfall2ParticleDefinition definition )
 	{
 		effect.MaxParticles = Math.Clamp( definition.MaxParticles, 1, Titanfall2StreamingSettings.ParticleMaxParticlesPerSystem );
-		effect.Lifetime = Range( definition.LifetimeMinimum, definition.LifetimeMaximum );
+		effect.Lifetime = definition.EndCapLifetime ? float.MaxValue : Range( definition.LifetimeMinimum, definition.LifetimeMaximum );
 		effect.LocalSpace = definition.LocalPosition || definition.LocalVelocity ? 1f : 0f;
 		var maximumVelocity = Titanfall2StreamingSettings.ParticleMaximumVelocity;
 		effect.InitialVelocity = new ParticleVector3
@@ -323,10 +513,8 @@ static class Titanfall2ParticleFactory
 		effect.Alpha = CreateAlpha( definition );
 		effect.ApplyShape = true;
 		effect.Scale = CreateScale( definition );
-		// Source's sprite_trail renderer describes history samples and endpoints;
-		// s&box's Stretch/LeadingTrail fields are not a direct equivalent. Applying
-		// them produced map-spanning white/green lines, so retain the sprite itself
-		// and defer the trail until its operators are converted explicitly.
+		// Sprite trails are sized after simulation using velocity * trail seconds,
+		// with the PCF renderer's separate world-space min/max lengths.
 
 		if ( MathF.Abs( definition.RotationMinimum ) > float.Epsilon
 			|| MathF.Abs( definition.RotationMaximum ) > float.Epsilon
@@ -347,6 +535,9 @@ static class Titanfall2ParticleFactory
 				? CreateYawFlip()
 				: Range( definition.YawMinimum, definition.YawMaximum );
 		}
+		// World-Z sprites still need their source angles reset each simulation
+		// step before the geometry controller rotates the card into the XY plane.
+		if ( definition.OrientationType == 2 ) effect.ApplyRotation = true;
 
 		if ( definition.Gravity.LengthSquared > float.Epsilon )
 		{
@@ -366,7 +557,20 @@ static class Titanfall2ParticleFactory
 		}
 	}
 
-	static void ConfigureEmitter( GameObject effectObject, Titanfall2ParticleDefinition definition )
+	internal static int GetBurstCount( Titanfall2ParticleDefinition definition, Titanfall2ParticleControlPoints points )
+	{
+		var maximum = Math.Clamp( definition.MaxParticles, 1, Titanfall2StreamingSettings.ParticleMaxParticlesPerSystem );
+		var count = Math.Clamp( definition.Burst, 0f, maximum );
+		if ( definition.BurstSpacing > 0f && definition.Path is { } path && points.IsValid() )
+		{
+			var distance = points.GetControlPoint( path.Start ).Distance( points.GetControlPoint( path.End ) );
+			if ( float.IsFinite( distance ) )
+				count += MathF.Max( 2f, MathF.Ceiling( Math.Clamp( distance / definition.BurstSpacing, 0f, maximum ) ) + 1f );
+		}
+		return (int)Math.Clamp( count, 0f, maximum );
+	}
+
+	static void ConfigureEmitter( GameObject effectObject, Titanfall2ParticleDefinition definition, Titanfall2ParticleControlPoints points )
 	{
 		var emitterObject = new GameObject( effectObject, true, "emitter" );
 		var maximumExtent = Titanfall2StreamingSettings.ParticleMaximumEmitterExtent;
@@ -406,18 +610,26 @@ static class Titanfall2ParticleFactory
 			emitter = point;
 		}
 
-		emitter.Loop = definition.Looping;
+		// Continuous PCF emission does not restart at every particle lifetime.
+		// Bursts occur once; zero-duration continuous emitters run until stopped.
+		emitter.Loop = false;
 		emitter.DestroyOnEnd = false;
-		emitter.Duration = MathF.Max( 0.05f, definition.Duration );
-		emitter.Delay = 0f;
-		emitter.Burst = MathF.Max( 0f, definition.Burst );
+		emitter.Duration = definition.EmissionDuration > 0f ? definition.EmissionDuration
+			: definition.Looping ? float.MaxValue : MathF.Max( 0.05f, definition.Duration );
+		emitter.Delay = definition.EmissionStartTime;
+		emitter.Burst = GetBurstCount( definition, points );
 		emitter.Rate = MathF.Max( 0f, definition.EmissionRate );
+		emitter.RateOverDistance = definition.EmissionRateOverDistance;
+		// OnEnabled ran when the component was attached, before these PCF values
+		// were assigned. Refresh its cached burst, duration and start delay now.
+		emitter.ResetEmitter();
 	}
 
-	static bool ConfigureRenderer( GameObject gameObject, Titanfall2Mount mount, Titanfall2ParticleDefinition definition )
+	static bool ConfigureRenderer( GameObject gameObject, Titanfall2Mount mount, Titanfall2ParticleDefinition definition,
+		Titanfall2ParticleGeometry geometry )
 	{
 		var created = false;
-		if ( (definition.Renderer & Titanfall2ParticleRenderer.Sprite) != 0
+		if ( (definition.Renderer & (Titanfall2ParticleRenderer.Sprite | Titanfall2ParticleRenderer.Trail)) != 0
 			&& !string.IsNullOrWhiteSpace( definition.MaterialName )
 			&& mount.TryGetOrCreateLegacyMaterialDescriptor( definition.MaterialName, out var materialDescriptor, out _ )
 			&& mount.TryGetLegacyMaterialDefinition( definition.MaterialName, out var materialDefinition, out _ ) )
@@ -431,10 +643,49 @@ static class Titanfall2ParticleFactory
 				&& mount.TryGetLegacyParticleSprite( textureName, frameRate, out var sprite, out _ ) )
 			{
 				var metadata = materialDescriptor.Metadata;
+				// The sprite batch preserves HDR colour via RGBE. Keep the VMT's
+				// overbright factor in that path rather than clipping it to an 8-bit tint.
+				var tint = materialDefinition.GetVector( "$color", Vector4.One );
+				var brightness = Math.Clamp( materialDefinition.GetFloat( "$overbrightfactor", 1f ), 0f, 64f ) * definition.ColorHdrScale;
+				gameObject.Components.Get<ParticleEffect>().Tint = new Color(
+					tint.x * brightness, tint.y * brightness, tint.z * brightness,
+					Math.Clamp( materialDefinition.GetFloat( "$alpha", 1f ), 0f, 1f ) );
 				var renderer = gameObject.AddComponent<ParticleSpriteRenderer>();
+				var trail = (definition.Renderer & Titanfall2ParticleRenderer.Trail) != 0;
+				if ( trail )
+				{
+					// Pin the head to the particle. Stretching a centred sprite pushes
+					// half the streak ahead of its actual position.
+					sprite = new Sprite
+					{
+						Animations = sprite.Animations.Select( animation => new Sprite.Animation
+						{
+							Name = animation.Name,
+							Frames = animation.Frames,
+							FrameRate = animation.FrameRate,
+							LoopMode = animation.LoopMode,
+							Origin = new Vector2( 0.5f, 0f )
+						} ).ToList()
+					};
+					var frame = sprite.Animations.FirstOrDefault()?.Frames.FirstOrDefault()?.Texture;
+					geometry?.Configure( definition, gameObject.Components.Get<Titanfall2ParticleControlPoints>(),
+						CreateStretch( definition ), frame is not null ? frame.Width / (float)frame.Height : 1f );
+				}
 				renderer.Sprite = sprite;
+				var rampPath = Titanfall2LegacyPath.NormalizeTextureName( materialDefinition.GetString( "$ramptexture" ) );
+				Texture colorRamp = null;
+				if ( !string.IsNullOrEmpty( rampPath ) )
+				{
+					var ramp = Texture.Load( $"mount://{mount.Ident}/{rampPath}.vtex", false );
+					if ( ramp is not null && ramp.IsValid && !ramp.IsError ) colorRamp = ramp;
+					else Titanfall2Log.Warning( $"Unable to load particle color ramp '{rampPath}' ({definition.MaterialName})." );
+				}
+				renderer.FaceVelocity = trail;
+				renderer.MotionBlur = false;
 				renderer.PlaybackSpeed = 1f;
-				renderer.Scale = 1f;
+				// Source PCF size is a radius; the native sprite scale is a diameter.
+				// Trails already construct their full width/length in the controller.
+				renderer.Scale = trail ? 1f : 2f;
 				renderer.Additive = metadata.Mode == Titanfall2MaterialMode.Additive;
 				renderer.Lighting = !metadata.IsUnlit;
 				renderer.Opaque = false;
@@ -444,15 +695,38 @@ static class Titanfall2ParticleFactory
 					: ParticleSpriteRenderer.ParticleSortMode.ByDistance;
 				renderer.Alignment = definition.OrientationType switch
 				{
-					2 => ParticleSpriteRenderer.BillboardAlignment.RotateToCamera,
+					1 => ParticleSpriteRenderer.BillboardAlignment.RotateToCamera,
+					2 => ParticleSpriteRenderer.BillboardAlignment.Particle,
 					3 => ParticleSpriteRenderer.BillboardAlignment.Particle,
 					_ => ParticleSpriteRenderer.BillboardAlignment.LookAtCamera
 				};
-				renderer.DepthFeather = definition.DepthFeather > 0f
-					? Math.Clamp( definition.DepthFeather, 0f, 64f )
-					: 4f;
-				renderer.FogStrength = 1f;
+				var depthFeather = definition.DepthFeather > 0f ? definition.DepthFeather
+					: materialDefinition.GetBool( "$depthblend" ) ? materialDefinition.GetFloat( "$depthblendscale", 50f )
+					: materialDefinition.GetString( "$depthblend" ) is not null ? 0f : 4f;
+				renderer.DepthFeather = Math.Clamp( depthFeather, 0f, 8192f );
+				renderer.FogStrength = Math.Clamp( materialDefinition.GetFloat( "$vertexfogamount", 1f ), 0, 1 );
+				renderer.CameraFadeNear = 4f;
+				renderer.CameraFadeFar = 24f;
+				if ( colorRamp is not null ) gameObject.AddComponent<Titanfall2ParticleRampRenderer>().Configure( renderer, colorRamp );
 				created = true;
+			}
+		}
+
+		if ( (definition.Renderer & Titanfall2ParticleRenderer.Rope) != 0
+			&& !string.IsNullOrWhiteSpace( definition.MaterialName )
+			&& mount.TryGetOrCreateLegacyMaterialDescriptor( definition.MaterialName, out var ropeMaterial, out _ )
+			&& mount.TryGetLegacyMaterialDefinition( definition.MaterialName, out var ropeDefinition, out _ ) )
+		{
+			var texturePath = ropeMaterial.TextureBindings.FirstOrDefault( binding => binding.Semantic == Titanfall2TextureSemantic.Albedo ).TexturePath;
+			if ( !string.IsNullOrWhiteSpace( texturePath ) )
+			{
+				var texture = Texture.Load( $"mount://{mount.Ident}/{texturePath}.vtex", false );
+				if ( texture is not null && texture.IsValid && !texture.IsError )
+				{
+					gameObject.AddComponent<Titanfall2ParticleRopeRenderer>().Configure( definition, texture, ropeDefinition,
+						ropeMaterial.Metadata.Mode == Titanfall2MaterialMode.Additive );
+					created = true;
+				}
 			}
 		}
 
@@ -471,7 +745,7 @@ static class Titanfall2ParticleFactory
 		if ( (definition.Renderer & Titanfall2ParticleRenderer.Model) != 0 && !string.IsNullOrWhiteSpace( definition.ModelName ) )
 		{
 			var model = Model.Load( $"mount://{mount.Ident}/{definition.ModelName}.vmdl" );
-			if ( model is not null && model != Model.Error )
+			if ( ModelLoader.IsUsableModel( model ) )
 			{
 				var modelRenderer = gameObject.AddComponent<ParticleModelRenderer>();
 				modelRenderer.Choices = [new ParticleModelRenderer.ModelEntry { Model = model }];
@@ -501,8 +775,11 @@ static class Titanfall2ParticleFactory
 		var target = ToColor( fade );
 		var gradient = new Gradient();
 		gradient.AddColor( 0f, start );
-		gradient.AddColor( Math.Clamp( definition.ColorFadeStart, 0f, 1f ), start );
-		gradient.AddColor( Math.Clamp( definition.ColorFadeEnd, definition.ColorFadeStart, 1f ), target );
+		// fade_start_time is raw PCF data; clamp it before it becomes a Clamp minimum,
+		// or a value above 1 throws from the streamer's OnUpdate.
+		var fadeStart = Math.Clamp( definition.ColorFadeStart, 0f, 1f );
+		gradient.AddColor( fadeStart, start );
+		gradient.AddColor( Math.Clamp( definition.ColorFadeEnd, fadeStart, 1f ), target );
 		gradient.AddColor( 1f, target );
 		return new ParticleGradient
 		{
@@ -517,7 +794,7 @@ static class Titanfall2ParticleFactory
 		var graphs = definition.ScalarGraphs.Where( static graph => graph.OutputField is 7 or 16 ).ToArray();
 		var minimum = definition.AlphaMinimum * definition.AlphaMultiplierMinimum;
 		var maximum = definition.AlphaMaximum * definition.AlphaMultiplierMaximum;
-		if ( definition.AlphaFade is null && graphs.Length == 0 ) return Range( minimum, maximum );
+		if ( definition.EndCapLifetime || (definition.AlphaFade is null && graphs.Length == 0) ) return Range( minimum, maximum );
 		return new ParticleFloat
 		{
 			Type = ParticleFloat.ValueType.CurveRange,
@@ -532,10 +809,10 @@ static class Titanfall2ParticleFactory
 	static ParticleFloat CreateScale( Titanfall2ParticleDefinition definition )
 	{
 		var graphs = definition.ScalarGraphs.Where( static graph => graph.OutputField == 3 ).ToArray();
-		var radiusLimit = Titanfall2StreamingSettings.ParticleMaximumRadius;
+		var radiusLimit = GetRadiusLimit( definition );
 		var minimum = Math.Clamp( definition.RadiusMinimum * definition.RadiusMultiplierMinimum, 0.01f, radiusLimit );
 		var maximum = Math.Clamp( definition.RadiusMaximum * definition.RadiusMultiplierMaximum, minimum, radiusLimit );
-		if ( definition.RadiusScale is null && graphs.Length == 0 ) return Range( minimum, maximum );
+		if ( definition.EndCapLifetime || (definition.RadiusScale is null && graphs.Length == 0) ) return Range( minimum, maximum );
 		return new ParticleFloat
 		{
 			Type = ParticleFloat.ValueType.CurveRange,
@@ -640,6 +917,18 @@ static class Titanfall2ParticleFactory
 		}
 	}
 
+	internal static float EvaluateLiveGraphs( Titanfall2ParticleDefinition definition, int field, float value, float age )
+	{
+		var lifetime = MathF.Max( 0.01f, definition.LifetimeMaximum );
+		foreach ( var graph in definition.ScalarGraphs )
+		{
+			if ( graph.OutputField != field ) continue;
+			var sample = EvaluateGraph( graph, age / lifetime, lifetime );
+			value = graph.OutputOperation == 1 ? value * sample : sample;
+		}
+		return value;
+	}
+
 	static float EvaluateGraph( ParticleScalarGraphDefinition graph, float normalizedTime, float lifetime )
 	{
 		var graphTime = normalizedTime;
@@ -719,4 +1008,6 @@ static class Titanfall2ParticleFactory
 	static Vector3 ToSandbox( Vector3 value ) => value;
 }
 
-readonly record struct Titanfall2ParticleMapEntity( string EffectName, string TargetName, Vector3 Position, Angles Rotation, float Scale );
+readonly record struct Titanfall2ParticleMapControlPoint( int Index, Vector3 Position );
+readonly record struct Titanfall2ParticleMapEntity( string EffectName, string TargetName, Vector3 Position, Angles Rotation, float Scale,
+	IReadOnlyList<Titanfall2ParticleMapControlPoint> ControlPoints = null );

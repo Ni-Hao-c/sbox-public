@@ -15,6 +15,7 @@ public static class Titanfall2Mdl53Reader
 		public BoneInfo[] Bones { get; init; } = Array.Empty<BoneInfo>();
 		public LinearBoneInfo[] LinearBones { get; init; } = Array.Empty<LinearBoneInfo>();
 		public HitboxSetInfo[] HitboxSets { get; init; } = Array.Empty<HitboxSetInfo>();
+		public AttachmentInfo[] Attachments { get; init; } = Array.Empty<AttachmentInfo>();
 		public AnimationInfo[] Animations { get; init; } = Array.Empty<AnimationInfo>();
 		public SequenceInfo[] Sequences { get; init; } = Array.Empty<SequenceInfo>();
 		public IncludedModelInfo[] IncludedModels { get; init; } = Array.Empty<IncludedModelInfo>();
@@ -100,6 +101,13 @@ public static class Titanfall2Mdl53Reader
 		public HitboxInfo[] Hitboxes { get; init; } = Array.Empty<HitboxInfo>();
 	}
 
+	public sealed class AttachmentInfo
+	{
+		public int Index { get; init; }
+		public string Name { get; init; }
+		public Mdl53Attachment Attachment { get; init; }
+	}
+
 	public sealed class HitboxInfo
 	{
 		public int Index { get; init; }
@@ -162,6 +170,7 @@ public static class Titanfall2Mdl53Reader
 			Bones = ParseBones( data, header ),
 			LinearBones = ParseLinearBones( data, header ),
 			HitboxSets = ParseHitboxSets( data, header ),
+			Attachments = ParseAttachments( data, header ),
 			Animations = ParseAnimations( data, header ),
 			Sequences = ParseSequences( data, header ),
 			IncludedModels = ParseIncludedModels( data, header ),
@@ -179,6 +188,25 @@ public static class Titanfall2Mdl53Reader
 		};
 
 		return parsed;
+	}
+
+	private static AttachmentInfo[] ParseAttachments( ReadOnlySpan<byte> data, Mdl53StudioHeader header )
+	{
+		if ( header.LocalAttachmentCount == 0 ) return Array.Empty<AttachmentInfo>();
+		EnsureTable<Mdl53Attachment>( data, header.LocalAttachmentOffset, header.LocalAttachmentCount );
+		var attachments = new AttachmentInfo[header.LocalAttachmentCount];
+		for ( var i = 0; i < attachments.Length; ++i )
+		{
+			var offset = checked(header.LocalAttachmentOffset + i * SizeOf<Mdl53Attachment>());
+			var attachment = Titanfall2Mdl53Binary.ReadStruct<Mdl53Attachment>( data, offset );
+			attachments[i] = new AttachmentInfo
+			{
+				Index = i,
+				Attachment = attachment,
+				Name = Titanfall2Mdl53Binary.ReadRelativeString( data, offset, attachment.NameOffset )
+			};
+		}
+		return attachments;
 	}
 
 	private static LinearBoneInfo[] ParseLinearBones( ReadOnlySpan<byte> data, Mdl53StudioHeader header )
@@ -232,6 +260,7 @@ public static class Titanfall2Mdl53Reader
 		if ( header.LocalAnimationCount <= 0 || header.LocalAnimationOffset <= 0 )
 			return Array.Empty<AnimationInfo>();
 
+		EnsureTable<Mdl53AnimationDescription>( data, header.LocalAnimationOffset, header.LocalAnimationCount );
 		var animations = new AnimationInfo[header.LocalAnimationCount];
 		for ( var i = 0; i < animations.Length; ++i )
 		{
@@ -254,6 +283,7 @@ public static class Titanfall2Mdl53Reader
 		if ( header.LocalSequenceCount <= 0 || header.LocalSequenceOffset <= 0 )
 			return Array.Empty<SequenceInfo>();
 
+		EnsureTable<Mdl53SequenceDescription>( data, header.LocalSequenceOffset, header.LocalSequenceCount );
 		var sequences = new SequenceInfo[header.LocalSequenceCount];
 		for ( var i = 0; i < sequences.Length; ++i )
 		{
@@ -265,10 +295,10 @@ public static class Titanfall2Mdl53Reader
 			if ( sequence.AnimationIndexOffset > 0 && blendCount <= 4096 )
 			{
 				var animationOffset = checked(offset + sequence.AnimationIndexOffset);
-				EnsureRange( data, animationOffset, checked(blendCount * sizeof(short)) );
+				EnsureRange( data, animationOffset, checked(blendCount * sizeof( short )) );
 				animationIndices = new short[blendCount];
 				for ( var blend = 0; blend < blendCount; ++blend )
-					animationIndices[blend] = Titanfall2Mdl53Binary.ReadStruct<short>( data, animationOffset + blend * sizeof(short) );
+					animationIndices[blend] = Titanfall2Mdl53Binary.ReadStruct<short>( data, animationOffset + blend * sizeof( short ) );
 			}
 
 			sequences[i] = new SequenceInfo
@@ -289,6 +319,7 @@ public static class Titanfall2Mdl53Reader
 		if ( header.IncludeModelCount <= 0 || header.IncludeModelOffset <= 0 )
 			return Array.Empty<IncludedModelInfo>();
 
+		EnsureTable<Mdl53IncludedModel>( data, header.IncludeModelOffset, header.IncludeModelCount );
 		var models = new IncludedModelInfo[header.IncludeModelCount];
 		for ( var i = 0; i < models.Length; ++i )
 		{
@@ -310,6 +341,7 @@ public static class Titanfall2Mdl53Reader
 		if ( header.BoneCount <= 0 || header.BoneOffset <= 0 )
 			return Array.Empty<BoneInfo>();
 
+		EnsureTable<Mdl53Bone>( data, header.BoneOffset, header.BoneCount );
 		var bones = new BoneInfo[header.BoneCount];
 		for ( int i = 0; i < header.BoneCount; i++ )
 		{
@@ -334,6 +366,7 @@ public static class Titanfall2Mdl53Reader
 		if ( header.HitboxSetCount <= 0 || header.HitboxSetOffset <= 0 )
 			return Array.Empty<HitboxSetInfo>();
 
+		EnsureTable<Mdl53HitboxSet>( data, header.HitboxSetOffset, header.HitboxSetCount );
 		var hitboxSets = new HitboxSetInfo[header.HitboxSetCount];
 		for ( int i = 0; i < header.HitboxSetCount; i++ )
 		{
@@ -358,6 +391,7 @@ public static class Titanfall2Mdl53Reader
 			return Array.Empty<HitboxInfo>();
 
 		int baseOffset = hitboxSetOffset + set.HitboxOffset;
+		EnsureTable<Mdl53Hitbox>( data, baseOffset, set.HitboxCount );
 		var hitboxes = new HitboxInfo[set.HitboxCount];
 		for ( int i = 0; i < set.HitboxCount; i++ )
 		{
@@ -382,6 +416,7 @@ public static class Titanfall2Mdl53Reader
 		if ( header.TextureCount <= 0 || header.TextureOffset <= 0 )
 			return Array.Empty<TextureInfo>();
 
+		EnsureTable<Mdl53Texture>( data, header.TextureOffset, header.TextureCount );
 		var textures = new TextureInfo[header.TextureCount];
 		for ( int i = 0; i < header.TextureCount; i++ )
 		{
@@ -405,6 +440,7 @@ public static class Titanfall2Mdl53Reader
 		if ( header.BodyPartCount <= 0 || header.BodyPartOffset <= 0 )
 			return Array.Empty<BodyPartInfo>();
 
+		EnsureTable<Mdl53BodyPart>( data, header.BodyPartOffset, header.BodyPartCount );
 		var bodyParts = new BodyPartInfo[header.BodyPartCount];
 		for ( int i = 0; i < header.BodyPartCount; i++ )
 		{
@@ -430,6 +466,7 @@ public static class Titanfall2Mdl53Reader
 			return Array.Empty<ModelInfo>();
 
 		int modelBaseOffset = bodyPartOffset + bodyPart.ModelOffset;
+		EnsureTable<Mdl53Model>( data, modelBaseOffset, bodyPart.ModelCount );
 		var models = new ModelInfo[bodyPart.ModelCount];
 		for ( int i = 0; i < bodyPart.ModelCount; i++ )
 		{
@@ -455,6 +492,7 @@ public static class Titanfall2Mdl53Reader
 			return Array.Empty<MeshInfo>();
 
 		int meshBaseOffset = modelOffset + model.MeshOffset;
+		EnsureTable<Mdl53Mesh>( data, meshBaseOffset, model.MeshCount );
 		var meshes = new MeshInfo[model.MeshCount];
 		for ( int i = 0; i < model.MeshCount; i++ )
 		{
@@ -477,14 +515,14 @@ public static class Titanfall2Mdl53Reader
 		if ( header.SkinReferenceCount <= 0 || header.SkinFamilyCount <= 0 || header.SkinOffset <= 0 )
 			return Array.Empty<short>();
 
-		int count = checked( header.SkinReferenceCount * header.SkinFamilyCount );
-		int byteLength = checked( count * sizeof(short) );
+		int count = checked(header.SkinReferenceCount * header.SkinFamilyCount);
+		int byteLength = checked(count * sizeof( short ));
 		EnsureRange( data, header.SkinOffset, byteLength );
 
 		var values = new short[count];
 		for ( int i = 0; i < count; i++ )
 		{
-			values[i] = Titanfall2Mdl53Binary.ReadStruct<short>( data, header.SkinOffset + (i * sizeof(short)) );
+			values[i] = Titanfall2Mdl53Binary.ReadStruct<short>( data, header.SkinOffset + (i * sizeof( short )) );
 		}
 
 		return values;
@@ -496,14 +534,10 @@ public static class Titanfall2Mdl53Reader
 			return null;
 
 		EnsureRange( data, header.VtxOffset, header.VtxSize );
-		try
-		{
-			return Titanfall2VtxReader.Parse( data.Slice( header.VtxOffset, header.VtxSize ) );
-		}
-		catch
-		{
-			return null;
-		}
+		// An embedded block that fails parsing is not an absent block. Let the
+		// resource loader report the failure instead of publishing an invisible
+		// model with only its skeleton/animations and silently dropping geometry.
+		return Titanfall2VtxReader.Parse( data.Slice( header.VtxOffset, header.VtxSize ) );
 	}
 
 	private static VvdFixup[] ParseVvdFixups( ReadOnlySpan<byte> data, Mdl53StudioHeader header )
@@ -513,6 +547,7 @@ public static class Titanfall2Mdl53Reader
 			return Array.Empty<VvdFixup>();
 
 		int fixupBase = header.VvdOffset + vvdHeader.Value.FixupTableOffset;
+		EnsureTable<VvdFixup>( data, fixupBase, vvdHeader.Value.FixupCount );
 		var fixups = new VvdFixup[vvdHeader.Value.FixupCount];
 		for ( int i = 0; i < fixups.Length; i++ )
 		{
@@ -535,6 +570,7 @@ public static class Titanfall2Mdl53Reader
 			return Array.Empty<VvdVertex>();
 
 		int vertexBase = header.VvdOffset + vvdHeader.Value.VertexDataOffset;
+		EnsureTable<VvdVertex>( data, vertexBase, vertexCount );
 		var vertices = new VvdVertex[vertexCount];
 		for ( int i = 0; i < vertexCount; i++ )
 		{
@@ -557,6 +593,7 @@ public static class Titanfall2Mdl53Reader
 			return Array.Empty<VvcColor32>();
 
 		int colorBase = header.VvcOffset + vvcHeader.Value.ColorDataOffset;
+		EnsureTable<VvcColor32>( data, colorBase, count );
 		var colors = new VvcColor32[count];
 		for ( int i = 0; i < count; i++ )
 		{
@@ -579,6 +616,7 @@ public static class Titanfall2Mdl53Reader
 			return Array.Empty<Vector2>();
 
 		int uv2Base = header.VvcOffset + vvcHeader.Value.Uv2DataOffset;
+		EnsureTable<Vector2>( data, uv2Base, count );
 		var uv2 = new Vector2[count];
 		for ( int i = 0; i < count; i++ )
 		{
@@ -703,6 +741,15 @@ public static class Titanfall2Mdl53Reader
 	private static void EnsureReadable<T>( ReadOnlySpan<byte> data, int offset ) where T : unmanaged
 	{
 		EnsureRange( data, offset, SizeOf<T>() );
+	}
+
+	// Validate a whole table before allocating it: counts come straight from the file,
+	// so a corrupt count used to allocate up to int.MaxValue elements before the first
+	// per-element EnsureReadable failed.
+	private static void EnsureTable<T>( ReadOnlySpan<byte> data, int offset, int count ) where T : unmanaged
+	{
+		if ( offset < 0 || count < 0 || (long)count * SizeOf<T>() > data.Length - (long)offset )
+			throw new InvalidOperationException( $"MDL table is outside the buffer. Offset={offset}, Count={count}, Stride={SizeOf<T>()}, Buffer={data.Length}" );
 	}
 
 	private static void EnsureRange( ReadOnlySpan<byte> data, int offset, int length )

@@ -175,7 +175,7 @@ public partial class Titanfall2Mount
 		try
 		{
 			var parsed = Titanfall2Mdl53Reader.Parse( data );
-			var lod = Titanfall2MeshExtractor.ExtractLod( parsed, 0 );
+			var lod = Titanfall2MeshExtractor.ExtractLod( parsed, 0, allBodyGroupChoices: true );
 			if ( lod.Meshes.Length == 0 )
 			{
 				error = "The model contains no exportable LOD0 geometry.";
@@ -562,11 +562,11 @@ public partial class Titanfall2Mount
 		AppendIndent( text, indent ).AppendLine( "[" );
 		var emitted = 0;
 		foreach ( var mesh in meshes )
-		foreach ( var vertex in mesh.Vertices )
-		{
-			var value = selector( vertex );
-			AppendDmxArrayValue( text, indent + 1, $"{FormatFloat( value.x )} {FormatFloat( value.y )} {FormatFloat( value.z )}", ++emitted < count );
-		}
+			foreach ( var vertex in mesh.Vertices )
+			{
+				var value = selector( vertex );
+				AppendDmxArrayValue( text, indent + 1, $"{FormatFloat( value.x )} {FormatFloat( value.y )} {FormatFloat( value.z )}", ++emitted < count );
+			}
 		AppendDmxArrayEnd( text, indent );
 	}
 
@@ -578,9 +578,9 @@ public partial class Titanfall2Mount
 		AppendIndent( text, indent ).AppendLine( "[" );
 		var emitted = 0;
 		foreach ( var mesh in meshes )
-		foreach ( var vertex in mesh.Vertices )
-			AppendDmxArrayValue( text, indent + 1,
-				$"{FormatFloat( vertex.TexCoord.x )} {FormatFloat( vertex.TexCoord.y )}", ++emitted < count );
+			foreach ( var vertex in mesh.Vertices )
+				AppendDmxArrayValue( text, indent + 1,
+					$"{FormatFloat( vertex.TexCoord.x )} {FormatFloat( vertex.TexCoord.y )}", ++emitted < count );
 		AppendDmxArrayEnd( text, indent );
 	}
 
@@ -595,27 +595,27 @@ public partial class Titanfall2Mount
 		Span<int> bones = stackalloc int[4];
 		Span<float> weights = stackalloc float[4];
 		foreach ( var mesh in meshes )
-		foreach ( var vertex in mesh.Vertices )
-		{
-			bones.Clear();
-			weights.Clear();
-			GetNormalizedInfluences( vertex, boneCount, bones, weights );
-			for ( var influence = 0; influence < 4; influence++ )
-				AppendDmxArrayValue( text, indent + 1, FormatFloat( weights[influence] ), ++emitted < valueCount );
-		}
+			foreach ( var vertex in mesh.Vertices )
+			{
+				bones.Clear();
+				weights.Clear();
+				GetNormalizedInfluences( vertex, boneCount, bones, weights );
+				for ( var influence = 0; influence < 4; influence++ )
+					AppendDmxArrayValue( text, indent + 1, FormatFloat( weights[influence] ), ++emitted < valueCount );
+			}
 		AppendDmxArrayEnd( text, indent );
 		AppendIndent( text, indent ).AppendLine( "\"blendindices$0\" \"int_array\"" );
 		AppendIndent( text, indent ).AppendLine( "[" );
 		emitted = 0;
 		foreach ( var mesh in meshes )
-		foreach ( var vertex in mesh.Vertices )
-		{
-			bones.Clear();
-			weights.Clear();
-			GetNormalizedInfluences( vertex, boneCount, bones, weights );
-			for ( var influence = 0; influence < 4; influence++ )
-				AppendDmxArrayValue( text, indent + 1, bones[influence].ToString( CultureInfo.InvariantCulture ), ++emitted < valueCount );
-		}
+			foreach ( var vertex in mesh.Vertices )
+			{
+				bones.Clear();
+				weights.Clear();
+				GetNormalizedInfluences( vertex, boneCount, bones, weights );
+				for ( var influence = 0; influence < 4; influence++ )
+					AppendDmxArrayValue( text, indent + 1, bones[influence].ToString( CultureInfo.InvariantCulture ), ++emitted < valueCount );
+			}
 		AppendDmxArrayEnd( text, indent );
 	}
 

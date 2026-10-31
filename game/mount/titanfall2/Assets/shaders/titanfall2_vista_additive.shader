@@ -39,23 +39,25 @@ struct PixelInput
 VS
 {
 	#include "common/vertex.hlsl"
+	#include "titanfall2_sky_projection.hlsl"
 
 	PixelInput MainVs( VertexInput v )
 	{
 		PixelInput i = ProcessVertex( v );
 		i.vVertexColor *= float4( SrgbGammaToLinear( v.vColor.rgb ), v.vColor.a );
-		return FinalizeVertex( i );
+		return T2FinalizeSkyVertex( i );
 	}
 }
 
 PS
 {
 	#include "common/pixel.hlsl"
-	float4 g_vT2Uv1RotScale < Attribute( "g_vT2Uv1RotScale" ); Default4( 1.0, 0.0, 0.0, 1.0 ); >;
-	float4 g_vT2Uv1Translate < Attribute( "g_vT2Uv1Translate" ); Default4( 0.0, 0.0, 0.0, 0.0 ); >;
-	float4 g_vT2AlbedoTint < Attribute( "g_vT2AlbedoTint" ); Default4( 1.0, 1.0, 1.0, 1.0 ); >;
-	float g_flT2MaterialOpacity < Attribute( "g_flT2MaterialOpacity" ); Default( 1.0 ); >;
-	float g_flT2AlphaTestReference < Attribute( "g_flT2AlphaTestReference" ); Default( 0.5 ); >;
+	#include "common/imported_height_fog.hlsl"
+	float4 g_vT2Uv1RotScale < Default4( 1.0, 0.0, 0.0, 1.0 ); >;
+	float4 g_vT2Uv1Translate < Default4( 0.0, 0.0, 0.0, 0.0 ); >;
+	float4 g_vT2AlbedoTint < Default4( 1.0, 1.0, 1.0, 1.0 ); >;
+	float g_flT2MaterialOpacity < Default( 1.0 ); >;
+	float g_flT2AlphaTestReference < Default( 0.5 ); >;
 
 	float2 T2Uv1( float2 uv )
 	{
@@ -68,11 +70,11 @@ PS
 	Texture2D g_tAlbedo < Channel( RGBA, Box( Albedo ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
 	Texture2D g_tOpacity < Channel( RGBA, Box( Opacity ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
 
-	float g_flAlbedoIsSrgb < Attribute( "g_flAlbedoIsSrgb" ); Default( 1.0 ); >;
-	float g_flT2VistaIntensity < Attribute( "g_flT2VistaIntensity" ); Default( 1.0 ); >;
-	float g_flT2VistaHdrLimit < Attribute( "g_flT2VistaHdrLimit" ); Default( 65504.0 ); >;
-	float g_flUseVertexColor < Attribute( "g_flUseVertexColor" ); Default( 0.0 ); >;
-	float g_flUseVertexAlpha < Attribute( "g_flUseVertexAlpha" ); Default( 0.0 ); >;
+	float g_flAlbedoIsSrgb < Default( 1.0 ); >;
+	float g_flT2VistaIntensity < Default( 1.0 ); >;
+	float g_flT2VistaHdrLimit < Default( 65504.0 ); >;
+	float g_flUseVertexColor < Default( 0.0 ); >;
+	float g_flUseVertexAlpha < Default( 0.0 ); >;
 
 	float4 MainPs( PixelInput i ) : SV_Target0
 	{
@@ -88,6 +90,6 @@ PS
 		color *= min( 1.0, max( 0.001, g_flT2VistaHdrLimit ) / max( 0.001, peak ) );
 		float opacity = albedo.a * opacityMap * vertexAlpha * g_flOpacityScale * g_flT2MaterialOpacity;
 		clip( opacity - 0.0001 );
-		return float4( color, opacity );
+		return float4( ApplyImportedHeightFog( color, i.vPositionWithOffsetWs + g_vHighPrecisionLightingOffsetWs.xyz, true ), opacity );
 	}
 }

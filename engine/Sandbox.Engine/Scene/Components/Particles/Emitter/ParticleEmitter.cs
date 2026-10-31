@@ -195,9 +195,9 @@ public abstract class ParticleEmitter : Component, Component.ExecuteInEditor, Co
 	/// Allows child emitters to override how many particles are in a rate
 	/// </summary>
 	/// <returns></returns>
-	protected virtual int GetRateCount()
+	protected virtual float GetRateCount()
 	{
-		return (int)Rate.Evaluate( Delta, EmitRandom );
+		return Rate.Evaluate( Delta, EmitRandom );
 	}
 
 	protected virtual void OnBurst()

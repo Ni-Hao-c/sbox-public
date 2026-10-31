@@ -43,6 +43,7 @@ internal interface IBatchedParticleSpriteRenderer : ISpriteRenderGroup
 	/// Normal map used for scene-color refraction, or null for ordinary sprites and text.
 	/// </summary>
 	Texture RefractionNormalTexture => null;
+	Texture ColorRamp => null;
 
 	/// <summary>
 	/// Refraction offset in render pixels. Renderers opt in by supplying their own strength.
@@ -99,6 +100,7 @@ internal interface IBatchedParticleSpriteRenderer : ISpriteRenderGroup
 		var lightingValue = Lighting ? 1 : 0;
 		var textureHandle = texture?.Index ?? Texture.Invalid.Index;
 		var normalTextureHandle = RefractionNormalTexture?.Index ?? 0;
+		var colorRampTextureHandle = ColorRamp?.Index ?? 0;
 		var refractionStrength = RefractionStrength;
 
 		var motionBlurEnabled = MotionBlur;
@@ -214,6 +216,7 @@ internal interface IBatchedParticleSpriteRenderer : ISpriteRenderGroup
 				spritePtr->DepthFeather = depthFeather;
 				spritePtr->CameraFade = packedCameraFade;
 				spritePtr->NormalTextureHandle = normalTextureHandle;
+				spritePtr->ColorRampTextureHandle = colorRampTextureHandle;
 				spritePtr->RefractionStrength = MathF.Max( refractionStrength.Evaluate( p, 6271 ), 0.0f );
 				spritePtr->SamplerIndex = samplerIndex;
 				spritePtr->Splots = splots;

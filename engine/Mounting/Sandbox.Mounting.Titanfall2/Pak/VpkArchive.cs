@@ -10,15 +10,23 @@ sealed class VpkArchive
 	const uint Signature = 0x55AA1234;
 	const uint Version = 196610;
 	const ushort ChunkTerminator = ushort.MaxValue;
+	const ushort EmbeddedArchiveIndex = 0x7FFF;
+	// Chunk sizes come from the directory tree and are never cross-checked against a file
+	// length, so one corrupt header must not be able to demand a multi-gigabyte buffer.
+	// The largest shipped entry is well under this (maps are a few hundred MB unpacked).
+	const long MaximumEntryBytes = 1L << 30;
 
 	readonly string _directoryPath;
 	readonly uint _treeSize;
+	readonly uint _dataSize;
 	readonly IReadOnlyDictionary<string, VpkEntry> _entries;
+	readonly System.Collections.Concurrent.ConcurrentDictionary<ushort, string> _payloadPaths = new();
 
-	VpkArchive( string directoryPath, uint treeSize, Dictionary<string, VpkEntry> entries )
+	VpkArchive( string directoryPath, uint treeSize, uint dataSize, Dictionary<string, VpkEntry> entries )
 	{
 		_directoryPath = directoryPath;
 		_treeSize = treeSize;
+		_dataSize = dataSize;
 		_entries = entries;
 	}
 
@@ -66,32 +74,39 @@ sealed class VpkArchive
 			}
 
 			var treeSize = reader.ReadUInt32();
-			_ = reader.ReadUInt32(); // Data block size; individual chunks contain their own offsets.
+			var dataSize = reader.ReadUInt32();
 			var treeEnd = 16L + treeSize;
+			if ( treeEnd > stream.Length || dataSize > stream.Length - treeEnd )
+				throw new InvalidDataException( "VPK tree or embedded data block exceeds the directory file." );
 			var entries = new Dictionary<string, VpkEntry>( StringComparer.OrdinalIgnoreCase );
 
-			while ( stream.Position < treeEnd )
+			// Each branch must end inside the declared tree. Reaching its boundary
+			// without a terminator is truncation, even if payload bytes follow it.
+			while ( true )
 			{
-				var extension = ReadString( reader );
+				var extension = ReadString( reader, treeEnd );
 				if ( extension.Length == 0 ) break;
 
-				while ( stream.Position < treeEnd )
+				while ( true )
 				{
-					var folder = ReadString( reader );
+					var folder = ReadString( reader, treeEnd );
 					if ( folder.Length == 0 ) break;
 
-					while ( stream.Position < treeEnd )
+					while ( true )
 					{
-						var name = ReadString( reader );
+						var name = ReadString( reader, treeEnd );
 						if ( name.Length == 0 ) break;
 
+						EnsureTreeRange( reader, treeEnd, 6 );
 						_ = reader.ReadUInt32(); // CRC
 						var preloadBytes = reader.ReadUInt16();
 						var chunks = new List<VpkChunk>();
 						while ( true )
 						{
+							EnsureTreeRange( reader, treeEnd, 2 );
 							var archiveIndex = reader.ReadUInt16();
 							if ( archiveIndex == ChunkTerminator ) break;
+							EnsureTreeRange( reader, treeEnd, 30 );
 							chunks.Add( new VpkChunk(
 								archiveIndex,
 								reader.ReadUInt16(),
@@ -102,6 +117,7 @@ sealed class VpkArchive
 						}
 
 						var preloadOffset = preloadBytes == 0 ? -1 : stream.Position;
+						EnsureTreeRange( reader, treeEnd, preloadBytes );
 						var path = BuildPath( folder, name, extension );
 						entries[path] = new VpkEntry( path, preloadOffset, preloadBytes, chunks );
 						stream.Position += preloadBytes;
@@ -109,7 +125,9 @@ sealed class VpkArchive
 				}
 			}
 
-			archive = new VpkArchive( directoryPath, treeSize, entries );
+			if ( stream.Position != treeEnd )
+				throw new InvalidDataException( "VPK tree ended before its declared size." );
+			archive = new VpkArchive( directoryPath, treeSize, dataSize, entries );
 			return true;
 		}
 		catch ( Exception e )
@@ -125,7 +143,18 @@ sealed class VpkArchive
 		error = null;
 		try
 		{
-			using var output = new MemoryStream();
+			// Pre-size the output: growing from zero reallocated/copied large
+			// multi-chunk entries (models, BSP lumps) several times before ToArray.
+			var capacity = (long)entry.PreloadBytes;
+			foreach ( var chunk in entry.Chunks )
+			{
+				if ( chunk.CompressedSize > int.MaxValue || chunk.UncompressedSize > int.MaxValue )
+					throw new InvalidDataException( $"VPK chunk is too large: {entry.Path}" );
+				capacity += (long)chunk.UncompressedSize;
+			}
+			if ( capacity > Array.MaxLength || capacity > MaximumEntryBytes )
+				throw new InvalidDataException( $"VPK entry is too large: {entry.Path} ({capacity} bytes)." );
+			using var output = new MemoryStream( (int)capacity );
 			if ( entry.PreloadBytes > 0 )
 				WriteRange( output, _directoryPath, entry.PreloadOffset, entry.PreloadBytes );
 
@@ -154,23 +183,74 @@ sealed class VpkArchive
 		}
 	}
 
+	/// <summary>
+	/// Reads at least <paramref name="minimumBytes"/> from the start of an entry (or the whole
+	/// entry if it is shorter), decoding only the chunks that cover that prefix. Used for MDL
+	/// header fields, which would otherwise decompress every chunk of a large model.
+	/// </summary>
+	public bool TryReadPrefix( VpkEntry entry, int minimumBytes, out byte[] bytes, out string error )
+	{
+		bytes = null;
+		error = null;
+		try
+		{
+			using var output = new MemoryStream();
+			if ( entry.PreloadBytes > 0 )
+				WriteRange( output, _directoryPath, entry.PreloadOffset, entry.PreloadBytes );
+
+			foreach ( var chunk in entry.Chunks )
+			{
+				if ( output.Length >= minimumBytes ) break;
+				if ( chunk.CompressedSize > int.MaxValue || chunk.UncompressedSize > int.MaxValue )
+					throw new InvalidDataException( $"VPK chunk is too large: {entry.Path}" );
+
+				var data = ReadChunk( entry, chunk );
+				if ( chunk.CompressedSize != chunk.UncompressedSize
+					&& !LzhamDecoder.TryDecompress( data, checked((int)chunk.UncompressedSize), out data, out var decodeError ) )
+					throw new InvalidDataException( $"LZHAM decompression failed for '{entry.Path}': {decodeError}" );
+				output.Write( data );
+			}
+
+			bytes = output.ToArray();
+			return true;
+		}
+		catch ( Exception e )
+		{
+			error = e.Message;
+			return false;
+		}
+	}
+
 	byte[] ReadChunk( VpkEntry entry, VpkChunk chunk )
 	{
+		if ( chunk.ArchiveIndex == EmbeddedArchiveIndex )
+		{
+			if ( chunk.Offset > _dataSize || chunk.CompressedSize > _dataSize - chunk.Offset )
+				throw new InvalidDataException( $"VPK embedded chunk range is invalid for '{entry.Path}'." );
+			var directoryOffset = checked(16L + _treeSize + (long)chunk.Offset);
+			if ( TryReadRange( _directoryPath, directoryOffset, checked((int)chunk.CompressedSize), out var embedded ) )
+				return embedded;
+			throw new InvalidDataException( $"VPK embedded chunk payload is missing for '{entry.Path}'." );
+		}
+
 		var payloadPath = ResolvePayloadPath( chunk.ArchiveIndex );
 		if ( TryReadRange( payloadPath, checked((long)chunk.Offset), checked((int)chunk.CompressedSize), out var bytes ) )
 			return bytes;
 
-		var directoryOffset = checked(16L + _treeSize + (long)chunk.Offset);
-		if ( TryReadRange( _directoryPath, directoryOffset, checked((int)chunk.CompressedSize), out bytes ) )
-			return bytes;
-
-		throw new InvalidDataException( $"VPK chunk payload is missing for '{entry.Path}'." );
+		// An external volume failure must not substitute unrelated directory data.
+		throw new InvalidDataException( $"VPK chunk payload is missing or truncated for '{entry.Path}' in '{payloadPath}'." );
 	}
 
-	string ResolvePayloadPath( ushort archiveIndex )
+	// Every chunk (1 MiB) resolved its payload with a List, LINQ Distinct and File.Exists.
+	string ResolvePayloadPath( ushort archiveIndex ) => _payloadPaths.GetOrAdd( archiveIndex, ResolvePayloadPathUncached );
+
+	string ResolvePayloadPathUncached( ushort archiveIndex )
 	{
 		var directory = Path.GetDirectoryName( _directoryPath )!;
 		var name = Path.GetFileName( _directoryPath );
+		if ( !name.EndsWith( "_dir.vpk", StringComparison.OrdinalIgnoreCase ) )
+			throw new InvalidDataException( $"Unable to resolve external VPK volumes from directory filename '{name}'." );
+
 		var candidates = new List<string>
 		{
 			name.Replace( "_dir.vpk", $"_{archiveIndex:D3}.vpk", StringComparison.OrdinalIgnoreCase )
@@ -222,11 +302,18 @@ sealed class VpkArchive
 
 	static string NormalizePath( string path ) => path.Replace( '\\', '/' ).Trim().TrimStart( '/' );
 
-	static string ReadString( BinaryReader reader )
+	static void EnsureTreeRange( BinaryReader reader, long treeEnd, int length )
+	{
+		if ( length > treeEnd - reader.BaseStream.Position )
+			throw new InvalidDataException( "VPK directory entry exceeds the declared tree." );
+	}
+
+	static string ReadString( BinaryReader reader, long treeEnd )
 	{
 		var buffer = new ArrayBufferWriter<byte>();
 		while ( true )
 		{
+			EnsureTreeRange( reader, treeEnd, 1 );
 			var value = reader.ReadByte();
 			if ( value == 0 ) break;
 			buffer.GetSpan( 1 )[0] = value;

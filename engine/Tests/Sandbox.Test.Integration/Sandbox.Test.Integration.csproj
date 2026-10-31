@@ -20,6 +20,7 @@
 		<ProjectReference Include="..\..\Sandbox.Tools\Sandbox.Tools.csproj" />
 		<ProjectReference Include="..\..\Sandbox.Menu\Sandbox.Menu.csproj" />
 		<ProjectReference Include="..\..\Sandbox.AppSystem\Sandbox.AppSystem.csproj" />
+		<ProjectReference Include="..\..\Mounting\Sandbox.Mounting.Titanfall2\Sandbox.Mounting.Titanfall2.csproj" />
 	</ItemGroup>
 
 	<ItemGroup>

@@ -72,6 +72,8 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 			Titanfall2Log.Warning( $"Failed to read Titanfall 2 material '{Path}': unsupported version {asset.Version}" );
 			return null;
 		}
+		if ( Host.TryGetCachedMaterialDescriptor( asset.Name, out var cached ) )
+			return cached.CreateMaterial( Host, Path, WarnBinding );
 		if ( !archive.TryReadAsset( asset, out var data, out var error ) )
 		{
 			Titanfall2Log.Warning( $"Failed to read Titanfall 2 material '{Path}': {error}" );
@@ -132,12 +134,13 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 			descriptor.GodrayFadeScale = fadeScale;
 			descriptor.GodrayFadeBias = fadeBias;
 		}
-		if ( !isGodray )
+		if ( Host.TryReadMaterialParameters( archive, asset, shaderSetGuid, shaderSetName, out var parameters, out var parameterError ) )
 		{
-			if ( Host.TryReadMaterialParameters( archive, asset, shaderSetGuid, shaderSetName, out var parameters, out var parameterError ) )
-				descriptor.Parameters = parameters;
-			else if ( HasAnimatedUv( shaderSetName ) )
-				WarnBinding( $"dynamic UV constants could not be read: {parameterError}" );
+			descriptor.Parameters = parameters;
+		}
+		else if ( HasAnimatedUv( shaderSetName ) )
+		{
+			WarnBinding( $"dynamic UV constants could not be read: {parameterError}" );
 		}
 		Host.TryGetShaderReflection( shaderSetGuid, out var reflection, out _ );
 		if ( handleCount == 0 || !archive.TryReadPagePointer( handles, handleCount * 8, out var guidBytes, out error ) )
@@ -172,7 +175,8 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 				semantic = Titanfall2TextureSemantic.Opacity;
 			}
 			descriptor.TextureBindings.Add( new Titanfall2TextureBinding(
-				texturePath, guid, index, reflected ? resource.BindPoint : index, resourceName, semantic, reflected ) );
+				texturePath, guid, index, reflected ? resource.BindPoint : index, resourceName, semantic, reflected,
+				Titanfall2MaterialDescriptor.InferTextureLayer( resourceName ) ) );
 			first = false;
 		}
 
@@ -222,10 +226,16 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 		material.Set( "g_tEmissive", Texture.Black );
 		material.Set( "g_tDetail", Texture.White );
 		material.Set( "g_tDistortion", Texture.White );
+		material.Set( "g_tAlbedo2", Texture.White );
+		material.Set( "g_tNormal2", Texture.White );
+		material.Set( "g_tGloss2", Texture.Black );
+		material.Set( "g_tSpecular2", Texture.Black );
+		material.Set( "g_tLayerBlend", Texture.Black );
 		BindNeutralEnvironment( material );
 		SetExtendedDefaults( material );
 		material.Set( "g_flUseVertexColor", metadata.UsesVertexColor ? 1f : 0f );
 		material.Set( "g_flUseVertexAlpha", metadata.UsesVertexAlpha ? 1f : 0f );
+		material.Set( "g_flT2Unlit", metadata.IsUnlit ? 1f : 0f );
 		return material;
 	}
 
@@ -240,7 +250,8 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 		material.Set( "g_tOpacity", Texture.White );
 		material.Set( "g_tEmissive", Texture.Black );
 		material.Set( "g_tDetail", Texture.White );
-		material.Set( "g_tDistortion", Texture.White );
+		material.Set( "g_tDistortion", Texture.Transparent );
+		material.Set( "g_tDistortion2", Texture.Transparent );
 		SetExtendedDefaults( material );
 		material.Set( "g_flHasNormalMap", 0f );
 		material.Set( "g_flUseVertexColor", metadata.UsesVertexColor ? 1f : 0f );
@@ -342,7 +353,8 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 			ContainsShaderFeature( shaderSetName, "Vcolt" ),
 			ContainsShaderFeature( shaderSetName, "Vcola" ),
 			ContainsShaderFeature( shaderSetName, "Unlit" ),
-			IsWaterMaterial( sourceMaterialName ) );
+			!isDecal && mode is not (Titanfall2MaterialMode.Cutout or Titanfall2MaterialMode.Additive)
+				&& IsWaterMaterial( sourceMaterialName, shaderSetName ) );
 	}
 
 	internal static Titanfall2MaterialMetadata InferMetadata( string sourceMaterialName )
@@ -384,6 +396,7 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 		material.Set( "g_tSpecular", Texture.Black );
 		material.Set( "g_tAO", Texture.White );
 		material.Set( "g_tOpacity", Texture.White );
+		material.Set( "g_tLayerBlend", Texture.Black );
 		material.Set( "g_tEmissive", Texture.Black );
 		material.Set( "g_tDetail", Texture.White );
 		material.Set( "g_tDistortion", Texture.White );
@@ -404,6 +417,11 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 		material.Set( "g_flT2NormalScale", 1f );
 		material.Set( "g_flT2EnvironmentIntensity", 1f );
 		material.Set( "g_flT2HasEnvironment", 0f );
+		material.Set( "g_flHasNormalMap", 0f );
+		material.Set( "g_flHasNormalMap2", 0f );
+		material.Set( "g_flT2NormalSlope", 0f );
+		material.Set( "g_flT2NormalSlope2", 0f );
+		material.Set( "g_flT2Layered", 0f );
 	}
 
 	static void BindNeutralEnvironment( Material material )
@@ -425,7 +443,8 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 	{
 		lock ( SharedTextureLock )
 		{
-			_neutralEnvironment?.Dispose();
+			// Existing scene materials can survive a mount refresh and still use
+			// this texture. Release only our reference, not their native handle.
 			_neutralEnvironment = null;
 		}
 	}
@@ -435,15 +454,24 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 	static bool ContainsShaderFeature( string shaderSetName, string feature ) => !string.IsNullOrWhiteSpace( shaderSetName )
 		&& shaderSetName.Contains( feature, StringComparison.OrdinalIgnoreCase );
 
-	static bool IsWaterMaterial( string sourceMaterialName )
+	static bool IsWaterMaterial( string sourceMaterialName, string shaderSetName = null )
 	{
 		if ( string.IsNullOrWhiteSpace( sourceMaterialName ) ) return false;
+		// A water-related name does not identify a liquid surface. Retail uses
+		// grassblades_water for cutout leaves, waterwheel for metal props and
+		// water_mud for opaque layered terrain. Routing them through refraction
+		// loses both alpha testing and the authored surface blend.
+		if ( ContainsShaderFeature( shaderSetName, "Cut" )
+			|| ContainsShaderFeature( shaderSetName, "Lyr" )
+			|| ContainsShaderFeature( shaderSetName, "Unlit" ) ) return false;
 		var normalized = sourceMaterialName.Replace( '\\', '/' ).Trim( '/' );
-		var fileName = System.IO.Path.GetFileNameWithoutExtension( normalized );
 		return normalized.StartsWith( "world/water/", StringComparison.OrdinalIgnoreCase )
 			|| normalized.StartsWith( "models/water/", StringComparison.OrdinalIgnoreCase )
-			|| normalized.Contains( "/water/", StringComparison.OrdinalIgnoreCase )
-			|| fileName.Contains( "water", StringComparison.OrdinalIgnoreCase );
+			|| normalized.StartsWith( "world/homestead/homestead_water_", StringComparison.OrdinalIgnoreCase )
+			|| normalized.StartsWith( "world/homestead/homestead_test_water_", StringComparison.OrdinalIgnoreCase )
+			|| normalized.StartsWith( "world/boomtown/cenotes_water_", StringComparison.OrdinalIgnoreCase )
+			|| normalized.StartsWith( "world/ola/scrap_yard_red_water_", StringComparison.OrdinalIgnoreCase )
+			|| normalized.StartsWith( "world/ola/sludge_waterfall_", StringComparison.OrdinalIgnoreCase );
 	}
 
 	/// <summary>
@@ -480,6 +508,10 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 		// when an older shader-set name does not advertise the Vcola feature.
 		material.Set( "g_flUseVertexAlpha",
 			metadata.UsesVertexAlpha || IsVistaOpacityMaterial( sourceMaterialName ) ? 1f : 0f );
+		// Same peak clamp as the retail vista pixel shader (c_maxLightingValue). The HDR sky
+		// panoramas (beacon_sky_hdr_col and other 4096 BC6H _col textures) hold values far
+		// above display white; without the clamp they flood the screen and the bloom.
+		material.Set( "g_flT2VistaHdrLimit", Titanfall2StreamingSettings.VistaMaxLighting );
 		if ( IsPlanetSunMaterial( sourceMaterialName ) )
 		{
 			// The source is BC6H HDR and Titanfall tone-maps it before bloom. Without
@@ -562,16 +594,16 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 	{
 		var material = Material.Create( name, "shaders/titanfall2_godray.shader" );
 		material.Set( "g_tAlbedo", Texture.White );
-		material.Set( "g_flGodrayFadeScale", fadeScale );
-		material.Set( "g_flGodrayFadeBias", fadeBias );
+		material.Set( "g_flT2AlphaDistanceFadeScale", fadeScale );
+		material.Set( "g_flT2AlphaDistanceFadeBias", fadeBias );
 		material.Set( "g_flGodrayDepthFeather", 24f );
 		return material;
 	}
 
 	static bool TryReadGodrayFade( RpakArchive sourceArchive, RpakAsset sourceAsset, out float scale, out float bias )
 	{
-		const int FadeScaleOffset = 0xA0;
-		const int FadeBiasOffset = 0xA4;
+		const int FadeScaleOffset = 0x90;
+		const int FadeBiasOffset = 0x94;
 		const int RequiredBytes = FadeBiasOffset + sizeof( float );
 		scale = 0f;
 		bias = 0f;
@@ -617,6 +649,10 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 		material.Set( "g_vT2EmissiveTint", new Vector4(
 			parameters.EmissiveTintR, parameters.EmissiveTintG, parameters.EmissiveTintB, 1f ) );
 		material.Set( "g_flT2MaterialOpacity", parameters.Opacity );
+		material.Set( "g_flT2AlphaDistanceFadeScale", parameters.AlphaDistanceFadeScale );
+		material.Set( "g_flT2AlphaDistanceFadeBias", parameters.AlphaDistanceFadeBias );
+		material.Set( "g_vT2AlphaEdgeFade", new Vector4( parameters.AlphaEdgeFadeExponent,
+			parameters.AlphaEdgeFadeInner, parameters.AlphaEdgeFadeOuter, 0f ) );
 		material.Set( "g_flT2AlphaTestReference", parameters.AlphaTestReference );
 		material.Set( "g_vT2UvDistortion", new Vector4(
 			parameters.DistortionX, parameters.DistortionY, parameters.Distortion2X, parameters.Distortion2Y ) );
@@ -628,6 +664,7 @@ class MaterialLoader( RpakArchive archive, RpakAsset asset ) : ResourceLoader<Ti
 		material.Set( "g_flT2DetailBlend", parameters.DetailBlend );
 		material.Set( "g_flT2NormalScale", parameters.NormalScale );
 		material.Set( "g_flT2EnvironmentIntensity", parameters.EnvironmentIntensity );
+		material.Set( "g_flT2LayerBlendRamp", parameters.LayerBlendRamp );
 	}
 
 	static void ApplyUv( Material material, string index, Titanfall2UvTransform transform )

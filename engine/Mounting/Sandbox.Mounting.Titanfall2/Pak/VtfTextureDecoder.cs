@@ -28,6 +28,9 @@ static class VtfTextureDecoder
 
 		try
 		{
+			// Mip math and the skipped-mip slice can throw on malformed input; callers
+			// rely on TryCreate never escaping them.
+			decoded = PrepareUpload( decoded );
 			texture = Texture.Create( decoded.Width, decoded.Height, decoded.Format )
 				.WithMips( decoded.MipCount )
 				.WithStaticUsage()
@@ -53,8 +56,10 @@ static class VtfTextureDecoder
 	{
 		texture = null;
 		if ( !TryReadCube( bytes, out var decoded, out error ) ) return false;
+
 		try
 		{
+			decoded = PrepareUpload( decoded );
 			texture = Texture.CreateCube( decoded.Width, decoded.Height, decoded.Format )
 				.WithMips( decoded.MipCount )
 				.WithStaticUsage()
@@ -94,6 +99,7 @@ static class VtfTextureDecoder
 			{
 				if ( !TryReadCubeFrame( bytes, frameIndex, out var decoded, out error ) )
 					throw new InvalidDataException( error );
+				decoded = PrepareUpload( decoded );
 				var texture = Texture.CreateCube( decoded.Width, decoded.Height, decoded.Format )
 					.WithMips( decoded.MipCount )
 					.WithStaticUsage()
@@ -138,13 +144,24 @@ static class VtfTextureDecoder
 		}
 
 		var frameHeight = atlas.Height / atlas.FrameCount;
-		var frameBytes = atlas.Data.Length / atlas.FrameCount;
+		var frameBytes = GetMipSize( atlas.Width, frameHeight, atlas.BytesPerBlock, atlas.BlockSize );
+		// FrameCount can be 256 and one uncompressed frame is megabytes, so this product
+		// must stay in 64-bit arithmetic or a valid-looking header wraps it negative.
+		var largestMipOffset = (long)atlas.Data.Length - (long)frameBytes * atlas.FrameCount;
+		if ( frameBytes <= 0 || largestMipOffset < 0 )
+		{
+			error = "Animated VTF atlas has inconsistent frame sizes.";
+			return false;
+		}
 		var created = new List<Texture>( atlas.FrameCount );
 		try
 		{
 			for ( var frameIndex = 0; frameIndex < atlas.FrameCount; frameIndex++ )
 			{
-				var frameData = atlas.Data.AsSpan( frameIndex * frameBytes, frameBytes ).ToArray();
+				// Keep the whole offset in 64-bit: frameBytes * frameCount is already
+				// validated to fit the buffer, but the per-frame product must not wrap int.
+				var frameOffset = largestMipOffset + (long)frameIndex * frameBytes;
+				var frameData = atlas.Data.AsSpan( checked((int)frameOffset), frameBytes ).ToArray();
 				var texture = Texture.Create( atlas.Width, frameHeight, atlas.Format )
 					.WithMips( 1 )
 					.WithStaticUsage()
@@ -338,6 +355,23 @@ static class VtfTextureDecoder
 
 	internal static bool TryRead( byte[] bytes, bool animatedAtlas, out VtfTextureData texture, out string error )
 	{
+		// Malformed headers overflow the checked mip-size/offset math (e.g. 65535x65535
+		// RGBA16F). TryCreate/TryCreateFrames/TryCreateSheetFrames call this outside
+		// their try blocks, so the OverflowException escaped into the texture loader.
+		try
+		{
+			return TryReadCore( bytes, animatedAtlas, out texture, out error );
+		}
+		catch ( Exception exception )
+		{
+			texture = default;
+			error = exception.Message;
+			return false;
+		}
+	}
+
+	static bool TryReadCore( byte[] bytes, bool animatedAtlas, out VtfTextureData texture, out string error )
+	{
 		texture = default;
 		error = null;
 		if ( bytes is null || bytes.Length < 64 || !IsVtf( bytes ) )
@@ -414,11 +448,19 @@ static class VtfTextureDecoder
 
 		if ( animatedAtlas && frameCount > 1 )
 		{
-			var largestRetainedStorageIndex = retainedMipCount - 1;
+			// Each authored mip already stores all frames contiguously, which is
+			// also the row layout of a vertical atlas at that mip. Retaining only
+			// the largest level made distant animated noise shimmer pixel by pixel.
+			var atlasMipCount = retainedMipCount;
+			while ( atlasMipCount > 1 && (Math.Max( 1, retainedWidth >> (atlasMipCount - 1) ) < blockSize
+				|| Math.Max( 1, retainedHeight >> (atlasMipCount - 1) ) < blockSize) ) atlasMipCount--;
+			var firstStorageIndex = retainedMipCount - atlasMipCount;
 			var sourceOffset = imageOffset;
-			for ( var index = 0; index < largestRetainedStorageIndex; index++ )
+			for ( var index = 0; index < firstStorageIndex; index++ )
 				sourceOffset = checked(sourceOffset + mipSizes[index] * frameCount);
-			var frameSize = mipSizes[largestRetainedStorageIndex];
+			var atlasSize = 0;
+			for ( var index = firstStorageIndex; index < retainedMipCount; index++ )
+				atlasSize = checked(atlasSize + mipSizes[index] * frameCount);
 			var atlasHeight = checked(retainedHeight * frameCount);
 			if ( blockSize > 1 && retainedHeight < blockSize )
 			{
@@ -430,9 +472,9 @@ static class VtfTextureDecoder
 				error = $"Animated VTF atlas is too tall: {retainedWidth}x{atlasHeight}.";
 				return false;
 			}
-			var atlas = GC.AllocateUninitializedArray<byte>( checked(frameSize * frameCount) );
+			var atlas = GC.AllocateUninitializedArray<byte>( atlasSize );
 			span.Slice( sourceOffset, atlas.Length ).CopyTo( atlas );
-			texture = new VtfTextureData( retainedWidth, atlasHeight, format, 1, frameCount, bytesPerBlock, blockSize, atlas );
+			texture = new VtfTextureData( retainedWidth, atlasHeight, format, atlasMipCount, frameCount, bytesPerBlock, blockSize, atlas );
 			return true;
 		}
 
@@ -455,7 +497,36 @@ static class VtfTextureDecoder
 	internal static bool TryReadCube( byte[] bytes, out VtfCubeTextureData texture, out string error ) =>
 		TryReadCubeFrame( bytes, 0, out texture, out error );
 
+	internal static VtfTextureData PrepareUpload( VtfTextureData decoded )
+	{
+		var upload = TextureMipUpload.Prepare( decoded.Width, decoded.Height, decoded.Format,
+			decoded.MipCount, 1, decoded.Data );
+		return decoded with { MipCount = upload.MipCount, Data = upload.Data };
+	}
+
+	internal static VtfCubeTextureData PrepareUpload( VtfCubeTextureData decoded )
+	{
+		var upload = TextureMipUpload.Prepare( decoded.Width, decoded.Height, decoded.Format,
+			decoded.MipCount, 6, decoded.Data );
+		return decoded with { MipCount = upload.MipCount, Data = upload.Data };
+	}
+
 	internal static bool TryReadCubeFrame( byte[] bytes, int frameIndex, out VtfCubeTextureData texture, out string error )
+	{
+		// Same checked-overflow exposure as TryRead; TryCreateCube calls this outside its try.
+		try
+		{
+			return TryReadCubeFrameCore( bytes, frameIndex, out texture, out error );
+		}
+		catch ( Exception exception )
+		{
+			texture = default;
+			error = exception.Message;
+			return false;
+		}
+	}
+
+	static bool TryReadCubeFrameCore( byte[] bytes, int frameIndex, out VtfCubeTextureData texture, out string error )
 	{
 		texture = default;
 		error = null;

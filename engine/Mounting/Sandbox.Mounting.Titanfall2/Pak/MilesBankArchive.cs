@@ -167,7 +167,11 @@ sealed class MilesBankArchive
 		{
 			using var stream = new FileStream( path, FileMode.Open, FileAccess.Read, FileShare.Read );
 			var header = new byte[32];
-			if ( stream.Read( header ) != header.Length || !header[..4].SequenceEqual( "RTSC"u8 ) || BinaryPrimitives.ReadUInt16LittleEndian( header[4..] ) != 2 ) continue;
+			// A short header file is skipped; Stream.Read may legally return less than
+			// the buffer even for a readable file, so it must not be read as a bad header.
+			try { stream.ReadExactly( header ); }
+			catch ( EndOfStreamException ) { continue; }
+			if ( !header[..4].SequenceEqual( "RTSC"u8 ) || BinaryPrimitives.ReadUInt16LittleEndian( header[4..] ) != 2 ) continue;
 			var language = BinaryPrimitives.ReadUInt16LittleEndian( header[6..] );
 			var dataOffset = BinaryPrimitives.ReadUInt32LittleEndian( header[8..] );
 			var patch = BinaryPrimitives.ReadInt32LittleEndian( header[12..] );

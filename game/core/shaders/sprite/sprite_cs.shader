@@ -66,6 +66,7 @@ CS
 		uint CameraFade;
 		int NormalTextureHandle;
 		float RefractionStrength;
+		int ColorRampTextureHandle;
 	};
 	StructuredBuffer<SpriteData> SpriteBuffer < Attribute( "Sprites" ); >;
 	RWStructuredBuffer<SpriteData> SpriteBufferOut < Attribute( "SpriteBufferOut" ); >;
@@ -171,8 +172,13 @@ CS
 			{	
 				float4 ss = mul( g_matWorldToView, float4( sprite.Velocity, 0 ) );
 				ss.z = 0;
-				ss = normalize( ss );
-				sprite.Rotation.z += ToDegrees * atan2( ss.x, ss.y ) + sprite.RotationOffset;
+				// A stationary particle (or velocity straight along the view) has
+				// no projected direction. Keep its rotation instead of normalizing zero.
+				if ( dot( ss.xy, ss.xy ) > 0.000001 )
+				{
+					ss = normalize( ss );
+					sprite.Rotation.z += ToDegrees * atan2( ss.x, ss.y ) + sprite.RotationOffset;
+				}
 			}
 
 

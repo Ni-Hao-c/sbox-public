@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>14</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>Sandbox.Mounting.Titanfall2</AssemblyName>
+    <Version>1.0.2</Version>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../**/*.cs" Exclude="../obj/**;../bin/**;../Build/**;../Perf/CollisionVerification/**" />
+    <Reference Include="$(EngineRoot)/bin/managed/*.dll"><Private>false</Private></Reference>
+  </ItemGroup>
+  <Target Name="ValidateSteamSdk" BeforeTargets="ResolveReferences">
+    <Error Condition="!Exists('$(EngineRoot)/bin/managed/Sandbox.Engine.dll')" Text="Pass -p:EngineRoot=the installed Steam sbox directory." />
+  </Target>
+</Project>

@@ -6,8 +6,16 @@ using Sandbox.Mounting;
 /// model starts with neutral placeholder materials so scene loading is not held
 /// hostage by synchronous STARPAK reads and GPU texture creation.
 /// </summary>
+/// <remarks>
+/// Not currently installed: nothing adds this component to a scene, so
+/// <c>Titanfall2StreamingSettings.WorldMaterialsPerFrame</c> and
+/// <c>WorldMaterialFrameBudgetMilliseconds</c> are declared but have no effect. World
+/// materials are created synchronously while the map is built. Install this component
+/// (and read those two budgets) only as part of moving that creation out of the load
+/// path; until then, do not treat either budget as active.
+/// </remarks>
 [Library]
-public sealed class Titanfall2WorldMaterialStreamer : Component, Component.DontExecuteOnServer
+public sealed class Titanfall2WorldMaterialStreamer : Component, Component.DontExecuteOnServer, Sandbox.Internal.IUpdateSubscriber
 {
 	static readonly Sandbox.Diagnostics.Logger Log = new( "Titanfall2WorldMaterials" );
 
@@ -22,12 +30,19 @@ public sealed class Titanfall2WorldMaterialStreamer : Component, Component.DontE
 	int _failedMaterials;
 	bool _completed;
 	readonly Stopwatch _statusTimer = new();
+	readonly Stopwatch _budgetTimer = new();
 	public bool IsCompleted => _completed;
 
 	public void Configure( string mountIdent, IReadOnlyList<string> materialPaths )
 	{
 		MountIdent = mountIdent;
 		MaterialPaths = materialPaths?.ToArray() ?? [];
+	}
+
+	protected override void OnEnabled()
+	{
+		// The status log below only fires once this clock has been started.
+		_statusTimer.Start();
 	}
 
 	protected override void OnUpdate()
@@ -39,11 +54,11 @@ public sealed class Titanfall2WorldMaterialStreamer : Component, Component.DontE
 		var mount = Sandbox.Mounting.Directory.Get( MountIdent ) as Titanfall2Mount;
 		if ( mount is null || !mount.IsMounted ) return;
 
-		var timer = Stopwatch.StartNew();
+		_budgetTimer.Restart();
 		var processed = 0;
 		while ( _nextMaterial < MaterialPaths.Length
 			&& processed < Titanfall2StreamingSettings.WorldMaterialsPerFrame
-			&& timer.Elapsed.TotalMilliseconds < Titanfall2StreamingSettings.WorldMaterialFrameBudgetMilliseconds )
+			&& _budgetTimer.Elapsed.TotalMilliseconds < Titanfall2StreamingSettings.WorldMaterialFrameBudgetMilliseconds )
 		{
 			var materialIndex = _nextMaterial++;
 			var materialName = MaterialPaths[materialIndex];

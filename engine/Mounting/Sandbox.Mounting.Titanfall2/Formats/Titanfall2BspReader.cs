@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
@@ -12,6 +13,8 @@ namespace Titanfall2;
 public static partial class Titanfall2BspReader
 {
 	private const int HeaderCount = 128;
+	private const int EntitiesLumpId = 0x0000;
+	private const int EntityPartitionsLumpId = 0x0018;
 	private const int GameLumpId = 0x0023;
 	private const int PakFileLumpId = 0x0028;
 	private const int CubemapsLumpId = 0x002A;
@@ -33,6 +36,8 @@ public static partial class Titanfall2BspReader
 	private const int LightProbesLumpId = 0x0065;
 	private const int StaticPropLightProbeIndicesLumpId = 0x0066;
 	private const int LightmapDataRealTimeLightsLumpId = 0x0069;
+	private const int WorldLightsLumpId = 0x0036;
+	private const int LightmapRealTimeLightPagesLumpId = 0x007A;
 	private const int CellBspNodesLumpId = 0x006A;
 	private const int CellsLumpId = 0x006B;
 	private const int PortalsLumpId = 0x006C;
@@ -69,13 +74,23 @@ public static partial class Titanfall2BspReader
 		public IReadOnlyList<StaticPropInstance> StaticProps { get; init; } = Array.Empty<StaticPropInstance>();
 		public BspVisibility Visibility { get; init; } = new();
 		public IReadOnlyList<BspCubemap> Cubemaps { get; init; } = Array.Empty<BspCubemap>();
+		/// <summary>
+		/// The rBSP ENTITIES lump. Retail splits most authored entities into
+		/// <c>*_spawn/_env/_fx/_script/_snd.ent</c>, but this lump still carries worldspawn
+		/// metadata plus volume entities (envmap_volume, trigger_indoor_area, ...).
+		/// </summary>
+		public IReadOnlyList<Dictionary<string, string>> Entities { get; init; } = Array.Empty<Dictionary<string, string>>();
+		/// <summary>Entity partition names declared by the map (e.g. env, fx, script, snd, spawn).</summary>
+		public IReadOnlyList<string> EntityPartitions { get; init; } = Array.Empty<string>();
 		public byte[] EmbeddedCubemapVtf { get; init; } = Array.Empty<byte>();
 		public BspLightmaps Lightmaps { get; init; } = new();
+		public IReadOnlyList<Titanfall2WorldLight> WorldLights { get; init; } = Array.Empty<Titanfall2WorldLight>();
 	}
 
 	public sealed class BspLightmaps
 	{
 		public IReadOnlyList<BspLightmapPage> Pages { get; init; } = Array.Empty<BspLightmapPage>();
+		public IReadOnlyList<short> RealTimeLightPages { get; init; } = Array.Empty<short>();
 		public bool IsValid => Pages.Count > 0;
 	}
 
@@ -164,6 +179,19 @@ public static partial class Titanfall2BspReader
 			objectIndex >= 0 && objectIndex < ObjectCellMasks.Count ? ObjectCellMasks[objectIndex] : default;
 
 		/// <summary>
+		/// Keep the object's own spatial cell as a conservative fallback. Some retail
+		/// object-reference associations do not cover the prop's actual position
+		/// (War Games' parked Goblin maps to isolated cell 4 while located in 56).
+		/// Empty source masks must stay unrestricted rather than becoming stricter.
+		/// </summary>
+		public VisibilityCellMask GetPropCellMask( int sourceIndex, NumericsVector3 origin )
+		{
+			var mask = GetObjectCellMask( WorldMeshCount + sourceIndex );
+			if ( mask.IsEmpty || !float.IsFinite( origin.X ) || !float.IsFinite( origin.Y ) || !float.IsFinite( origin.Z ) ) return mask;
+			return mask.Add( FindCell( origin ) );
+		}
+
+		/// <summary>
 		/// Resolves a source-space point to its rBSP visibility cell. Internal CellBSP
 		/// nodes store the first of two consecutive children; leaf nodes use Plane=-1
 		/// and Child as the cell index.
@@ -233,12 +261,19 @@ public static partial class Titanfall2BspReader
 		public byte DiffuseModulationG { get; init; }
 		public byte DiffuseModulationB { get; init; }
 		public byte DiffuseModulationA { get; init; }
-		public uint CollisionFlagsAdd { get; init; }
+		// Retail v13 offset 0x38 is not an additive contents mask. The native
+		// static-prop initializer does not use it to enable collision.
+		public uint ReservedCollisionData { get; init; }
 		public uint CollisionFlagsRemove { get; init; }
+		[System.Text.Json.Serialization.JsonIgnore( Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull )]
+		public Titanfall2LightProbe BakedLightProbe { get; set; }
+		// Retained for the legacy streamer payload. Baked irradiance must not tint
+		// albedo or emission, so parsing a light probe leaves this value neutral.
 		public NumericsVector3 LightProbeColor { get; set; } = NumericsVector3.One;
-		// R2 can leave the legacy solid byte at zero and express the effective
-		// collision contents through the add/remove masks that follow the prop.
-		public bool IsCollidable => SolidType != 0 || CollisionFlagsAdd != 0;
+		// The retail initializer gates collision on the solid byte at 0x1e.
+		// Non-solid decorative instances must stay non-solid even when the
+		// reserved bytes or subtractive contents mask are nonzero.
+		public bool IsCollidable => SolidType != 0;
 	}
 
 	private readonly record struct LumpHeader( int Offset, int Length, int Version, int FourCc );
@@ -278,6 +313,8 @@ public static partial class Titanfall2BspReader
 				Path.GetFileNameWithoutExtension( filePath ) ?? "titanfall2_map",
 				overrideLumps,
 				parseWorldCollision: true,
+				parseLightmaps: true,
+				parseStaticPropLightProbes: true,
 				out parsedBsp,
 				out error );
 		}
@@ -302,6 +339,21 @@ public static partial class Titanfall2BspReader
 	public static bool TryRead( byte[] bspBytes, string mapName, IReadOnlyDictionary<int, byte[]> overrideLumps,
 		bool parseWorldCollision, out ParsedBsp parsedBsp, out string error )
 	{
+		// Callers that do not care about baked lighting keep the historical full parse.
+		return TryRead( bspBytes, mapName, overrideLumps, parseWorldCollision,
+			parseLightmaps: true, parseStaticPropLightProbes: true, out parsedBsp, out error );
+	}
+
+	/// <summary>
+	/// Reads an rBSP. <paramref name="parseLightmaps"/> and <paramref name="parseStaticPropLightProbes"/>
+	/// gate the two expensive optional datasets: lightmap pages (tens of MB per map) and the
+	/// light-probe colour lookup used to tint static props. Both are skipped by default when the
+	/// corresponding feature is off, which avoids reading and copying the lumps for nothing.
+	/// </summary>
+	public static bool TryRead( byte[] bspBytes, string mapName, IReadOnlyDictionary<int, byte[]> overrideLumps,
+		bool parseWorldCollision, bool parseLightmaps, bool parseStaticPropLightProbes,
+		out ParsedBsp parsedBsp, out string error, bool allCollisionContents = false )
+	{
 		parsedBsp = null;
 		error = null;
 		if ( bspBytes == null || bspBytes.Length == 0 )
@@ -320,8 +372,10 @@ public static partial class Titanfall2BspReader
 				resolvedMapName,
 				overrideLumps ?? new Dictionary<int, byte[]>(),
 				parseWorldCollision,
+				parseLightmaps,
+				parseStaticPropLightProbes,
 				out parsedBsp,
-				out error );
+				out error, allCollisionContents );
 		}
 		catch ( Exception exception )
 		{
@@ -336,8 +390,10 @@ public static partial class Titanfall2BspReader
 		string mapName,
 		IReadOnlyDictionary<int, byte[]> overrideLumps,
 		bool parseWorldCollision,
+		bool parseLightmaps,
+		bool parseStaticPropLightProbes,
 		out ParsedBsp parsedBsp,
-		out string error )
+		out string error, bool allCollisionContents = false )
 	{
 		parsedBsp = null;
 		error = null;
@@ -370,18 +426,32 @@ public static partial class Titanfall2BspReader
 
 		var world = ParseWorld( stream, headers, overrideLumps );
 		var worldCollision = parseWorldCollision
-			? ParseWorldCollision( stream, headers, overrideLumps )
+			? ParseWorldCollision( stream, headers, overrideLumps, playerOnly: !allCollisionContents, includeParts: allCollisionContents )
 			: new BspWorldCollision();
 		var staticProps = ParseStaticProps( stream, headers, overrideLumps );
-		ApplyStaticPropLightProbes(
-			staticProps,
-			ReadLumpBytes( stream, headers, overrideLumps, LightProbesLumpId ),
-			ReadLumpBytes( stream, headers, overrideLumps, StaticPropLightProbeIndicesLumpId ) );
-		var lightmaps = ReadLightmaps(
-			ReadLumpBytes( stream, headers, overrideLumps, LightmapHeadersLumpId ),
-			ReadLumpBytes( stream, headers, overrideLumps, LightmapDataSkyLumpId ),
-			ReadLumpBytes( stream, headers, overrideLumps, LightmapDataRealTimeLightsLumpId ) );
+		if ( parseStaticPropLightProbes )
+		{
+			ApplyStaticPropLightProbes(
+				staticProps,
+				ReadLumpBytes( stream, headers, overrideLumps, LightProbesLumpId ),
+				ReadLumpBytes( stream, headers, overrideLumps, StaticPropLightProbeIndicesLumpId ) );
+		}
+		// Lightmap pages are ~73 MB on mp_angel_city and are copied again by ReadLightmaps;
+		// skip the whole read when the runtime lightmap path is disabled.
+		var worldLights = parseLightmaps
+			? Titanfall2WorldLight.Read( ReadLumpBytes( stream, headers, overrideLumps, WorldLightsLumpId ), headers[WorldLightsLumpId].Version )
+			: Array.Empty<Titanfall2WorldLight>();
+		var lightmaps = parseLightmaps
+			? ReadLightmaps(
+				ReadLumpBytes( stream, headers, overrideLumps, LightmapHeadersLumpId ),
+				ReadLumpBytes( stream, headers, overrideLumps, LightmapDataSkyLumpId ),
+				ReadLumpBytes( stream, headers, overrideLumps, LightmapDataRealTimeLightsLumpId ),
+				ReadLumpBytes( stream, headers, overrideLumps, LightmapRealTimeLightPagesLumpId ) )
+			: new BspLightmaps();
 		var cubemaps = ReadCubemaps( ReadLumpBytes( stream, headers, overrideLumps, CubemapsLumpId ) );
+		var entities = Titanfall2EntityText.Parse( ReadLumpBytes( stream, headers, overrideLumps, EntitiesLumpId ) );
+		PopulateFogVolumeBrushes( entities, stream, headers, overrideLumps );
+		var entityPartitions = ReadEntityPartitions( ReadLumpBytes( stream, headers, overrideLumps, EntityPartitionsLumpId ) );
 		var visibility = ParseVisibility( stream, headers, overrideLumps, world.SourceMeshCount );
 		var embeddedCubemapVtf = ReadEmbeddedCubemapVtf(
 			ReadLumpBytes( stream, headers, overrideLumps, PakFileLumpId ), mapName );
@@ -397,17 +467,45 @@ public static partial class Titanfall2BspReader
 			Visibility = visibility,
 			Cubemaps = cubemaps,
 			EmbeddedCubemapVtf = embeddedCubemapVtf,
-			Lightmaps = lightmaps
+			Lightmaps = lightmaps,
+			WorldLights = worldLights,
+			Entities = entities,
+			EntityPartitions = entityPartitions
 		};
 
 		return true;
 	}
 
+	/// <summary>
+	/// The rBSP entity partition table is a short NUL-terminated ASCII list preceded by a few
+	/// flag tokens (measured: <c>"01* env fx script snd spawn"</c> on every shipped map).
+	/// </summary>
+	private static IReadOnlyList<string> ReadEntityPartitions( byte[] bytes )
+	{
+		if ( bytes is null || bytes.Length == 0 ) return Array.Empty<string>();
+
+		var text = Encoding.ASCII.GetString( bytes ).Replace( '\0', ' ' ).Trim();
+		if ( text.Length == 0 ) return Array.Empty<string>();
+
+		var names = new List<string>();
+		foreach ( var token in text.Split( [' ', '\t', '\r', '\n'], StringSplitOptions.RemoveEmptyEntries ) )
+		{
+			if ( token.All( static character => char.IsDigit( character ) || character == '*' ) ) continue;
+			names.Add( token );
+		}
+
+		return names;
+	}
+
 	private static BspWorld ParseWorld( Stream stream, IReadOnlyList<LumpHeader> headers, IReadOnlyDictionary<int, byte[]> overrideLumps )
+		=> ReadModelGeometry( stream, headers, overrideLumps )( 0 );
+
+	// Decode the shared render tables once when importing several inline models.
+	private static Func<int, BspWorld> ReadModelGeometry( Stream stream, IReadOnlyList<LumpHeader> headers, IReadOnlyDictionary<int, byte[]> overrideLumps )
 	{
 		var models = ReadModels( ReadLumpBytes( stream, headers, overrideLumps, ModelsLumpId ) );
 		if ( models.Length == 0 )
-			return new BspWorld();
+			return _ => new BspWorld();
 
 		var vertices = ReadVector3Array( ReadLumpBytes( stream, headers, overrideLumps, VerticesLumpId ) );
 		var normals = ReadVector3Array( ReadLumpBytes( stream, headers, overrideLumps, VertexNormalsLumpId ) );
@@ -424,39 +522,58 @@ public static partial class Titanfall2BspReader
 		var vertexLitBump = ReadVertexRefs( ReadLumpBytes( stream, headers, overrideLumps, VertexLitBumpLumpId ), 44, true );
 		var vertexUnlitTs = ReadVertexRefs( ReadLumpBytes( stream, headers, overrideLumps, VertexUnlitTsLumpId ), 28, false );
 
-		var worldModel = models[0];
-		var worldMeshes = new List<WorldMesh>();
-		for ( int meshIndex = 0; meshIndex < worldModel.NumMeshes; meshIndex++ )
+		return BuildModel;
+
+		BspWorld BuildModel( int modelIndex )
 		{
-			int sourceMeshIndex = worldModel.FirstMesh + meshIndex;
-			if ( sourceMeshIndex < 0 || sourceMeshIndex >= meshes.Length )
-				continue;
+			if ( (uint)modelIndex >= models.Length ) throw new InvalidDataException( "BSP model index is out of bounds." );
+			var worldModel = models[modelIndex];
+			if ( modelIndex > 0 && (worldModel.FirstMesh < 0 || worldModel.NumMeshes < 0
+				|| (long)worldModel.FirstMesh + worldModel.NumMeshes > meshes.Length) )
+				throw new InvalidDataException( "BSP inline model mesh range is out of bounds." );
+			// The world model is deliberately clamped rather than rejected: some repacks
+			// leave its range wider than the mesh lump. Without the clamp a corrupt count
+			// drives a multi-billion iteration loop here and sizes ParseVisibility's object
+			// masks (SourceMeshCount) at ~32 bytes per unit.
+			var firstMesh = modelIndex > 0 ? worldModel.FirstMesh : Math.Max( 0, worldModel.FirstMesh );
+			var meshCount = modelIndex > 0 ? worldModel.NumMeshes
+				: Math.Clamp( worldModel.NumMeshes, 0, Math.Max( 0, meshes.Length - firstMesh ) );
+			var worldMeshes = new List<WorldMesh>( meshCount );
+			for ( int meshIndex = 0; meshIndex < meshCount; meshIndex++ )
+			{
+				int sourceMeshIndex = firstMesh + meshIndex;
+				if ( sourceMeshIndex < 0 || sourceMeshIndex >= meshes.Length )
+					continue;
 
-			var worldMesh = BuildWorldMesh(
-				meshes[sourceMeshIndex],
-				meshIndex,
-				meshIndices,
-				vertices,
-				normals,
-				materialSorts,
-				textureData,
-				textureNames,
-				vertexUnlit,
-				vertexLitFlat,
-				vertexLitBump,
-				vertexUnlitTs );
+				var worldMesh = BuildWorldMesh(
+					meshes[sourceMeshIndex],
+					meshIndex,
+					meshIndices,
+					vertices,
+					normals,
+					materialSorts,
+					textureData,
+					textureNames,
+					vertexUnlit,
+					vertexLitFlat,
+					vertexLitBump,
+					vertexUnlitTs );
+				if ( modelIndex > 0 && meshes[sourceMeshIndex].NumTriangles > 0
+					&& (worldMesh is null || worldMesh.Indices.Length != meshes[sourceMeshIndex].NumTriangles * 3) )
+					throw new InvalidDataException( $"Incomplete BSP inline model {modelIndex} mesh {sourceMeshIndex}." );
 
-			if ( worldMesh != null && worldMesh.Vertices.Length > 0 && worldMesh.Indices.Length > 0 )
-				worldMeshes.Add( worldMesh );
+				if ( worldMesh != null && worldMesh.Vertices.Length > 0 && worldMesh.Indices.Length > 0 )
+					worldMeshes.Add( worldMesh );
+			}
+
+			return new BspWorld
+			{
+				Meshes = worldMeshes,
+				SourceMeshCount = meshCount,
+				Mins = worldModel.Mins,
+				Maxs = worldModel.Maxs
+			};
 		}
-
-		return new BspWorld
-		{
-			Meshes = worldMeshes,
-			SourceMeshCount = worldModel.NumMeshes,
-			Mins = worldModel.Mins,
-			Maxs = worldModel.Maxs
-		};
 	}
 
 	private static BspVisibility ParseVisibility(
@@ -570,7 +687,11 @@ public static partial class Titanfall2BspReader
 		if ( memoryStream.Length < 4 )
 			return Array.Empty<StaticPropInstance>();
 
+		// Counts below come straight from the lump. A negative/oversized value used to throw
+		// from the List/array constructors (or OOM), which aborted the whole BSP parse.
 		int childCount = reader.ReadInt32();
+		if ( childCount < 0 || childCount > (memoryStream.Length - 4) / 16 )
+			return Array.Empty<StaticPropInstance>();
 		var childHeaders = new List<GameLumpChildHeader>( childCount );
 		for ( int i = 0; i < childCount; i++ )
 		{
@@ -589,11 +710,13 @@ public static partial class Titanfall2BspReader
 			return Array.Empty<StaticPropInstance>();
 
 		int relativeOffset = sprpHeader.Offset - gameLumpHeader.Offset;
-		if ( relativeOffset < 0 || relativeOffset + sprpHeader.Length > gameLumpBytes.Length )
+		if ( relativeOffset < 0 || sprpHeader.Length < 4 || (long)relativeOffset + sprpHeader.Length > gameLumpBytes.Length )
 			return Array.Empty<StaticPropInstance>();
 
 		memoryStream.Position = relativeOffset;
 		int modelNameCount = reader.ReadInt32();
+		if ( modelNameCount < 0 || modelNameCount > (memoryStream.Length - memoryStream.Position) / 128 )
+			return Array.Empty<StaticPropInstance>();
 		var modelNames = new string[modelNameCount];
 		for ( int i = 0; i < modelNameCount; i++ )
 		{
@@ -606,7 +729,14 @@ public static partial class Titanfall2BspReader
 		_ = unknown1;
 		_ = unknown2;
 
-		var props = new List<StaticPropInstance>( Math.Max( propCount, 0 ) );
+		// Bound the count by this child's declared length, not by the whole GAME_LUMP:
+		// lump 0x23 also carries other children, so a corrupt count would otherwise read
+		// their bytes as prop records instead of failing here.
+		if ( (long)memoryStream.Position + (long)propCount * 64L > (long)relativeOffset + sprpHeader.Length )
+			return Array.Empty<StaticPropInstance>();
+
+		// v13 StaticPropLump_t is 64 bytes; never pre-size beyond what the lump can hold.
+		var props = new List<StaticPropInstance>( (int)Math.Clamp( propCount, 0, (memoryStream.Length - memoryStream.Position) / 64 ) );
 		for ( int i = 0; i < propCount; i++ )
 		{
 			var origin = ReadVector3( reader );
@@ -625,7 +755,7 @@ public static partial class Titanfall2BspReader
 			byte diffuseModulationG = reader.ReadByte();
 			byte diffuseModulationB = reader.ReadByte();
 			byte diffuseModulationA = reader.ReadByte();
-			uint collisionFlagsAdd = reader.ReadUInt32();
+			uint reservedCollisionData = reader.ReadUInt32();
 			uint collisionFlagsRemove = reader.ReadUInt32();
 
 			if ( modelNameIndex < 0 || modelNameIndex >= modelNames.Length )
@@ -652,7 +782,7 @@ public static partial class Titanfall2BspReader
 				DiffuseModulationG = diffuseModulationG,
 				DiffuseModulationB = diffuseModulationB,
 				DiffuseModulationA = diffuseModulationA,
-				CollisionFlagsAdd = collisionFlagsAdd,
+				ReservedCollisionData = reservedCollisionData,
 				CollisionFlagsRemove = collisionFlagsRemove
 			} );
 		}
@@ -844,19 +974,21 @@ public static partial class Titanfall2BspReader
 
 	private static byte[] ReadLumpBytes( Stream stream, IReadOnlyList<LumpHeader> headers, IReadOnlyDictionary<int, byte[]> overrideLumps, int lumpId )
 	{
-		if ( overrideLumps.TryGetValue( lumpId, out var overrideBytes ) )
+		if ( overrideLumps is not null && overrideLumps.TryGetValue( lumpId, out var overrideBytes ) )
 			return overrideBytes ?? Array.Empty<byte>();
 
 		if ( lumpId < 0 || lumpId >= headers.Count )
 			return Array.Empty<byte>();
 
 		var header = headers[lumpId];
-		if ( header.Length <= 0 || header.Offset < 0 )
+		if ( header.Length <= 0 || header.Offset < 0 || header.Offset >= stream.Length )
 			return Array.Empty<byte>();
 
-		var bytes = new byte[header.Length];
+		// Clamp to the stream so a corrupt length cannot force a ~2 GB allocation, and
+		// loop the read: a single Stream.Read may legally return a partial FileStream read.
+		var bytes = new byte[(int)Math.Min( header.Length, stream.Length - header.Offset )];
 		stream.Position = header.Offset;
-		int bytesRead = stream.Read( bytes, 0, bytes.Length );
+		int bytesRead = stream.ReadAtLeast( bytes, bytes.Length, throwOnEndOfStream: false );
 		if ( bytesRead == bytes.Length )
 			return bytes;
 
@@ -1033,7 +1165,7 @@ public static partial class Titanfall2BspReader
 			var normalizedMap = (mapName ?? string.Empty).Replace( '\\', '/' ).Trim( '/' );
 			var expected = $"materials/maps/{normalizedMap}/cubemaps.hdr.vtf";
 			var entry = archive.Entries.FirstOrDefault( candidate =>
-				candidate.FullName.Equals( expected, StringComparison.OrdinalIgnoreCase) )
+				candidate.FullName.Equals( expected, StringComparison.OrdinalIgnoreCase ) )
 				?? archive.Entries.FirstOrDefault( candidate =>
 					candidate.FullName.EndsWith( "/cubemaps.hdr.vtf", StringComparison.OrdinalIgnoreCase ) );
 			if ( entry is null || entry.Length <= 0 || entry.Length > maximumCubemapBytes ) return Array.Empty<byte>();
@@ -1124,12 +1256,13 @@ public static partial class Titanfall2BspReader
 				// original top-left layout. Unlike decoded material textures,
 				// this UV set must not be vertically inverted.
 				lightmapUv = new NumericsVector2( lightmapU, lightmapV );
+				// Seek instead of ReadBytes: one throwaway array per vertex otherwise.
 				if ( stride > 28 )
-					reader.ReadBytes( stride - 28 );
+					stream.Position += stride - 28;
 			}
 			else if ( stride > 20 )
 			{
-				reader.ReadBytes( stride - 20 );
+				stream.Position += stride - 20;
 			}
 
 			vertexRefs[i] = new VertexRef(
@@ -1148,40 +1281,29 @@ public static partial class Titanfall2BspReader
 		byte[] probeBytes,
 		byte[] indexBytes )
 	{
-		const int probeStride = 48;
+		const int probeStride = Titanfall2LightProbe.RecordBytes;
 		if ( props.Count == 0 || probeBytes.Length < probeStride || indexBytes.Length < 4 )
 			return;
 
 		var probeCount = probeBytes.Length / probeStride;
-		var indexCount = Math.Min( props.Count, indexBytes.Length / 4 );
-		using var indexStream = new MemoryStream( indexBytes, writable: false );
-		using var indexReader = new BinaryReader( indexStream, Encoding.ASCII, leaveOpen: true );
-		for ( var propIndex = 0; propIndex < indexCount; propIndex++ )
+		var indexCount = indexBytes.Length / 4;
+		for ( var propIndex = 0; propIndex < props.Count; propIndex++ )
 		{
-			var probeIndex = indexReader.ReadUInt32();
+			var prop = props[propIndex];
+			// Invalid model entries may have been omitted while parsing sprp. The
+			// probe table is parallel to the original records, not the filtered list.
+			var sourceIndex = prop.SourceIndex >= 0 ? prop.SourceIndex : propIndex;
+			if ( sourceIndex >= indexCount ) continue;
+			var probeIndex = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(
+				indexBytes.AsSpan( sourceIndex * 4, 4 ) );
 			if ( probeIndex >= probeCount ) continue;
 			var offset = checked((int)probeIndex * probeStride);
-			var sum = NumericsVector3.Zero;
-			for ( var face = 0; face < 6; face++ )
-			{
-				var faceOffset = offset + face * 4;
-				var exponent = unchecked((sbyte)probeBytes[faceOffset + 3]);
-				var scale = MathF.Pow( 2f, exponent ) / 255f;
-				sum += new NumericsVector3(
-					probeBytes[faceOffset] * scale,
-					probeBytes[faceOffset + 1] * scale,
-					probeBytes[faceOffset + 2] * scale );
-			}
-
-			var average = sum / 6f;
-			props[propIndex].LightProbeColor = new NumericsVector3(
-				Math.Clamp( average.X, 0.04f, 4f ),
-				Math.Clamp( average.Y, 0.04f, 4f ),
-				Math.Clamp( average.Z, 0.04f, 4f ) );
+			if ( Titanfall2LightProbe.TryRead( probeBytes.AsSpan( offset, probeStride ), out var probe ) )
+				prop.BakedLightProbe = probe;
 		}
 	}
 
-	private static BspLightmaps ReadLightmaps( byte[] headerBytes, byte[] skyBytes, byte[] realTimeBytes )
+	private static BspLightmaps ReadLightmaps( byte[] headerBytes, byte[] skyBytes, byte[] realTimeBytes, byte[] realTimePageBytes )
 	{
 		const int headerStride = 8;
 		if ( headerBytes.Length < headerStride )
@@ -1221,11 +1343,14 @@ public static partial class Titanfall2BspReader
 			} );
 		}
 
-		return new BspLightmaps { Pages = pages };
+		var realTimePages = new short[realTimePageBytes.Length / 2];
+		for ( var index = 0; index < realTimePages.Length; ++index )
+			realTimePages[index] = BinaryPrimitives.ReadInt16LittleEndian( realTimePageBytes.AsSpan( index * 2 ) );
+		return new BspLightmaps { Pages = pages, RealTimeLightPages = realTimePages };
 
 		static byte[] ReadImage( byte[] source, ref int offset, int length )
 		{
-			if ( length <= 0 || offset < 0 || offset + length > source.Length )
+			if ( length <= 0 || offset < 0 || (long)offset + length > source.Length )
 				return Array.Empty<byte>();
 			var image = new byte[length];
 			Buffer.BlockCopy( source, offset, image, 0, length );
@@ -1240,15 +1365,10 @@ public static partial class Titanfall2BspReader
 		if ( bytes.Length < stride )
 			return Array.Empty<NumericsVector3>();
 
-		var vectors = new NumericsVector3[bytes.Length / stride];
-		using var stream = new MemoryStream( bytes, writable: false );
-		using var reader = new BinaryReader( stream, Encoding.ASCII, leaveOpen: true );
-		for ( int i = 0; i < vectors.Length; i++ )
-		{
-			vectors[i] = ReadVector3( reader );
-		}
-
-		return vectors;
+		// Vertex / normal / portal lumps hold millions of little-endian floats; a bulk
+		// reinterpret copy replaces three BinaryReader calls per element.
+		var count = bytes.Length / stride;
+		return System.Runtime.InteropServices.MemoryMarshal.Cast<byte, NumericsVector3>( bytes.AsSpan( 0, count * stride ) ).ToArray();
 	}
 
 	private static ushort[] ReadUInt16Array( byte[] bytes )
@@ -1256,14 +1376,9 @@ public static partial class Titanfall2BspReader
 		if ( bytes.Length < 2 )
 			return Array.Empty<ushort>();
 
-		var values = new ushort[bytes.Length / 2];
-		using var stream = new MemoryStream( bytes, writable: false );
-		using var reader = new BinaryReader( stream, Encoding.ASCII, leaveOpen: true );
-		for ( int i = 0; i < values.Length; i++ )
-		{
-			values[i] = reader.ReadUInt16();
-		}
-
+		var count = bytes.Length / 2;
+		var values = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ushort>( bytes.AsSpan( 0, count * 2 ) ).ToArray();
+		if ( !BitConverter.IsLittleEndian ) BinaryPrimitives.ReverseEndianness( values, values );
 		return values;
 	}
 

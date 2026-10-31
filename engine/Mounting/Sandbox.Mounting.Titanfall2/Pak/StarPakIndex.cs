@@ -24,15 +24,23 @@ static class StarPakIndex
 		try
 		{
 			IReadOnlyDictionary<long, long> entries;
-			lock ( CacheLock )
+			bool cached;
+			lock ( CacheLock ) cached = Cache.TryGetValue( path, out entries );
+			if ( cached ) System.Threading.Interlocked.Increment( ref IndexHits );
+			else
 			{
-				if ( !Cache.TryGetValue( path, out entries ) )
+				// Read the footer outside the global lock: holding it across file IO made
+				// every texture worker wait on the first index read of any STARPAK.
+				System.Threading.Interlocked.Increment( ref IndexMisses );
+				var read = ReadEntries( path );
+				lock ( CacheLock )
 				{
-					System.Threading.Interlocked.Increment( ref IndexMisses );
-					entries = ReadEntries( path );
-					Cache[path] = entries;
+					if ( !Cache.TryGetValue( path, out entries ) )
+					{
+						entries = read;
+						Cache[path] = entries;
+					}
 				}
-				else System.Threading.Interlocked.Increment( ref IndexHits );
 			}
 
 			if ( !entries.TryGetValue( offset, out size ) )
@@ -107,15 +115,24 @@ static class StarPakIndex
 		if ( count > int.MaxValue || count > (ulong)((stream.Length - 8) / 16) )
 			throw new InvalidDataException( $"Invalid STARPAK entry count {count}." );
 
+		var tableLength = checked((int)count * 16);
+		var dataEnd = stream.Length - 8 - tableLength;
+		stream.Position = dataEnd;
+		// One read for the whole table instead of one 16-byte FileStream read per entry.
+		var table = GC.AllocateUninitializedArray<byte>( tableLength );
+		stream.ReadExactly( table );
 		var entries = new Dictionary<long, long>( (int)count );
-		stream.Position = stream.Length - 8 - checked((long)count * 16);
-		Span<byte> entry = stackalloc byte[16];
-		for ( ulong index = 0; index < count; index++ )
+		for ( var index = 0; index < (int)count; index++ )
 		{
-			stream.ReadExactly( entry );
+			var entry = table.AsSpan( index * 16, 16 );
 			var offset = BinaryPrimitives.ReadInt64LittleEndian( entry[..8] );
 			var size = BinaryPrimitives.ReadInt64LittleEndian( entry[8..] );
-			if ( offset >= 0 && size > 0 ) entries[offset] = size;
+			// Streamed data must end before the index, not merely before EOF.
+			// Subtraction avoids overflowing on a corrupt offset + size pair.
+			if ( offset < 0 || size <= 0 || offset > dataEnd || size > dataEnd - offset )
+				throw new InvalidDataException( $"STARPAK entry 0x{offset:X}+{size} exceeds its data region." );
+			if ( !entries.TryAdd( offset, size ) )
+				throw new InvalidDataException( $"STARPAK contains duplicate stream entry 0x{offset:X}." );
 		}
 		return entries;
 	}
