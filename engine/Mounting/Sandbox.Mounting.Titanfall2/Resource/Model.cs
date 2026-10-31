@@ -905,7 +905,7 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 			break;
 		}
 		var rootPose = rootBoneIndex >= 0 ? skeleton.ModelTransforms[rootBoneIndex] : Transform.Zero;
-		var body = builder.AddBody( mass, boneName: rootBoneIndex >= 0 ? skeleton.Names[rootBoneIndex] : null );
+		var body = builder.AddBody( mass, Titanfall2Surface.Resolve( parsed.SurfaceProperty, null ), rootBoneIndex >= 0 ? skeleton.Names[rootBoneIndex] : null );
 		if ( rootBoneIndex >= 0 ) body.SetBindPose( rootPose );
 		var traceVertices = new List<Vector3>();
 		var traceIndices = new List<int>();
@@ -1000,7 +1000,7 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 			var mass = sourceBody.Mass > 0.0f && float.IsFinite( sourceBody.Mass )
 				? sourceBody.Mass
 				: fallbackMass;
-			var body = builder.AddBody( mass, boneName: skeleton.Names[sourceBody.BoneIndex] );
+			var body = builder.AddBody( mass, Titanfall2Surface.Resolve( parsed.SurfaceProperty, null ), skeleton.Names[sourceBody.BoneIndex] );
 			var bindPose = skeleton.ModelTransforms[sourceBody.BoneIndex];
 			body.SetBindPose( bindPose );
 			bodyIndices.Add( sourceBody.SolidIndex, bodyIndices.Count );

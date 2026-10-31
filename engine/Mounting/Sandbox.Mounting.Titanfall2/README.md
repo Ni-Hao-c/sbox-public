@@ -84,6 +84,27 @@
 
 控制台命令 `titanfall2_collision_look [距离=512] [半径=0]` 从当前相机发出射线或球体扫描，以 JSON 输出命中物体的碰撞来源、contents、形状和标签。它只读取，不修改碰撞。
 
+### 表面语义
+
+挂载会把能读到的 surfaceprop 映射到引擎的 `Surface`（[Resource/Surface.cs](Resource/Surface.cs)），用于物理摩擦/弹性/密度和脚步声：
+
+- **MDL**：模型级 surfaceprop 用于物理体，骨骼级 surfaceprop 用于 hitbox。这是静态道具和大多数模型碰撞的表面来源。
+- **VMT**：`$surfaceprop` 写入渲染材质的 `PhysicsSurfaceProperties` 属性。
+- **rBSP 世界和 RPAK MATL**：CM 碰撞数据没有材质索引，零售 MATL 的表面名在资产头的字符串指针里、尚未解析，因此世界碰撞和 RPAK 材质保持引擎默认表面。
+- 引擎没有的表面名按 [Resource/Surface.cs](Resource/Surface.cs) 的别名表映射（例如 `concrete`→`dirt`、`tile`→`ceramic`）；未知名字回退到 `default`，每个名字只提示一次。
+
+## 运行时贴花
+
+`Titanfall2DecalFactory`（[Resource/Decals.cs](Resource/Decals.cs)）把挂载的泰坦陨落 2 贴花材质解包成原生 `Decal` 需要的贴图，供游戏代码做弹孔、焦痕等动态效果：
+
+- `Titanfall2DecalFactory.TryCreateDefinition( materialName, out definition, out error )` 接受材质名（可带 `materials/` 前缀或 `.vmt`），返回 `DecalDefinition`。
+- `Titanfall2DecalFactory.Spawn( parent, materialName, position, rotation, size, depth )` 直接创建贴花对象。
+- `Titanfall2DecalFactory.RotationForNormal( normal )` 生成贴花朝向。
+- 调试命令：`titanfall2_decal <材质名> [大小=32] [深度=8]`，在相机准星命中处生成贴花。
+
+原生 `Decal` 只吃颜色/法线/自发光贴图，因此泰坦陨落 2 材质的层混合、颜色 LUT 和独立不透明度贴图不会还原；遮挡遮罩取颜色贴图的 alpha。静态地图贴花仍走上面的 BSP 几何路径。
+
+
 ## 导航
 
 `Titanfall2DeferredNavMeshBuilder`（[Resource/DeferredNavMeshBuilder.cs](Resource/DeferredNavMeshBuilder.cs)）接管挂载地图的导航网格生成。
@@ -158,7 +179,7 @@ dotnet test engine\Tests\Sandbox.Test.Integration --filter FullyQualifiedName~Ti
 ## 已知限制
 
 - **碰撞**：
-  - 只区分 contents 位，不处理 surfaceprop，世界表面没有对应的 s&box `Surface`。
+  - surfaceprop 只覆盖 MDL（模型级用于物理体、骨骼级用于 hitbox）和 legacy VMT；rBSP 世界碰撞和 RPAK MATL 仍是默认表面。
   - `nowallrun` 标签由 `NOCLIMB` 位推断，没有对照零售版的墙跑代码确认。
   - 没有 VPHY 和 hitbox 的模型，其碰撞是渲染网格或包围凸包的近似。
 - **游戏逻辑**：门、触发器、脚本和网络同步属于游戏代码，挂载只提供几何、碰撞和实体数据。

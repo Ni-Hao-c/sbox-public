@@ -273,6 +273,12 @@ solid 类型不为 0 时，有效 contents 由 `Titanfall2CollisionSource.Static
 - 远景着色器按零售版 `c_maxLightingValue` 的方式限制峰值亮度。这个常量是引擎的相机参数，不存储在资源中，挂载默认使用 1。
 - HDR 行星和太阳贴图另有固定的强度和峰值限制。
 
+### 表面和贴花
+
+- `Titanfall2Surface`（[Resource/Surface.cs](Resource/Surface.cs)）把 surfaceprop 名归一化（去路径/扩展名/引号）、查别名表，再 `Surface.FindByName`；找不到回退 `default`，每个未知名字只提示一次。
+- 数据来源：MDL 模型级 surfaceprop 传给 `ModelBuilder.AddBody` 的物理体，骨骼级传给 hitbox 的 `.WithSurface`；legacy VMT 的 `$surfaceprop` 写成材质的 `PhysicsSurfaceProperties` 属性。rBSP 的 CM 数据与 RPAK MATL 头不提供可解析的表面名，保持默认。
+- `Titanfall2DecalFactory`（[Resource/Decals.cs](Resource/Decals.cs)）从贴花材质属性（`g_tAlbedo`/`g_tNormal`/`g_tEmissive`）生成原生 `DecalDefinition`；原生贴花只吃贴图，层混合/LUT/独立不透明度贴图不还原，遮罩取颜色 alpha。
+
 ## 7. 显示管线
 
 `Titanfall2Tonemapping`（[Resource/Tonemapping.cs](Resource/Tonemapping.cs)）挂在一个无限范围、优先级 -100 的 `PostProcessVolume` 上，所以游戏自己的后处理体积可以覆盖它。函数定义在 `titanfall2_display.hlsl`。

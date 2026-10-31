@@ -70,7 +70,7 @@ partial class ModelLoader
 				if ( string.IsNullOrWhiteSpace( surface ) ) surface = parsed.SurfaceProperty;
 				if ( string.IsNullOrWhiteSpace( surface ) ) surface = "default";
 				var hitbox = set.AddBox( name, skeleton.Names[box.Bone], new BBox( min, max ) )
-					.WithSurface( surface )
+					.WithSurface( Titanfall2Surface.ResolveName( surface, null ) )
 					.AddTag( $"titanfall2_hitgroup_{box.Group}" );
 				if ( box.Group >= 0 && box.Group < HitgroupNames.Length ) hitbox.AddTag( HitgroupNames[box.Group] );
 				if ( box.CriticalOverride != 0 ) hitbox.AddTag( "titanfall2_critical_override" );

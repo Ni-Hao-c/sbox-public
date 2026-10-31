@@ -67,7 +67,8 @@ sealed class Titanfall2VmtDefinition
 			ShaderName.Contains( "Unlit", StringComparison.OrdinalIgnoreCase )
 				|| ShaderName.Equals( "Basic", StringComparison.OrdinalIgnoreCase )
 				|| ShaderName.Equals( "SpriteCard", StringComparison.OrdinalIgnoreCase ),
-			inferred.IsWater );
+			inferred.IsWater,
+			GetString( "$surfaceprop" ) );
 	}
 
 	internal string GetTexture( params string[] keys )

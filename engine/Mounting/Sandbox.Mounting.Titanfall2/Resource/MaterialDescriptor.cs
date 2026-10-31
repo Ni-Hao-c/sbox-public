@@ -308,6 +308,9 @@ sealed class Titanfall2MaterialDescriptor
 							? MaterialLoader.CreateDecalMaterial( resourcePath, Metadata )
 							: MaterialLoader.CreateRuntimeMaterial( resourcePath, Metadata );
 		material.SetFeature( "F_RENDER_BACKFACES", Metadata.DoubleSided ? 1 : 0 );
+		// Physics surface comes from the source surfaceprop when the format exposes one
+		// (legacy VMT). Retail MATL surfaces are not resolved yet, so those keep the default.
+		Titanfall2Surface.ApplyTo( material, Metadata.SurfaceProperty, resourcePath );
 
 		if ( Parameters.HasValue )
 		{

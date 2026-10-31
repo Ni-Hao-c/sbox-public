@@ -38,6 +38,7 @@ class LegacyMaterialLoader( string materialName ) : ResourceLoader<Titanfall2Mou
 			_ => "shaders/titanfall2_vmt_unlit_two_texture.shader"
 		};
 		var material = Material.Create( resourcePath, shader );
+		Titanfall2Surface.ApplyTo( material, metadata.SurfaceProperty, resourcePath );
 		material.Set( "g_tTexture1", Texture.Transparent );
 		if ( !cubeLayer2 ) material.Set( "g_tTexture2", Texture.Transparent );
 

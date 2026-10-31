@@ -25,7 +25,8 @@ readonly record struct Titanfall2MaterialMetadata(
 	bool UsesVertexColor = false,
 	bool UsesVertexAlpha = false,
 	bool IsUnlit = false,
-	bool IsWater = false )
+	bool IsWater = false,
+	string SurfaceProperty = null )
 {
 	public Titanfall2DecalMode DecalMode => !IsDecal
 		? Titanfall2DecalMode.None
