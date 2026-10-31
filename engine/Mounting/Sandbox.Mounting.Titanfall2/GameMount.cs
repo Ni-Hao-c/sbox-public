@@ -580,6 +580,14 @@ public partial class Titanfall2Mount : BaseGameMount
 					legacyTextures++;
 					continue;
 				}
+				// Colour-correction tables are mounted as volume textures, keyed on their own
+				// content path, so a map scene references one instead of embedding its samples.
+				if ( extension == ".raw" && entry.Path.StartsWith( "materials/correction/", StringComparison.OrdinalIgnoreCase ) )
+				{
+					if ( registered.Add( entry.Path + ".vtex" ) )
+						context.Add( ResourceType.Texture, entry.Path, new Titanfall2ColorLookupLoader( new VpkAssetSource( archive, entry, vpkResolver ) ) );
+					continue;
+				}
 				if ( extension == ".pcf" )
 				{
 					RegisterParticleFile( entry.Path, new VpkAssetSource( archive, entry, vpkResolver ) );

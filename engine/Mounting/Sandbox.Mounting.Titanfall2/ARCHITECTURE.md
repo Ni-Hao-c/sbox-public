@@ -304,6 +304,9 @@ solid 类型不为 0 时，有效 contents 由 `Titanfall2CollisionSource.Static
 - `color_correction` 实体指向一个 32³ RGB 查找表文件（98,304 字节），例如 `materials/correction/sp_beacon.raw`。
 - 只加载全局启用的实体，即没有 `StartDisabled`，且没有 `minfalloff`/`maxfalloff`。
 - 权重取 `maxweight`。
+- 查找表本身按自己的内容路径注册成挂载体纹理（`mount://titanfall2/materials/correction/<名字>.raw.vtex`），
+  场景里的 `Titanfall2ColorCorrection` 只保存这个资源路径。表不进场景数据，因此每张图的场景不再多出 98,304
+  字节的样本；纹理属于挂载而不属于组件，缺挂载时该图只是不做校正。保留 32³ 精度，不重采样成引擎原生的 16³ grading LUT。
 
 ## 8. 模型
 

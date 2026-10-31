@@ -1,23 +1,22 @@
 using Sandbox.Rendering;
 
 /// <summary>Retail 32-cubed RGB correction, sampled after the HDR display transform.</summary>
-[Library]
+[Library, Hide]
 public sealed class Titanfall2ColorCorrection : BasePostProcess<Titanfall2ColorCorrection>
 {
-	[Property, Hide] public string EncodedLut { get; set; }
+	/// <summary>The mounted volume-texture resource that holds the 32-cubed table.</summary>
+	[Property, Hide] public string GradingTexturePath { get; set; }
 	[Property, Hide] public string SourcePath { get; set; }
 	[Property, Range( 0, 1 )] public float Weight { get; set; } = 1;
 	Texture _texture;
-	bool _restoreFailed;
+	bool _loadFailed;
 	static Material _shader;
 
-	internal void Configure( byte[] bytes, string sourcePath, float weight )
+	internal void Configure( string gradingTexturePath, string sourcePath, float weight )
 	{
-		if ( bytes?.Length != 32 * 32 * 32 * 3 ) throw new InvalidDataException( "A retail RGB lookup must contain 32 cubed samples." );
-		_texture?.Dispose();
 		_texture = null;
-		_restoreFailed = false;
-		EncodedLut = Convert.ToBase64String( bytes );
+		_loadFailed = false;
+		GradingTexturePath = gradingTexturePath;
 		SourcePath = sourcePath;
 		Weight = Math.Clamp( weight, 0, 1 );
 		Restore();
@@ -27,27 +26,21 @@ public sealed class Titanfall2ColorCorrection : BasePostProcess<Titanfall2ColorC
 
 	void Restore()
 	{
-		if ( _texture is not null || string.IsNullOrEmpty( EncodedLut ) ) return;
-		var rgb = Convert.FromBase64String( EncodedLut );
-		if ( rgb.Length != 32 * 32 * 32 * 3 ) throw new InvalidDataException( "Invalid retail color lookup." );
-		var rgba = new byte[32 * 32 * 32 * 4];
-		for ( var sample = 0; sample < rgb.Length / 3; ++sample )
+		if ( _texture is not null || _loadFailed || string.IsNullOrEmpty( GradingTexturePath ) ) return;
+		// The table belongs to the mount, not to this component, so a scene opened without
+		// its mount renders uncorrected instead of failing. Warn once, not every frame.
+		_texture = Texture.Load( GradingTexturePath, false );
+		if ( _texture is null || !_texture.IsValid || _texture.IsError )
 		{
-			rgb.AsSpan( sample * 3, 3 ).CopyTo( rgba.AsSpan( sample * 4 ) );
-			rgba[sample * 4 + 3] = 255;
+			_texture = null;
+			_loadFailed = true;
+			Titanfall2Log.Warning( $"Unable to load the Titanfall 2 color-correction table '{GradingTexturePath}'." );
 		}
-		_texture = Texture.CreateVolume( 32, 32, 32 ).WithFormat( ImageFormat.RGBA8888 ).WithData( rgba ).Finish();
 	}
 
 	public override void Render()
 	{
-		// Render runs every frame with no engine catch: a corrupt serialized lookup
-		// must fail once here, not throw from every frame.
-		if ( _texture is null && !_restoreFailed )
-		{
-			try { Restore(); }
-			catch ( Exception ) { _restoreFailed = true; }
-		}
+		Restore();
 		if ( _texture is null || !_texture.IsValid ) return;
 		var weight = Math.Clamp( GetWeighted( value => value.Weight ), 0, 1 );
 		if ( weight <= 0 ) return;
@@ -57,5 +50,6 @@ public sealed class Titanfall2ColorCorrection : BasePostProcess<Titanfall2ColorC
 		Blit( BlitMode.WithBackbuffer( _shader, Stage.AfterPostProcess, 3990, false ), "Titanfall2ColorCorrection" );
 	}
 
-	protected override void OnDestroy() { _texture?.Dispose(); _texture = null; }
+	// The table is a shared mounted resource; releasing the reference is all this component owns.
+	protected override void OnDestroy() { _texture = null; }
 }

@@ -88,17 +88,12 @@ partial class MapLoader
 			&& GetEntityFloat( values, "minfalloff", -1 ) < 0 && GetEntityFloat( values, "maxfalloff", -1 ) < 0 );
 		if ( correction?.TryGetValue( "filename", out var lookupPath ) == true )
 		{
-			if ( (_environmentEntitySource ?? _source) is ITitanfall2PathAssetSource resolver
-				&& resolver.TryReadPath( lookupPath, out var lookup, out _ ) && lookup.Length == 32 * 32 * 32 * 3 )
-			{
-				var weight = GetEntityFloat( correction, "maxweight", 1 );
-				postProcess.AddComponent<Titanfall2ColorCorrection>().Configure( lookup, lookupPath, weight );
-				Log.Info( $"Titanfall 2 map color correction: {lookupPath}, weight {weight} ({Path})." );
-			}
-			else
-			{
-				Log.Warning( $"Unable to read Titanfall 2 map color correction '{lookupPath}' as a 32-cubed RGB table ({Path})." );
-			}
+			// The table is mounted as its own volume texture, so the scene stores the
+			// resource path instead of the 98,304 bytes of samples.
+			var weight = GetEntityFloat( correction, "maxweight", 1 );
+			var gradingPath = $"mount://{Host.Ident}/{lookupPath.Replace( '\\', '/' ).TrimStart( '/' )}.vtex";
+			postProcess.AddComponent<Titanfall2ColorCorrection>().Configure( gradingPath, lookupPath, weight );
+			Log.Info( $"Titanfall 2 map color correction: {lookupPath}, weight {weight} ({Path})." );
 		}
 
 		Log.Info( $"Titanfall 2 environment created from map entities: "

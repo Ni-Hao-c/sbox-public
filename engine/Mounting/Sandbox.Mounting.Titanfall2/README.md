@@ -49,7 +49,7 @@
 - **3D 天空盒**：远景（vista）模型放进独立的天空盒世界，从地图的 `sky_camera` 观察。
 - **水面**：按材质着色器语义识别，使用帧缓冲拷贝渲染。
 - **贴花**：BSP 贴花几何单独渲染，不投射阴影。
-- **显示变换**：`Titanfall2Tonemapping` 实现零售版的自动曝光和显示曲线，替代引擎的自动曝光。地图有全局 `color_correction` 实体时，加载它的 32³ RGB 查找表。
+- **显示变换**：`Titanfall2Tonemapping` 实现零售版的自动曝光和显示曲线，替代引擎的自动曝光。地图有全局 `color_correction` 实体时，加载它的 32³ RGB 查找表；该表是一个挂载体纹理资源，场景只引用它的路径。
 - **泛光**：在曝光和显示曲线之前合成。
 
 世界和静态道具默认不投射方向光阴影，由屏幕空间接触阴影补充。`SBOX_TITANFALL2_MAP_SHADOWS` 和 `SBOX_TITANFALL2_PROP_SHADOWS` 可以开启阴影。
