@@ -113,3 +113,8 @@ engine/TestResults/
 
 # Local test projects, scripts and logs
 /.tmp/
+
+# Local runtime config and baked editor cache (machine-specific, never commit)
+/game/core/cfg/machine_convars.json
+/game/core/cfg/user_keys_*.json
+/game/core/maps/editor/_bakeresourcecache/
