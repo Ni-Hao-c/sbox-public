@@ -21,15 +21,15 @@ static class Titanfall2StreamingSettings
 	// for diagnosing an unsupported map.
 	public static bool UseBspLightmaps { get; } = GetBool( "SBOX_TITANFALL2_BSP_LIGHTMAPS", true );
 	// Lighting is baked, so the imported world and props skip the directional CSM pass by default.
-	public static bool MapShadows { get; } = GetBool( "SBOX_TITANFALL2_MAP_SHADOWS", false );
-	public static bool PropShadows { get; } = GetBool( "SBOX_TITANFALL2_PROP_SHADOWS", false );
+	public static bool MapShadows { get; } = GetBool( "SBOX_TITANFALL2_MAP_SHADOWS", true );
+	public static bool PropShadows { get; } = GetBool( "SBOX_TITANFALL2_PROP_SHADOWS", true );
 	// Screen-space contact shadows ground small detail without the world CSM pass.
 	public static bool NativeContactShadows { get; } = GetBool( "SBOX_TITANFALL2_CONTACT_SHADOWS", true );
 	// Bias in stops on top of the map's retail exposure calibration.
 	public static float BakedExposureCompensation { get; } = GetFloat( "SBOX_TITANFALL2_EXPOSURE_EV", 0f, -5f, 5f );
 	// Godray cards are additive and camera-distance faded; in the imported maps they read as
 	// bright streaks that flash while moving, so they are off by default.
-	public static bool Godrays { get; } = GetBool( "SBOX_TITANFALL2_GODRAYS", false );
+	public static bool Godrays { get; } = GetBool( "SBOX_TITANFALL2_GODRAYS", true );
 
 	public static bool MapAudio { get; } = GetBool( "SBOX_TITANFALL2_MAP_AUDIO", true );
 	public static float MapAudioVolume { get; } = GetFloat( "SBOX_TITANFALL2_AUDIO_VOLUME", 0.7f, 0.05f, 2f );
