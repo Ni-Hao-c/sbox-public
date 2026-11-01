@@ -1,4 +1,4 @@
-﻿namespace Sandbox.Rendering;
+namespace Sandbox.Rendering;
 
 using NativeEngine;
 using System.Buffers;
@@ -24,6 +24,12 @@ internal sealed class SpriteBatchSceneObject : SceneCustomObject
 	private readonly GpuBuffer<uint> SpriteAtomicCounter;
 	private readonly CommandList _commandList = new( "SpriteBatch" );
 	private readonly Scene _scene;
+
+	// Imported height fog (common/imported_height_fog.hlsl): five float4s, bound by mounted
+	// maps on the scene's attributes together with the flag below.
+	internal const string ImportedHeightFogConstantsAttribute = "ImportedHeightFogConstants";
+	internal const string ImportedHeightFogBoundAttribute = "ImportedHeightFogBound";
+	private static readonly Vector4[] NeutralImportedHeightFog = new Vector4[5];
 
 	private static Material SpriteMaterial = Material.FromShader( "sprite/sprite_ps.shader" );
 
@@ -658,6 +664,12 @@ internal sealed class SpriteBatchSceneObject : SceneCustomObject
 			// Custom draws supply their own attribute block. Preserve scene-level
 			// shader data such as imported height fog before adding batch inputs.
 			_scene.RenderAttributes.MergeTo( attributes );
+			// sprite_ps always reads this constant buffer. A scene that never set it (the
+			// menu, any non-mounted map) would leave it unbound, and reading an unbound
+			// buffer faults the GPU: the device is lost and the next Present never returns.
+			// All zeros disables the fog.
+			if ( !attributes.GetBool( ImportedHeightFogBoundAttribute ) )
+				attributes.SetData( ImportedHeightFogConstantsAttribute, NeutralImportedHeightFog );
 			attributes.SetCombo( "D_BLEND", _renderAdditive ? 1 : 0 );
 			attributes.SetCombo( "D_OPAQUE", _renderOpaque ? 1 : 0 );
 			attributes.SetCombo( "D_TEXT", _renderHasText ? 1 : 0 );

@@ -76,6 +76,9 @@ readonly record struct Titanfall2FogParameters( Vector4 Density, Vector4 Color, 
 	{
 		if ( attributes is null ) return;
 		attributes.SetData( "ImportedHeightFogConstants", this );
+		// Tells engine sprite batches the scene supplies the buffer; without the flag they
+		// bind neutral zeros so the shader never reads an unbound buffer.
+		attributes.Set( "ImportedHeightFogBound", true );
 	}
 
 	internal static Titanfall2FogParameters FromEntity( IReadOnlyDictionary<string, string> entity )
