@@ -87,6 +87,7 @@ public partial class Titanfall2Mount : BaseGameMount
 		ReleaseSoundEventSessions();
 		Titanfall2CollisionDiagnostics.UnregisterConsoleCommands();
 		ReleaseMountCaches();
+		ReleaseMapImports();
 		foreach ( var source in _brushModelSources ) source.Dispose();
 		_brushModelSources.Clear();
 		ResetParticleCatalog();

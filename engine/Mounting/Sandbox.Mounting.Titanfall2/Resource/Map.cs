@@ -43,18 +43,42 @@ partial class MapLoader(
 		var releasedScene = ReleaseCachedScene();
 		var releasedWorldBuild = _cachedWorldBuild is not null;
 		if ( !releasedCache && !releasedScene && !releasedWorldBuild ) return false;
-		// Lightmap pages are this build's own textures; nothing else holds them.
-		if ( _cachedWorldBuild is not null )
-		{
-			foreach ( var resource in _cachedWorldBuild.OwnedResources ) resource.Dispose();
-			_cachedWorldBuild = null;
-		}
-		_classifiedWorldModels.Clear();
-		_materialPrefetch = null;
+		DiscardWorldBuild();
 		return true;
 	}
 
+	/// <summary>True while a load is in flight, so a release has to wait instead of tearing it down.</summary>
+	public bool IsReleaseDeferred => IsLoading;
+
+	/// <summary>
+	/// Drops this loader's own build state. Lightmap pages and probe atlases are this build's
+	/// textures and nothing else holds them, so they are disposed here.
+	/// </summary>
+	void DiscardWorldBuild()
+	{
+		_cachedWorldBuild?.Dispose();
+		_cachedWorldBuild = null;
+		_classifiedWorldModels.Clear();
+		_materialPrefetch = null;
+	}
+
 	protected override void BuildScene()
+	{
+		try
+		{
+			BuildSceneCore();
+		}
+		catch
+		{
+			// The scene is thrown away, so nothing will ever reference - or release - the
+			// textures and models this partial build created. Roll back to an empty state
+			// so the memory is returned and a later attempt starts from scratch.
+			DiscardWorldBuild();
+			throw;
+		}
+	}
+
+	void BuildSceneCore()
 	{
 		// The game instance replaces Game.TypeLibrary after mount discovery. Register
 		// against the current instance before custom components are added/serialized.
@@ -65,17 +89,25 @@ partial class MapLoader(
 		// Authoritative rBSP collision is always parsed. The render-geometry fallback is
 		// only built when that collision is missing or incomplete.
 		var server = Application.IsDedicatedServer;
-		if ( !_source.TryReadAllBytes( out var bytes, out var readError ) )
+		var lightmaps = !server && Titanfall2StreamingSettings.UseBspLightmaps;
+		// The full and the pure-world scene of one map parse identical data, so they share a
+		// single reference counted parse; the last of them to finish building frees it.
+		using var import = Host.BeginMapImport( $"{_source.CacheIdentity}|lightmaps:{lightmaps}", ReadBsp );
+		if ( import.Error is not null )
 		{
-			Log.Warning( $"Failed to read Titanfall 2 BSP '{Path}': {readError}" );
+			Log.Warning( $"Failed to read Titanfall 2 BSP '{Path}': {import.Error}" );
 			return;
 		}
-		if ( !Titanfall2BspReader.TryRead( bytes, System.IO.Path.GetFileNameWithoutExtension( _source.Description ), ReadCollisionLumpOverrides(),
-			parseWorldCollision: true, parseLightmaps: !server && Titanfall2StreamingSettings.UseBspLightmaps,
-			parseStaticPropLightProbes: !server && Titanfall2StreamingSettings.UseBspLightmaps, out var parsed, out var parseError, allCollisionContents: true ) )
+		var parsed = import.Parsed;
+
+		(Titanfall2BspReader.ParsedBsp, string) ReadBsp()
 		{
-			Log.Warning( $"Failed to parse Titanfall 2 BSP '{Path}': {parseError}" );
-			return;
+			if ( !_source.TryReadAllBytes( out var bytes, out var readError ) ) return (null, readError);
+			if ( !Titanfall2BspReader.TryRead( bytes, System.IO.Path.GetFileNameWithoutExtension( _source.Description ), ReadCollisionLumpOverrides(),
+				parseWorldCollision: true, parseLightmaps: lightmaps,
+				parseStaticPropLightProbes: lightmaps, out var result, out var parseError, allCollisionContents: true ) )
+				return (null, $"parse failed: {parseError}");
+			return (result, null);
 		}
 		Log.Info( $"Titanfall 2 BSP read/parse {timer.Elapsed.TotalSeconds:0.00}s ({Path})." );
 		var collisionSummary = parsed.WorldCollision.SourcePrimitiveCount > 0

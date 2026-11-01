@@ -77,4 +77,20 @@ sealed record WorldBuildResult(
 	IReadOnlyList<MountedAggregate> WorldAggregates,
 	Model CollisionModel,
 	IReadOnlyList<IDisposable> OwnedResources,
-	IReadOnlyList<WorldRenderChunk> ShadowOnlyChunks = null );
+	IReadOnlyList<WorldRenderChunk> ShadowOnlyChunks = null ) : IDisposable
+{
+	bool _disposed;
+
+	/// <summary>
+	/// Releases the textures this build created (lightmap pages, probe atlases). Nothing else
+	/// holds them, so a build that is discarded - because it failed half way, or because no
+	/// scene shows the map any more - must call this or the pages stay in video memory for the
+	/// mount's lifetime. Calling it twice does nothing.
+	/// </summary>
+	public void Dispose()
+	{
+		if ( _disposed ) return;
+		_disposed = true;
+		foreach ( var resource in OwnedResources ?? [] ) resource?.Dispose();
+	}
+}

@@ -10,6 +10,8 @@ public sealed class Titanfall2SceneResourceOwner : Component, Component.DontExec
 	[Property, Hide]
 	public string MountIdent { get; set; }
 
+	bool _leased;
+
 	internal void Configure( string mountIdent, IEnumerable<IDisposable> ownedResources = null )
 	{
 		MountIdent = mountIdent;
@@ -17,13 +19,30 @@ public sealed class Titanfall2SceneResourceOwner : Component, Component.DontExec
 			_ownedResources.AddRange( ownedResources.Where( static resource => resource is not null ) );
 	}
 
+	/// <summary>
+	/// One lease per live map scene. The mount releases map-scoped resources when the count
+	/// reaches zero, so the lease is taken as early as the component exists - including the
+	/// temporary build scene, whose destruction the mount recognises as part of loading.
+	/// </summary>
+	protected override void OnAwake()
+	{
+		if ( _leased || string.IsNullOrWhiteSpace( MountIdent ) ) return;
+		if ( Sandbox.Mounting.Directory.Get( MountIdent ) is not Titanfall2Mount mount ) return;
+		_leased = true;
+		mount.AddMapSceneLease();
+	}
+
 	protected override void OnDestroy()
 	{
 		foreach ( var resource in _ownedResources )
 			resource.Dispose();
 		_ownedResources.Clear();
-		// Once no scene shows a map any more, the mount drops the map-scoped caches.
-		if ( !string.IsNullOrWhiteSpace( MountIdent ) && Sandbox.Mounting.Directory.Get( MountIdent ) is Titanfall2Mount mount )
+		// Returns the lease; once no scene shows a map any more the mount drops the
+		// map-scoped caches. Only a component that took a lease returns one, otherwise the
+		// count would drop below the number of live map scenes.
+		if ( !_leased ) return;
+		_leased = false;
+		if ( Sandbox.Mounting.Directory.Get( MountIdent ) is Titanfall2Mount mount )
 			mount.OnSceneOwnerDestroyed( Scene );
 	}
 }

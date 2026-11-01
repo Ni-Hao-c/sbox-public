@@ -362,6 +362,10 @@ solid 类型不为 0 时，有效 contents 由 `Titanfall2CollisionSource.Static
 
 - 缓存的 `SceneFile` 中，生成的世界模型和光照贴图没有磁盘加载器。`MapLoader` 用 `_cachedWorldBuild` 保持这些资源存活，存活时间与 SceneLoader 的场景缓存相同。否则关闭最后一个场景后，GC 会让下一次打开得到错误模型。
 - 释放场景资源时，`MapLoader` 同时销毁缓存的 `SceneFile`（`SceneLoader.ReleaseCachedScene`）。否则 `SceneFile.Load` 会命中 `ResourceLibrary` 里的陈旧场景并跳过 `BuildScene`，下一次打开引用的正是刚被释放的模型和光照贴图。加载进行中不释放（`ResourceLoader.IsLoading`），留给下一次重试。
+- 构建失败会回滚：`WorldBuildResult : IDisposable`，`BuildScene` 抛异常时 `DiscardWorldBuild` 释放这次构建已创建的光照贴图页，并清空 `_cachedWorldBuild`，下一次打开从头构建。
+- 同一张图的 `.bsp.scene` 和 `.bsp.world.scene` 共享一次 BSP 解析（`Titanfall2Mount.BeginMapImport`，`Resource/MapImport.cs`）。每个构建拿一个 `Titanfall2MapImport` 租约并 `using` 释放，最后一个租约释放时解析结果随之释放。键包含源的 `CacheIdentity` 和是否解析光照贴图。解析失败的条目不会再被复用，下一次构建重新解析（`Lazy<T>` 会永久缓存失败）。
+- 释放由租约计数触发，不再靠定时器：每个 `Titanfall2SceneResourceOwner` 在 `OnAwake` 加一个场景租约，`OnDestroy` 归还。计数归零后等待约 100 ms，让被销毁的场景完成拆除，再在主线程上复核（计数仍为 0 且 `Scene.All` 中没有地图场景）后释放。有加载器仍在加载时，以同样间隔最多重试 50 次。释放后的 GC 追收保留，用于回收 `NativeResourceCache` 中短暂持有的句柄。
+- 编辑器不释放（它在 `Scene.All` 之外持有场景，并为撤销和预览反复重载）。专用服务器上 owner 组件不运行，因此没有租约，换图时由 `ReleaseSceneResourcesBeforeBuild` 释放上一张图的资源。
 - `Titanfall2SceneResourceOwner` 只释放传给它的资源。共享的挂载缓存属于挂载本身，编辑器或运行时克隆的场景被销毁时，这些缓存必须继续存在。
 - 共享粒子纹理在挂载卸载时只解除引用，不调用 `Dispose`，因为仍在运行的场景实例可能还在使用它们。
 - `Shutdown` 的清理工作：
