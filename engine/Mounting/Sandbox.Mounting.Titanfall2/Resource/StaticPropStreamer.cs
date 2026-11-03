@@ -28,7 +28,9 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	// Cells within this distance of the camera are populated first.
 	const float LoadRadius = 1024f;
 	// Prop cells per axis grouped into one batch cluster; batches are keyed per cluster and model.
-	const int BatchClusterCells = 4;
+	// Read once from SBOX_TITANFALL2_BATCH_CLUSTER (1/2/4/8/16, default 4). The default keeps the
+	// current batch composition, so the setting is safe to A/B without changing the shipped look.
+	static readonly int BatchClusterCells = Titanfall2StreamingSettings.PropBatchClusterCells;
 	// Props at least this large are never distance culled, so landmarks keep their silhouette.
 	const float LandmarkRadius = 256f;
 	// Extra retention band past a prop's render distance once it is visible.
@@ -54,6 +56,33 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	const float CollisionDisableDistance = 2560f;
 	// Props smaller than this radius never cast shadows (when prop shadows are enabled).
 	const float ShadowMinimumRadius = 48f;
+	// Shadow distance gate. Decisions are recomputed only after the camera moved this far (or its
+	// PVS cell changed), never as part of the 128-unit visibility refresh.
+	const float ShadowGateRecomputeDistance = 512f;
+	// Shadow flag writes applied per frame at most. One write is a native flag change plus a
+	// scene-list notification that pulls whole batches into or out of the shadow pass, so a pass
+	// that decides hundreds of changes must not apply them inside one frame.
+	const int ShadowGateChangesPerFrame = 32;
+	// Gate distances are quantized to this bucket, and the restore distance is half the disable
+	// distance: wide hysteresis on top of the bucket means a prop walking along the boundary
+	// cannot flip on small camera moves.
+	const float ShadowGateBucketSize = 256f;
+	// A gate pass that queues more changes than this is reported as a spike (Titanfall2Log.Spike,
+	// verbose logging only); passes slower than 2 ms are reported by ReportSpike as well.
+	const int ShadowGateReportChanges = 64;
+	// Cell refresh trigger. The anchor is quantized to this grid and a refresh only runs when the
+	// grid bucket changed and the anchor moved at least RefreshHysteresisDistance since the last
+	// refresh: a camera sitting on a bucket boundary cannot refresh twice, while crossing a bucket
+	// always refreshes, so a fast camera still follows and a slow walk refreshes every ~256 units.
+	// This is the last pass that was not budgeted; the portal walk inside it is now cached per PVS
+	// cell and advanced as a budgeted job (see UpdateCellRefresh).
+	const float RefreshGridSize = 256f;
+	const float RefreshHysteresisDistance = RefreshGridSize * 0.75f;
+	// Incremental PVS round budget: portal edges walked and wall time per frame. A retail map's
+	// portal graph has ~700 edges, so with the per-camera-cell cache a round normally completes in
+	// its first step; these caps only bound the first-visit worst case.
+	const int PvsEdgesPerFrame = 8192;
+	const float PvsBudgetMilliseconds = 2f;
 
 	[Property, Hide]
 	public string MountIdent { get; set; }
@@ -154,6 +183,19 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	float _populateBudgetMilliseconds;
 	bool _pvsDiagnosticsLogged;
 	bool _visibilityRestoreFailed;
+
+	// Composition diagnostics for the render submission count, reported once when the batches are
+	// built. The render main thread costs about a microsecond per submitted object here, so the
+	// number to A/B is the batch count and the cluster grid that produced it, not the C# frame time.
+	// _cellModelGroups is per-cell bookkeeping (distinct batched models per cell) that only exists
+	// to report how many batches the cluster grouping merged away; it is dropped after that line.
+	readonly Dictionary<PropCell, HashSet<Model>> _cellModelGroups = new();
+	// Distinct models among the props that stay individual objects, split by the reason.
+	readonly HashSet<Model> _individualModels = new();
+	int _cellModelGroupCount;
+	int _plainStaticProps;
+	int _plainFallbackProps;
+	bool _batchCompositionLogged;
 
 	public void Configure( string mountIdent, string mapPath, Vector3 fallbackAnchor,
 		IReadOnlyList<Titanfall2BspReader.StaticPropInstance> props,
@@ -271,6 +313,7 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		}
 
 		LogCompletion();
+		LogBatchComposition();
 		SetResourcesEnabled( Active );
 		Log.Info( $"Titanfall 2 static props finished during scene loading in "
 			+ $"{loadTimer.Elapsed.TotalSeconds:0.00}s ({MapPath})." );
@@ -295,18 +338,17 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		var anchor = Scene?.Camera.IsValid() == true
 			? Scene.Camera.WorldPosition
 			: FallbackAnchor;
-		var refreshDistance = CellSize * 0.25f;
 		var pvsCellChanged = TryFindPvsCell( anchor, out var pvsCell ) && pvsCell != _pvsCameraCell;
-		if ( !_hasAnchor
-			|| pvsCellChanged
-			|| anchor.DistanceSquared( _lastAnchor ) >= refreshDistance * refreshDistance )
-		{
-			RefreshCells( anchor );
-		}
+		// Quantized trigger plus a cached, budgeted PVS round; replaces the unbudgeted 128-unit
+		// full refresh that rebuilt every distance and re-walked all portals on every step.
+		UpdateCellRefresh( anchor, pvsCell, pvsCellChanged );
 
 		PopulateCells( PropsPerFrame, FrameBudgetMilliseconds );
 		ProcessRuntimeClusterQueue();
 		ProcessCollisionQueue();
+		// Independent of the sweep above: recompute when the camera moved far enough, then apply a
+		// bounded number of queued shadow flag changes. No-op when the gate is off.
+		UpdateShadowGate( anchor, pvsCellChanged );
 		// A collision model that failed to load during the loading pass is retried by the
 		// runtime pass; publish readiness once every expected collider exists.
 		if ( KeepAllCollisions && !ResidentCollisionsReady && _failedProps == 0 && _colliderFailures == 0
@@ -317,6 +359,7 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 				+ $"{_collidersCreated}/{_collidableProps} colliders ({MapPath})." );
 		}
 		LogCompletion();
+		LogBatchComposition();
 		if ( !_completionLogged && _statusTimer.Elapsed.TotalSeconds >= 5.0 )
 		{
 			var processed = _liveProps + _failedProps;
@@ -504,11 +547,24 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 			pendingBatch.Add( worldTransform, radius, castShadows, prop.ProbeColor, prop.Probe, prop.PvsCells, prop.FadeDistance );
 			pendingBatch.RenderingEnabled |= batchVisible;
 			_instancedProps++;
+			// Count the (cell, model) pair this batch covers. The cluster dictionary already
+			// merged every pair that shares a cluster, so the difference between this count and
+			// _batchCount is exactly how many submitted objects the cluster grid removed.
+			if ( !_cellModelGroups.TryGetValue( cell, out var modelsInCell ) )
+			{
+				modelsInCell = new HashSet<Model>();
+				_cellModelGroups.Add( cell, modelsInCell );
+			}
+			if ( modelsInCell.Add( staticModel ) ) _cellModelGroupCount++;
 		}
 		else if ( ModelLoader.IsUsableModel( staticModel ) )
 		{
+			// Usable all-LOD static model that refused instancing: it carries a translucent,
+			// decal, water or godray mesh, and those must keep their own material pass order.
 			renderObject = new SceneObject( Scene.SceneWorld, staticModel, worldTransform );
 			_plainProps++;
+			_plainStaticProps++;
+			_individualModels.Add( staticModel );
 		}
 		else if ( model.BoneCount > 0 || model.AnimationCount > 0 )
 		{
@@ -523,8 +579,11 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		}
 		else
 		{
+			// No usable static-instance model, so the prop falls back to a rigid full model.
 			renderObject = new SceneObject( Scene.SceneWorld, model, worldTransform );
 			_plainProps++;
+			_plainFallbackProps++;
+			_individualModels.Add( model );
 		}
 		if ( renderObject.IsValid() )
 		{
@@ -560,5 +619,35 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		}
 		cell.Instances.Add( instance );
 		return true;
+	}
+
+	/// <summary>
+	/// Reports how the submitted-object count is composed, once, after the batches are built.
+	/// The engine pays about a microsecond per submitted object on this mount, so the numbers an
+	/// A/B run has to compare are the batch count and the cluster grid that produced it, plus the
+	/// individual objects that could not be batched at all. The per-cell bookkeeping is dropped
+	/// here because it exists only for this line: a whole map's prop cells are hundreds of small
+	/// sets and keeping them resident would be pure waste.
+	/// </summary>
+	void LogBatchComposition()
+	{
+		if ( _batchCompositionLogged || !_batchesBuilt ) return;
+		_batchCompositionLogged = true;
+
+		var batchesIfPerCell = _cellModelGroupCount;
+		var mergedBatches = Math.Max( 0, batchesIfPerCell - _batchCount );
+		var instancesPerBatch = _batchCount > 0 ? (float)_instancedProps / _batchCount : 0f;
+		var individualModels = _individualModels.Count;
+		Log.Info( $"Titanfall 2 prop batch composition: {BatchClusterCells}x{BatchClusterCells} cells per cluster, "
+			+ $"{_cells.Count} cells in {_clusters.Count} clusters; {_batchCount} instanced batches for "
+			+ $"{_instancedProps} props ({instancesPerBatch:0.0} instances/batch); "
+			+ $"{mergedBatches} batches not created because clustering merged them "
+			+ $"({batchesIfPerCell} if every cell kept its own batch per model); "
+			+ $"{_plainProps} individual objects ({_plainStaticProps} special-material static models, "
+			+ $"{_plainFallbackProps} full-model fallbacks) across {individualModels} distinct models; "
+			+ $"{_skinnedProps} frozen-skinned ({MapPath})." );
+
+		_cellModelGroups.Clear();
+		_individualModels.Clear();
 	}
 }

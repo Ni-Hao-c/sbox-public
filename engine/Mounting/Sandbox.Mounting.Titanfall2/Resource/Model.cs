@@ -19,10 +19,19 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 	// empty level could be selected by the engine's own distance calculation (the props that pass
 	// no explicit level) and would then draw nothing at all. See BuildStaticInstanceAllLodsModel.
 	internal const int StaticInstanceBandCount = 4;
-	// World distances at which a static instance switches to LOD1, LOD2 and LOD3.
+	// World distances at which a static instance switches to LOD1, LOD2 and LOD3, before the
+	// SBOX_TITANFALL2_PROP_LOD_SCALE multiplier. Below 1 falls to a cheaper band sooner: it cuts
+	// forward-pass and depth-pass triangles at the cost of distant silhouettes.
 	const float Lod1Distance = 1536f;
 	const float Lod2Distance = 4096f;
 	const float Lod3Distance = 8192f;
+	// The switch distances are multiplied once, when the type is initialized. SelectLodByDistance
+	// runs per instance, per view and per pass and is the draw-time LOD delegate, so it compares
+	// against precomputed distances instead of doing a multiplication per call.
+	static readonly float LodSwitchScale = Titanfall2StreamingSettings.PropLodDistanceScale;
+	static readonly float Lod1SwitchDistance = Lod1Distance * LodSwitchScale;
+	static readonly float Lod2SwitchDistance = Lod2Distance * LodSwitchScale;
+	static readonly float Lod3SwitchDistance = Lod3Distance * LodSwitchScale;
 	// Horizontal focal length in pixels used to turn LOD distances into screen-size thresholds
 	// (viewportWidth / (2 * tan(fov/2)); 960 is 1920 px at 90 degrees).
 	const float LodFocalPixels = 960f;
@@ -167,18 +176,19 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 	/// </summary>
 	internal static int SelectLodByDistance( float distance )
 	{
-		var lod = distance > Lod3Distance ? 3
-			: distance > Lod2Distance ? 2
-			: distance > Lod1Distance ? 1
+		var lod = distance > Lod3SwitchDistance ? 3
+			: distance > Lod2SwitchDistance ? 2
+			: distance > Lod1SwitchDistance ? 1
 			: 0;
 		return Math.Clamp( lod, 0, StaticInstanceBandCount - 1 );
 	}
 
 	/// <summary>
 	/// The engine's own LOD switch distance for one band, taken from the same distance bands as
-	/// <see cref="SelectLodByDistance"/>. A draw that does not pass an explicit level (an
-	/// individual non-instanceable prop, a batch fallback object, an editor preview) therefore
-	/// resolves to the same level an instanced draw would pick at that distance.
+	/// <see cref="SelectLodByDistance"/> (already multiplied by
+	/// <see cref="Titanfall2StreamingSettings.PropLodDistanceScale"/>). A draw that does not pass an
+	/// explicit level (an individual non-instanceable prop, a batch fallback object, an editor
+	/// preview) therefore resolves to the same level an instanced draw would pick at that distance.
 	/// Bands 4..7 carry band 3's geometry as an alias, and they are written to band 3's distance
 	/// rather than left at the builder's 50-unit defaults, because the engine walks the whole
 	/// switch distance array before it clamps to the bands the model uses: a small threshold at a
@@ -187,9 +197,9 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 	/// </summary>
 	internal static float GetLodSwitchDistance( int lod ) => lod switch
 	{
-		1 => Lod1Distance,
-		2 => Lod2Distance,
-		>= 3 => Lod3Distance,
+		1 => Lod1SwitchDistance,
+		2 => Lod2SwitchDistance,
+		>= 3 => Lod3SwitchDistance,
 		_ => 0f
 	};
 
@@ -1203,9 +1213,11 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 			? new Color32( vertex.Color.R, vertex.Color.G, vertex.Color.B, vertex.Color.A )
 			: new Color32( 255, 255, 255, 255 );
 
+	// The extracted vertex carries its influences as slices of the mesh's shared bone buffers,
+	// so this reads spans rather than per-vertex arrays. Same order, same filtering, same result.
 	static void EncodeSkinning(
-		IReadOnlyList<byte> sourceIndices,
-		IReadOnlyList<float> sourceWeights,
+		ReadOnlySpan<byte> sourceIndices,
+		ReadOnlySpan<float> sourceWeights,
 		int boneCount,
 		out Color32 indices,
 		out Color32 weights )
@@ -1213,7 +1225,7 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 		Span<byte> encodedIndices = stackalloc byte[4];
 		Span<float> normalizedWeights = stackalloc float[4];
 		var count = 0;
-		for ( var sourceIndex = 0; sourceIndex < sourceIndices.Count && sourceIndex < sourceWeights.Count && count < 4; ++sourceIndex )
+		for ( var sourceIndex = 0; sourceIndex < sourceIndices.Length && sourceIndex < sourceWeights.Length && count < 4; ++sourceIndex )
 		{
 			var boneIndex = sourceIndices[sourceIndex];
 			var weight = sourceWeights[sourceIndex];

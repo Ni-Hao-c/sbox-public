@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Collections.Generic;
 using NumericsVector3 = System.Numerics.Vector3;
 using NumericsVector4 = System.Numerics.Vector4;
 
@@ -18,8 +19,8 @@ public sealed class Titanfall2LightProbe
 	public NumericsVector4 Green { get; init; }
 	public NumericsVector4 Blue { get; init; }
 	public NumericsVector4 SkyDirectionSunVisibility { get; init; }
-	// Keep the local-light association separate. The retail loader adjusts and
-	// compacts these indices; that processing does not affect SH irradiance.
+	// TryRead preserves on-disk IDs. The BSP reader remaps the lump to full
+	// WORLD_LIGHTS indices before distributing probes to static and dynamic props.
 	public uint PackedLightWeights { get; init; }
 	public ushort LightIndex0 { get; init; }
 	public ushort LightIndex1 { get; init; }
@@ -56,6 +57,37 @@ public sealed class Titanfall2LightProbe
 			Reserved = BinaryPrimitives.ReadUInt32LittleEndian( bytes[44..] )
 		};
 		return true;
+	}
+
+	/// <summary>
+	/// Probe light IDs omit sky-ambient records, unlike the full WORLD_LIGHTS table used
+	/// by the renderer. Normalize a private copy once, before either prop lookup reads it.
+	/// Keep sun slots and every other source slot; the real-time lightmap page table has
+	/// a different mapping and must not be used here.
+	/// </summary>
+	internal static byte[] RemapLocalLightIndices( ReadOnlySpan<byte> probes, IReadOnlyList<Titanfall2WorldLight> lights )
+	{
+		// Lump overrides may be reused by another import. Never remap their source IDs in place.
+		var result = probes.ToArray();
+		var sourceIndices = new List<ushort>( lights.Count );
+		for ( var sourceIndex = 0; sourceIndex < lights.Count; sourceIndex++ )
+		{
+			if ( lights[sourceIndex].Type == Titanfall2WorldLight.SkyAmbientType ) continue;
+			sourceIndices.Add( sourceIndex < ushort.MaxValue ? (ushort)sourceIndex : ushort.MaxValue );
+		}
+
+		for ( var offset = 0; probes.Length - offset >= RecordBytes; offset += RecordBytes )
+		{
+			for ( var channel = 0; channel < 4; channel++ )
+			{
+				var field = result.AsSpan( offset + 36 + channel * 2, 2 );
+				var index = BinaryPrimitives.ReadUInt16LittleEndian( field );
+				var sourceIndex = index != ushort.MaxValue && index < sourceIndices.Count
+					? sourceIndices[index] : ushort.MaxValue;
+				BinaryPrimitives.WriteUInt16LittleEndian( field, sourceIndex );
+			}
+		}
+		return result;
 	}
 
 	static NumericsVector4 ReadCoefficients( ReadOnlySpan<byte> bytes ) => new(

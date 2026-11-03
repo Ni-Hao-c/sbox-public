@@ -67,7 +67,8 @@ public sealed class Titanfall2WorldLight
 	{
 		if ( packedIds.Length == 0 || packedIds.Length % 4 != 0 || lightPages.Count == 0 || lightPages.Count % 63 != 0 ) return [];
 		// Retail compacts WORLD_LIGHTS to the real-time list before resolving RTL
-		// page indices. Prop probes instead retain indices into the full source list.
+		// page indices. Prop IDs omit sky-ambient records and are normalized by the BSP
+		// reader to the full source list before upload; they do not use this page table.
 		var runtimeLights = lights.Where( light => light.IsRealTime ).ToArray();
 		if ( runtimeLights.Length == 0 ) return [];
 		var channels = new byte[packedIds.Length / 4];

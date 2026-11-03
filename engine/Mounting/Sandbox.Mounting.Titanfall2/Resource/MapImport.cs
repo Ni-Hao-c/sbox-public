@@ -5,6 +5,11 @@ using Titanfall2;
 /// (<c>&lt;map&gt;.bsp.scene</c> and the pure-world <c>&lt;map&gt;.bsp.world.scene</c>) and the
 /// editor can build both at once; without sharing, the same file - world meshes, collision,
 /// visibility, lightmaps - is read and decoded twice.
+/// <para>
+/// The parse may come from the disk cache (see <see cref="Titanfall2MapCache"/>) instead of the
+/// BSP. Both are plain managed graphs with no unmanaged handles, so the lease rules below are the
+/// only lifetime rules that apply to either of them.
+/// </para>
 /// </summary>
 sealed class Titanfall2MapParse( string key, Func<(Titanfall2BspReader.ParsedBsp, string)> parse )
 {

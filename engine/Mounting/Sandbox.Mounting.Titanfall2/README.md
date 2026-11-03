@@ -4,6 +4,8 @@
 
 实现细节、数据格式和生命周期规则见 [ARCHITECTURE.md](ARCHITECTURE.md)。全部环境变量见 [ENVIRONMENT_SWITCHES.md](ENVIRONMENT_SWITCHES.md)。
 
+阅读顺序：本页介绍挂载能力、使用方法和已知限制；技术参考解释解析、渲染与资源所有权；环境变量表用于调整实际运行设置。测试入口和验收边界见本页的“构建和测试”。
+
 ## 挂载的内容
 
 注册顺序决定同名资源的优先级：先注册 RPAK，VPK 只补充 RPAK 中没有的名字。
@@ -52,7 +54,7 @@
 - **显示变换**：`Titanfall2Tonemapping` 实现零售版的自动曝光和显示曲线，替代引擎的自动曝光。地图有全局 `color_correction` 实体时，加载它的 32³ RGB 查找表；该表是一个挂载体纹理资源，场景只引用它的路径。
 - **泛光**：在曝光和显示曲线之前合成。
 
-世界和静态道具默认不投射方向光阴影，由屏幕空间接触阴影补充。`SBOX_TITANFALL2_MAP_SHADOWS` 和 `SBOX_TITANFALL2_PROP_SHADOWS` 可以开启阴影。
+世界和静态道具默认开启方向光阴影，屏幕空间接触阴影也默认开启。半径小于 48 的静态道具不投射阴影。`SBOX_TITANFALL2_MAP_SHADOWS=0` 和 `SBOX_TITANFALL2_PROP_SHADOWS=0` 可分别关闭世界和道具阴影。Godray 光束面片默认显示，可用 `SBOX_TITANFALL2_GODRAYS=0` 关闭；它们随相机距离淡入，移动时可能出现闪烁。
 
 ## 静态道具
 
@@ -156,25 +158,42 @@ titanfall2_export_model "mount://titanfall2/models/robots/stalker/robot_stalker.
 
 ## 构建和测试
 
-在挂载目录中构建：
+按仓库约定，在仓库根目录通过 `SboxBuild` 构建和测试。先完成一次 `Setup.bat`，再运行：
 
 ```powershell
-dotnet build -c Release
+dotnet run --project engine/Tools/SboxBuild/SboxBuild.csproj -- build --config Developer
+dotnet run --project engine/Tools/SboxBuild/SboxBuild.csproj -- test --no-build --filter "FullyQualifiedName~Titanfall2&FullyQualifiedName!~Temp"
 ```
 
-构建完成后，`CopyOutputDll` 目标会把输出复制到 `game\mount\titanfall2\titanfall2.dll`。设置 `SkipCopyOutputDll=true` 可以跳过复制。两个原生 DLL 由 `Native\*\build.ps1` 单独构建，默认输出到同一目录。
+构建一次后用 `test --no-build` 复用产物，避免反复编译共享输出。上述过滤器排除名称含 `Temp` 的临时诊断类；依赖本机固定路径的转储脚本应单独运行。`SboxBuild` 会给需要引擎的测试进程设置 `FACEPUNCH_ENGINE` 为本仓库的 `game\`。读取零售资源的测试还需要本机安装 Titanfall 2。
 
-修改着色器后，在 `game\` 目录下运行 `bin\managed\ShaderCompiler.exe` 编译。
+构建完成后，挂载项目的 `CopyOutputDll` 目标会把输出复制到 `game\mount\titanfall2\titanfall2.dll`。设置 MSBuild 属性 `SkipCopyOutputDll=true` 可以跳过复制。两个原生 DLL 由 `Native\*\build.ps1` 单独构建，默认输出到同一目录。运行中的编辑器可能占用挂载 DLL，构建前应确认实例状态。
 
-测试需要 `FACEPUNCH_ENGINE` 指向 `game\` 目录。在仓库根目录运行：
+修改着色器后，通过仓库的 shader 构建入口编译；着色器或材质缓存可能仍引用旧结果，画面对照前需要重新加载或重启验证进程。
 
 ```powershell
-$env:FACEPUNCH_ENGINE = "D:\sbox\sbox-public\game"
-dotnet test engine\Tests\Sandbox.Test.Engine --filter FullyQualifiedName~Titanfall2
-dotnet test engine\Tests\Sandbox.Test.Integration --filter FullyQualifiedName~Titanfall2
+dotnet run --project engine/Tools/SboxBuild/SboxBuild.csproj -- build-shaders
 ```
 
-集成测试需要本机安装 Titanfall 2。
+### 正式回归入口
+
+下表列出已有测试源码，表示覆盖入口，不代表当前工作区已经运行通过。
+
+| 领域 | 测试入口 | 主要检查 |
+| --- | --- | --- |
+| 地图组件生命周期 | [Titanfall2MapLifecycleTests.cs](../../Tests/Sandbox.Test.Engine/Scene/Titanfall2MapLifecycleTests.cs) | 加载、重载、编辑器 tick、克隆隔离、卸载时保留宿主对象 |
+| BSP 解析与构建资源 | [Titanfall2MapImportTests.cs](../../Tests/Sandbox.Test.Engine/Scene/Titanfall2MapImportTests.cs) | 共享解析、最后一个租约释放、失败重试、构建纹理只释放一次 |
+| 就绪、序列化和导航 | [Titanfall2MountTests.cs](../../Tests/Sandbox.Test.Engine/Scene/Titanfall2MountTests.cs)、[Titanfall2WorldReadyTests.cs](../../Tests/Sandbox.Test.Integration/Mounting/Titanfall2WorldReadyTests.cs) | 损坏 payload、真实 tick 下碰撞丢失与恢复、宿主导航设置恢复 |
+| 碰撞与模型语义 | [Titanfall2FeatureTests.cs](../../Tests/Sandbox.Test.Integration/Mounting/Titanfall2FeatureTests.cs)、[Titanfall2BrushModelTests.cs](../../Tests/Sandbox.Test.Integration/Mounting/Titanfall2BrushModelTests.cs) | 人物/泰坦/子弹掩码、禁钩爪、附件、hitbox、bodygroup、内联模型 |
+| 表面与运行时贴花 | [Titanfall2SurfaceTests.cs](../../Tests/Sandbox.Test.Engine/Scene/Titanfall2SurfaceTests.cs)、[Titanfall2DecalFactoryTests.cs](../../Tests/Sandbox.Test.Integration/Mounting/Titanfall2DecalFactoryTests.cs) | 表面名归一化、贴花纹理提取、无效材质和朝向 |
+| 探针与地图音频 | [Titanfall2LightProbeLookupTests.cs](../../Tests/Sandbox.Test.Engine/Scene/Titanfall2LightProbeLookupTests.cs)、[Titanfall2AudioLifecycleTests.cs](../../Tests/Sandbox.Test.Engine/Scene/Titanfall2AudioLifecycleTests.cs) | 探针查找边界、音区重建与清理、无效音区数据 |
+
+### 验收边界
+
+- 构建成功、正式回归通过、运行时实际加载和零售画面还原分别记录。测试类存在、资源数量正确或后处理组件已创建，都不能代替画面验收。
+- 画面验收使用固定地图、相机、分辨率和运行设置，对照世界材质、道具探针、天空、雾、粒子、曝光和颜色校正。单人地图应单独验收。
+- 性能比较使用同一进程、固定相机，并记录道具、批次、draw 和三角形数量。局部视角的结果不代表整图帧率或显存预算。
+- 碰撞测试中的人工场景不能代替零售地图的固定点位检测；`nowallrun` 的推断关系仍需单独确认。
 
 ## 已知限制
 

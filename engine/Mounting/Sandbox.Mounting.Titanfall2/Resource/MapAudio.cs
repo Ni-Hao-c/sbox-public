@@ -207,10 +207,22 @@ public sealed class Titanfall2MapAudio : Component, Component.DontExecuteOnServe
 				} );
 			}
 
+			// Creating the zone triggers decodes every soundscape loop, so snapshot the
+			// mount's sound-load counters to report where that stage time actually went.
+			var loadsBefore = _mount?.SoundLoads ?? default;
 			foreach ( var zone in zones ) CreateSoundscapeZone( zone );
+			var loadsAfter = _mount?.SoundLoads ?? default;
+
+			var decoded = loadsAfter.Sounds - loadsBefore.Sounds;
+			var decodedDetail = decoded <= 0 ? string.Empty
+				: $"; {decoded} sounds decoded, {(loadsAfter.PcmBytes - loadsBefore.PcmBytes) / (1024.0 * 1024.0):0.0} MB PCM "
+					+ $"({loadsAfter.DecodeMilliseconds - loadsBefore.DecodeMilliseconds:0} ms decode, "
+					+ $"{loadsAfter.CreateMilliseconds - loadsBefore.CreateMilliseconds:0} ms SoundFile, "
+					+ $"{loadsAfter.ReadMilliseconds - loadsBefore.ReadMilliseconds:0} ms BCF read, "
+					+ $"{loadsAfter.LookupMilliseconds - loadsBefore.LookupMilliseconds:0} ms bank lookup)";
 
 			Log.Info( $"Titanfall 2 map audio ready: {_emitters.Count} ambient emitters, {_zoneCount} soundscape zones, "
-				+ $"volume {VolumeScale:0.##}, up to {MaxEmitters} concurrent emitters ({MapPath})." );
+				+ $"volume {VolumeScale:0.##}, up to {MaxEmitters} concurrent emitters ({MapPath}){decodedDetail}." );
 		}
 		catch ( Exception exception )
 		{

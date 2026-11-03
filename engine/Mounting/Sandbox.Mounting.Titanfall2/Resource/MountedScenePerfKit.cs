@@ -283,6 +283,27 @@ public class MountedInstanceBatch : SceneCustomObject, IMountedInstanceBatch
 	public static (long Submitted, long Draws) GetStatistics() =>
 		(System.Threading.Interlocked.Read( ref _submittedInstances ), System.Threading.Interlocked.Read( ref _instanceDraws ));
 
+	/// <summary>
+	/// Camera grid the per-instance LOD choice is snapped to, in world units. The LOD groups are
+	/// rebuilt on every draw, and <see cref="Titanfall2ProbeInstanceBatch"/> re-uploads an index
+	/// table whenever a group's membership changes: a camera that jitters around a LOD boundary
+	/// would therefore re-upload group tables every single frame while walking. Snapping the camera
+	/// to this grid gives every instance the same deadband and caps re-partitioning to one grid
+	/// crossing. The LOD switch point moves by at most the camera's snap error (a few percent of the
+	/// nearest switch distance, under 1% of the far ones), and every instance of a batch is judged
+	/// with the same snapped camera in a given view.
+	/// </summary>
+	const float LodCameraGrid = 32f;
+
+	static Vector3 QuantizedLodCamera( Vector3 camera )
+	{
+		const float inverseGrid = 1f / LodCameraGrid;
+		return new Vector3(
+			MathF.Floor( camera.x * inverseGrid ) * LodCameraGrid,
+			MathF.Floor( camera.y * inverseGrid ) * LodCameraGrid,
+			MathF.Floor( camera.z * inverseGrid ) * LodCameraGrid );
+	}
+
 	public int InstanceCount => _drawSet.Transforms.Length;
 	public Transform[] DrawTransforms => _drawSet.Transforms;
 
@@ -378,7 +399,7 @@ public class MountedInstanceBatch : SceneCustomObject, IMountedInstanceBatch
 		// A single instance needs no grouping and no scratch spans.
 		if ( all.Length == 1 )
 		{
-			DrawInstances( all, drawSet.SourceIndices, _selectLod( Graphics.CameraPosition.Distance( all[0].Position ) ) );
+			DrawInstances( all, drawSet.SourceIndices, _selectLod( QuantizedLodCamera( Graphics.CameraPosition ).Distance( all[0].Position ) ) );
 			System.Threading.Interlocked.Increment( ref _submittedInstances );
 			System.Threading.Interlocked.Increment( ref _instanceDraws );
 			return;
@@ -396,7 +417,9 @@ public class MountedInstanceBatch : SceneCustomObject, IMountedInstanceBatch
 			: (rentedSourceIndices = System.Buffers.ArrayPool<int>.Shared.Rent( all.Length )).AsSpan( 0, all.Length );
 		try
 		{
-			var camera = Graphics.CameraPosition;
+			// Snapped camera: the LOD groups (and the probe index tables they upload) only change
+			// when the camera crosses a grid line, not on every unit of movement.
+			var camera = QuantizedLodCamera( Graphics.CameraPosition );
 			Span<int> counts = stackalloc int[4];
 			counts.Clear();
 			for ( var i = 0; i < all.Length; i++ )

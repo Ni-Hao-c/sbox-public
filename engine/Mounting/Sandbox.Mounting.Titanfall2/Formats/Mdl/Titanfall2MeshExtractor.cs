@@ -56,7 +56,15 @@ public static class Titanfall2MeshExtractor
 		public int TriangleCount => Indices.Length / 3;
 	}
 
-	public sealed class ExtractedVertex
+	/// <summary>
+	/// One extracted vertex, addressed by index inside the mesh's vertex array. This is a value
+	/// type on purpose: extracting a static prop decodes every vertex of four LOD bands, and the
+	/// previous class shape allocated one object, one byte[] and one float[] per vertex, plus two
+	/// throwaway object copies whenever UV2 or vertex colours were present. Bone influences now
+	/// live in two buffers owned by the whole mesh and are exposed as slices, so a vertex costs
+	/// no allocation of its own.
+	/// </summary>
+	public readonly struct ExtractedVertex
 	{
 		public int SourceVertexIndex { get; init; }
 		public Vector3 Position { get; init; }
@@ -66,8 +74,23 @@ public static class Titanfall2MeshExtractor
 		public bool HasTexCoord2 { get; init; }
 		public VvcColor32 Color { get; init; }
 		public bool HasColor { get; init; }
-		public byte[] BoneIds { get; init; } = Array.Empty<byte>();
-		public float[] BoneWeights { get; init; } = Array.Empty<float>();
+
+		/// <summary>Bone ids of the whole mesh; this vertex occupies BoneOffset..BoneOffset+BoneCount.</summary>
+		internal byte[] BoneIdBuffer { get; init; }
+		/// <summary>Bone weights of the whole mesh, parallel to <see cref="BoneIdBuffer"/>.</summary>
+		internal float[] BoneWeightBuffer { get; init; }
+		internal int BoneOffset { get; init; }
+		internal int BoneCount { get; init; }
+
+		/// <summary>Bone ids of this vertex's influences, in the order the VVD stored them.</summary>
+		public ReadOnlySpan<byte> BoneIds => BoneIdBuffer is null
+			? ReadOnlySpan<byte>.Empty
+			: new ReadOnlySpan<byte>( BoneIdBuffer, BoneOffset, BoneCount );
+
+		/// <summary>Bone weights of this vertex's influences, parallel to <see cref="BoneIds"/>.</summary>
+		public ReadOnlySpan<float> BoneWeights => BoneWeightBuffer is null
+			? ReadOnlySpan<float>.Empty
+			: new ReadOnlySpan<float>( BoneWeightBuffer, BoneOffset, BoneCount );
 	}
 
 	public static ExtractedLod ExtractLod( Titanfall2Mdl53Reader.ParsedModel parsedModel, int lodIndex = 0, bool allBodyGroupChoices = false,
@@ -151,12 +174,28 @@ public static class Titanfall2MeshExtractor
 		int modelIndex,
 		int meshIndex, int lodIndex, int skin )
 	{
-		var vertices = new List<ExtractedVertex>();
+		// Every vertex of a strip group is emitted, so the exact output size is known before
+		// anything is filled. Write straight into the final arrays instead of growing a List of
+		// reference-typed vertices: one dense struct array plus two bone buffers per mesh.
+		var vertexCount = 0;
+		foreach ( var stripGroup in vtxMesh.StripGroups )
+		{
+			vertexCount += stripGroup.Vertices.Length;
+		}
+
+		var vertices = vertexCount == 0 ? Array.Empty<ExtractedVertex>() : new ExtractedVertex[vertexCount];
+		var boneIds = vertexCount == 0
+			? Array.Empty<byte>()
+			: new byte[vertexCount * Titanfall2Mdl53Constants.MaxBonesPerVertex];
+		var boneWeights = vertexCount == 0
+			? Array.Empty<float>()
+			: new float[vertexCount * Titanfall2Mdl53Constants.MaxBonesPerVertex];
 		var indices = new List<int>();
+		var vertexCursor = 0;
 
 		foreach ( var stripGroup in vtxMesh.StripGroups )
 		{
-			int baseVertexIndex = vertices.Count;
+			int baseVertexIndex = vertexCursor;
 
 			for ( int stripVertexIndex = 0; stripVertexIndex < stripGroup.Vertices.Length; stripVertexIndex++ )
 			{
@@ -166,7 +205,9 @@ public static class Titanfall2MeshExtractor
 					throw new InvalidOperationException( "VTX vertex is outside the VVD LOD vertex map." );
 				int sourceVertexIndex = lodVertexMap[lodVertexIndex];
 
-				vertices.Add( CreateExtractedVertex( parsedModel, sourceVertexIndex ) );
+				vertices[vertexCursor] = CreateExtractedVertex( parsedModel, sourceVertexIndex, boneIds, boneWeights,
+					vertexCursor * Titanfall2Mdl53Constants.MaxBonesPerVertex );
+				vertexCursor++;
 			}
 
 			void AddTriangle( int a, int b, int c )
@@ -222,12 +263,17 @@ public static class Titanfall2MeshExtractor
 			MaterialIndex = material.Index,
 			MaterialName = material.Name,
 			SkinReference = mesh.Mesh.MaterialIndex,
-			Vertices = vertices.ToArray(),
+			Vertices = vertices,
 			Indices = indices.ToArray()
 		};
 	}
 
-	private static ExtractedVertex CreateExtractedVertex( Titanfall2Mdl53Reader.ParsedModel parsedModel, int sourceVertexIndex )
+	private static ExtractedVertex CreateExtractedVertex(
+		Titanfall2Mdl53Reader.ParsedModel parsedModel,
+		int sourceVertexIndex,
+		byte[] boneIds,
+		float[] boneWeights,
+		int boneOffset )
 	{
 		if ( sourceVertexIndex < 0 || sourceVertexIndex >= parsedModel.EmbeddedVertices.Length )
 		{
@@ -235,51 +281,27 @@ public static class Titanfall2MeshExtractor
 		}
 
 		var vertex = parsedModel.EmbeddedVertices[sourceVertexIndex];
-		var extracted = new ExtractedVertex
+		// Optional channels are still indexed by the source vertex; an absent channel keeps the
+		// default value and its Has flag stays false, exactly as the previous three-pass copy did.
+		var hasTexCoord2 = sourceVertexIndex < parsedModel.EmbeddedUv2.Length;
+		var hasColor = sourceVertexIndex < parsedModel.EmbeddedVertexColors.Length;
+		var boneCount = CopyBoneInfluences( vertex, boneIds, boneWeights, boneOffset );
+
+		return new ExtractedVertex
 		{
 			SourceVertexIndex = sourceVertexIndex,
 			Position = vertex.Position,
 			Normal = vertex.Normal,
 			TexCoord = vertex.TexCoord,
-			BoneIds = ReadBoneIds( vertex ),
-			BoneWeights = ReadBoneWeights( vertex )
+			TexCoord2 = hasTexCoord2 ? parsedModel.EmbeddedUv2[sourceVertexIndex] : default,
+			HasTexCoord2 = hasTexCoord2,
+			Color = hasColor ? parsedModel.EmbeddedVertexColors[sourceVertexIndex] : default,
+			HasColor = hasColor,
+			BoneIdBuffer = boneIds,
+			BoneWeightBuffer = boneWeights,
+			BoneOffset = boneOffset,
+			BoneCount = boneCount
 		};
-
-		if ( sourceVertexIndex < parsedModel.EmbeddedUv2.Length )
-		{
-			extracted = new ExtractedVertex
-			{
-				SourceVertexIndex = extracted.SourceVertexIndex,
-				Position = extracted.Position,
-				Normal = extracted.Normal,
-				TexCoord = extracted.TexCoord,
-				TexCoord2 = parsedModel.EmbeddedUv2[sourceVertexIndex],
-				HasTexCoord2 = true,
-				Color = extracted.Color,
-				HasColor = extracted.HasColor,
-				BoneIds = extracted.BoneIds,
-				BoneWeights = extracted.BoneWeights
-			};
-		}
-
-		if ( sourceVertexIndex < parsedModel.EmbeddedVertexColors.Length )
-		{
-			extracted = new ExtractedVertex
-			{
-				SourceVertexIndex = extracted.SourceVertexIndex,
-				Position = extracted.Position,
-				Normal = extracted.Normal,
-				TexCoord = extracted.TexCoord,
-				TexCoord2 = extracted.TexCoord2,
-				HasTexCoord2 = extracted.HasTexCoord2,
-				Color = parsedModel.EmbeddedVertexColors[sourceVertexIndex],
-				HasColor = true,
-				BoneIds = extracted.BoneIds,
-				BoneWeights = extracted.BoneWeights
-			};
-		}
-
-		return extracted;
 	}
 
 	/// <summary>Material name a mesh skin reference uses in one skin family and LOD, including VTX LOD replacements.</summary>
@@ -384,28 +406,18 @@ public static class Titanfall2MeshExtractor
 		return vertexLodData.LodVertexCounts[lodIndex];
 	}
 
-	private static unsafe byte[] ReadBoneIds( VvdVertex vertex )
+	/// <summary>Copies one source vertex's VVD bone influences into the mesh's shared buffers.</summary>
+	/// <returns>The number of influences copied (0 to MaxBonesPerVertex).</returns>
+	private static unsafe int CopyBoneInfluences( VvdVertex vertex, byte[] boneIds, float[] boneWeights, int boneOffset )
 	{
 		int count = Math.Clamp( (int)vertex.BoneWeights.BoneCount, 0, Titanfall2Mdl53Constants.MaxBonesPerVertex );
-		var ids = new byte[count];
 		for ( int i = 0; i < count; i++ )
 		{
-			ids[i] = vertex.BoneWeights.Bone[i];
+			boneIds[boneOffset + i] = vertex.BoneWeights.Bone[i];
+			boneWeights[boneOffset + i] = vertex.BoneWeights.Weight[i];
 		}
 
-		return ids;
-	}
-
-	private static unsafe float[] ReadBoneWeights( VvdVertex vertex )
-	{
-		int count = Math.Clamp( (int)vertex.BoneWeights.BoneCount, 0, Titanfall2Mdl53Constants.MaxBonesPerVertex );
-		var weights = new float[count];
-		for ( int i = 0; i < count; i++ )
-		{
-			weights[i] = vertex.BoneWeights.Weight[i];
-		}
-
-		return weights;
+		return count;
 	}
 }
 

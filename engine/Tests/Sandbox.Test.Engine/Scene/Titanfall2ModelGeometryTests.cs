@@ -158,8 +158,11 @@ public class Titanfall2ModelGeometryTests
 		var data = new byte[headerSize + (vtx?.Length ?? 0)];
 		Write( data, 0, new Mdl53StudioHeader
 		{
-			Id = 0x54534449, Version = 53, Length = data.Length,
-			VtxOffset = vtx is null ? 0 : headerSize, VtxSize = vtx?.Length ?? 0
+			Id = 0x54534449,
+			Version = 53,
+			Length = data.Length,
+			VtxOffset = vtx is null ? 0 : headerSize,
+			VtxSize = vtx?.Length ?? 0
 		} );
 		vtx?.CopyTo( data, headerSize );
 		return data;
@@ -238,9 +241,12 @@ public class Titanfall2ModelGeometryTests
 		Write( bytes, mesh, new VtxMeshHeader { StripGroupCount = 1, StripGroupHeaderOffset = group - mesh } );
 		Write( bytes, group, new VtxStripGroupHeader
 		{
-			VertexCount = 3, VertexOffset = vertices - group,
-			IndexCount = 6, IndexOffset = indices - group,
-			StripCount = 2, StripOffset = strips - group
+			VertexCount = 3,
+			VertexOffset = vertices - group,
+			IndexCount = 6,
+			IndexOffset = indices - group,
+			StripCount = 2,
+			StripOffset = strips - group
 		} );
 		for ( ushort i = 0; i < 3; i++ )
 			Write( bytes, vertices + i * Marshal.SizeOf<VtxVertex>(), new VtxVertex { OriginalMeshVertexId = i } );
@@ -249,7 +255,10 @@ public class Titanfall2ModelGeometryTests
 		Write( bytes, strips, new VtxStripHeader { IndexCount = 3, IndexOffset = 0, VertexCount = 3, Flags = 1 } );
 		Write( bytes, strips + Marshal.SizeOf<VtxStripHeader>(), new VtxStripHeader
 		{
-			IndexCount = secondCount, IndexOffset = secondOffset, VertexCount = 3, Flags = 1
+			IndexCount = secondCount,
+			IndexOffset = secondOffset,
+			VertexCount = 3,
+			Flags = 1
 		} );
 		return bytes;
 	}

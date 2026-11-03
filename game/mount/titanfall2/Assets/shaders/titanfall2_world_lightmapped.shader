@@ -129,7 +129,15 @@ PS
 			depth.TextureCoords = uv;
 			return T2DepthNormals( i, depth );
 		}
-		float3 detail = Tex2DS( g_tDetail, g_sAniso, uv ).rgb * 2.0;
+		// g_flT2DetailBlend comes from the material's constant buffer, so the compiler cannot prove
+		// it is zero and the unconditional sample below its lerp was paid by every pixel even when
+		// the blend discarded it. Sampling only when the blend is positive is bit-identical:
+		// saturate( blend ) is 0 for blend <= 0, so lerp( 1, detail, 0 ) is exactly 1 whatever the
+		// sample would have returned (NaN included - the comparison is false and the identity is
+		// used). Materials with a blend still take exactly the sample they took before.
+		float3 detail = g_flT2DetailBlend > 0.0
+			? Tex2DS( g_tDetail, g_sAniso, uv ).rgb * 2.0
+			: float3( 1.0, 1.0, 1.0 );
 		float ao = Tex2DS( g_tAO, g_sAniso, T2SurfaceUv( i.vTextureCoords.xy, uv, g_vT2AuxUvChannels.z ) ).r;
 		float3 emissive = T2ReadEmissive( i.vTextureCoords.xy, uv )
 			* g_vT2EmissiveTint.rgb * g_flT2EmissiveStrength;
@@ -168,6 +176,17 @@ PS
 		CombinerInput combiner = T2MaterialToCombinerInput( m, tintedSpecular );
 		LightingTerms_t lighting = InitLightingTerms();
 		float sunVisibility = 1;
+		// The sun-channel and the local-light branches below both want the same RealTimeB texel:
+		// same texture, same sampler, same lightmapUv. The conditions are constant-buffer values, so
+		// a branch is uniform across the quad and the implicit derivatives (mip selection) are
+		// identical wherever the sample sits; a pixel that needs the value is always inside at least
+		// one of the two branches, so sampling under the union of the conditions never samples more
+		// often than the two guarded samples did, and samples once instead of twice when both run.
+		bool wantsRealTimeVisibility = g_flT2HasSunLightmap > 0.5
+			|| ( g_nT2LocalLightCount > 0 && g_nT2LightPageEntryCount > 0 );
+		float4 visibility = 0;
+		if ( wantsRealTimeVisibility )
+			visibility = Tex2DS( g_tLightmapRealTimeB, g_sBilinearClamp, lightmapUv );
 		if ( g_flT2HasSunLightmap > 0.5 )
 		{
 			uint width, height;
@@ -175,7 +194,7 @@ PS
 			int2 pixel = clamp( int2( lightmapUv * float2( width, height ) ), 0, int2( width, height ) - 1 );
 			uint channels = uint( g_tLightmapSunChannels.Load( int3( pixel, 0 ) ).r * 255 + 0.5 );
 			float4 selector = float4( channels & 1, (channels >> 1) & 1, (channels >> 2) & 1, (channels >> 3) & 1 );
-			sunVisibility = saturate( dot( selector, Tex2DS( g_tLightmapRealTimeB, g_sBilinearClamp, lightmapUv ) ) );
+			sunVisibility = saturate( dot( selector, visibility ) );
 		}
 		T2ComputeDirectLighting( lighting, combiner, sunVisibility );
 		if ( g_nT2LocalLightCount > 0 && g_nT2LightPageEntryCount > 0 )
@@ -186,7 +205,6 @@ PS
 			uint4 bytes = uint4( g_tLightmapRealTimeA.Load( int3( pixel, 0 ) ) * 255 + 0.5 );
 			uint packed = bytes.x | (bytes.y << 8) | (bytes.z << 16) | (bytes.w << 24);
 			uint page = (packed >> 24) * 63;
-			float4 visibility = Tex2DS( g_tLightmapRealTimeB, g_sBilinearClamp, lightmapUv );
 			[unroll] for ( uint channel = 0; channel < 4; ++channel )
 			{
 				uint local = (packed >> (channel * 6)) & 63;

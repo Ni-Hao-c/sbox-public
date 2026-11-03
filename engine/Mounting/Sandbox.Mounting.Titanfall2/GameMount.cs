@@ -34,8 +34,20 @@ public partial class Titanfall2Mount : BaseGameMount
 	readonly object _soundCacheLock = new();
 	int _failedSoundLookups;
 	MilesBankArchive _milesArchive;
+	// Sorted bank records, filled by MountMilesSounds together with _milesSoundAssets.
+	// TryFindMilesAsset binary searches this instead of scanning the whole table.
+	MilesSoundAsset[] _milesSoundOrdered;
 	ITitanfall2AssetSource _soundscapeScriptSource;
 	Dictionary<string, string> _soundscapeLoops;
+	// Sound-load instrumentation. The map audio stage decodes every soundscape loop up
+	// front, so the "ready" log reports where that time went: bank lookup, BCF read,
+	// native decode or SoundFile creation.
+	long _soundLookupTicks;
+	long _soundReadTicks;
+	long _soundDecodeTicks;
+	long _soundCreateTicks;
+	long _soundPcmBytes;
+	int _soundLoadCount;
 	readonly Dictionary<string, Texture[]> _legacyParticleTextureFrames = new( StringComparer.OrdinalIgnoreCase );
 	readonly Dictionary<string, float> _legacyParticleSheetFrameRates = new( StringComparer.OrdinalIgnoreCase );
 	readonly Dictionary<string, Sprite> _legacyParticleSprites = new( StringComparer.OrdinalIgnoreCase );
@@ -43,6 +55,24 @@ public partial class Titanfall2Mount : BaseGameMount
 	readonly object _materialDescriptorLock = new();
 	readonly object _legacyParticleSpriteLock = new();
 	readonly object _shaderReflectionLock = new();
+
+	/// <summary>
+	/// One asset registration layer, applied by <c>Mount()</c> in list order. A layer only
+	/// fills the names earlier layers left free, because every registration path ends in
+	/// <c>registered.Add(...)</c> or a source-table <c>TryAdd</c>. The list order is therefore the
+	/// priority order: the first layer wins a contested resource name. A future Northstar mod
+	/// layer is inserted at the front of this list and must key its entries on the same virtual
+	/// VPK paths the built-in layers use.
+	/// </summary>
+	sealed class AssetRegistrationLayer( string name, int priority, int registeredNames )
+	{
+		internal string Name { get; } = name;
+		internal int Priority { get; } = priority;
+		/// <summary>Names this layer claimed in the shared <c>registered</c> set (diagnostics only).</summary>
+		internal int RegisteredNames { get; } = registeredNames;
+	}
+
+	readonly List<AssetRegistrationLayer> _assetLayers = new();
 
 	public override string Ident => "titanfall2";
 	public override string Title => "Titanfall 2";
@@ -68,18 +98,99 @@ public partial class Titanfall2Mount : BaseGameMount
 		_contentFingerprint = null;
 		EnsureRuntimeTypesRegistered();
 		Titanfall2CollisionDiagnostics.RegisterConsoleCommands();
+		// Reset every registration table once, before any layer runs. The reset used to live at
+		// the top of MountRpakResources/MountVpkResources, which left no room for a layer that
+		// has to register ahead of them (the intended Northstar mod layer). Nothing reads these
+		// tables between the old and the new reset point, so the mounted content is unchanged.
+		ClearRegistrationTables();
+		_assetLayers.Clear();
 		var registered = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
-		// Titanfall 2 resolves native RPAK MATL/TXTR assets before legacy VMT/VTF
-		// search paths. Register RPAK first so VPK assets only fill missing names.
+		// Layers run in registration (= priority) order and a later layer can only fill the names
+		// an earlier one left free: "registered first" is "highest priority". Titanfall 2 resolves
+		// native RPAK MATL/TXTR assets before legacy VMT/VTF search paths, so RPAK is first and the
+		// VPK layer only fills missing names. The sky and Miles layers must stay last: the sky
+		// material inspects the VPK texture table and Miles only registers sounds.
+		var claimed = registered.Count;
 		MountRpakResources( context, registered );
+		claimed = RecordAssetLayer( "rpak", 400, claimed, registered );
 		MountVpkResources( context, registered );
-		// Retail supplies a cubemap without a Source 2 sky material. Wrap it in the
-		// native sky shader so both the main view and the 3D skybox use mounted art.
-		if ( _legacyTextureSources.ContainsKey( "skies/skycube" ) && registered.Add( "skies/skycube.vmat" ) )
-			context.Add( ResourceType.Material, "skies/skycube", new Titanfall2SkyMaterialLoader() );
+		claimed = RecordAssetLayer( "vpk", 300, claimed, registered );
+		RegisterSkyMaterial( context, registered );
+		claimed = RecordAssetLayer( "sky", 200, claimed, registered );
 		MountMilesSounds( context, registered );
+		RecordAssetLayer( "miles", 100, claimed, registered );
+		LogAssetLayers( registered );
 		IsMounted = true;
 		return Task.CompletedTask;
+	}
+
+	/// <summary>
+	/// Drops every registration table the asset layers fill. The tables used to be cleared inside
+	/// the two resource-mounting functions; hoisting them here keeps one reset point for all
+	/// layers and is behaviour-neutral, because those functions only read files before their old
+	/// clear point.
+	/// </summary>
+	void ClearRegistrationTables()
+	{
+		_texturePaths.Clear();
+		_shaderSetNames.Clear();
+		_shaderSetSources.Clear();
+		_shaderSources.Clear();
+		_materialPaths.Clear();
+		_materialSources.Clear();
+		_legacyMaterialSources.Clear();
+		_legacyTextureSources.Clear();
+		_legacyAnimatedTexturePaths.Clear();
+		_modelSources.Clear();
+		ResetParticleCatalog();
+		lock ( _materialMetadataLock )
+		{
+			// Background material loads write these under the same lock.
+			_legacyMaterialDefinitions.Clear();
+			_legacyMaterialErrors.Clear();
+			_materialMetadata.Clear();
+		}
+		lock ( _shaderReflectionLock )
+		{
+			_shaderReflections.Clear();
+			_shaderReflectionErrors.Clear();
+		}
+		lock ( _materialDescriptorLock )
+		{
+			_materialDescriptors.Clear();
+			_textureGuidDependencies.Clear();
+			_texturePathDependencies.Clear();
+		}
+	}
+
+	/// <summary>
+	/// Records how many resource names one registration layer claimed and returns the new running
+	/// total. The layer bodies are invoked directly instead of through a delegate: <see cref="MountContext"/>
+	/// is a ref struct, so a lambda that captures it cannot be compiled.
+	/// </summary>
+	int RecordAssetLayer( string name, int priority, int claimedBefore, HashSet<string> registered )
+	{
+		_assetLayers.Add( new AssetRegistrationLayer( name, priority, registered.Count - claimedBefore ) );
+		return registered.Count;
+	}
+
+	/// <summary>Reports the applied layer order, so a future mod layer can be A/B'd from the log.</summary>
+	void LogAssetLayers( HashSet<string> registered )
+	{
+		var order = string.Join( " > ", _assetLayers.Select( static layer => $"{layer.Name}[{layer.Priority}]={layer.RegisteredNames}" ) );
+		Log.Info( $"Titanfall 2 asset layers: {order}; {registered.Count} resource names claimed in total "
+			+ $"(first layer wins a contested name; a Northstar layer would register ahead of these)." );
+	}
+
+	/// <summary>
+	/// Wraps retail's cubemap (which ships without a Source 2 sky material) in the native sky
+	/// shader so both the main view and the 3D skybox use mounted art. Runs after the VPK layer
+	/// because it inspects that layer's texture table.
+	/// </summary>
+	void RegisterSkyMaterial( MountContext context, HashSet<string> registered )
+	{
+		if ( _legacyTextureSources.ContainsKey( "skies/skycube" ) && registered.Add( "skies/skycube.vmat" ) )
+			context.Add( ResourceType.Material, "skies/skycube", new Titanfall2SkyMaterialLoader() );
 	}
 
 	protected override void Shutdown()
@@ -123,8 +234,15 @@ public partial class Titanfall2Mount : BaseGameMount
 		_milesSoundAssets.Clear();
 		_soundFileSources.Clear();
 		_milesArchive = null;
+		_milesSoundOrdered = null;
 		_soundscapeScriptSource = null;
 		_soundscapeLoops = null;
+		_soundLookupTicks = 0;
+		_soundReadTicks = 0;
+		_soundDecodeTicks = 0;
+		_soundCreateTicks = 0;
+		_soundPcmBytes = 0;
+		_soundLoadCount = 0;
 		lock ( _materialDescriptorLock )
 		{
 			_materialDescriptors.Clear();
@@ -216,27 +334,53 @@ public partial class Titanfall2Mount : BaseGameMount
 	{
 		error = null;
 
-		if ( _milesArchive is not null && TryFindMilesAsset( key, out var asset ) )
+		var started = System.Diagnostics.Stopwatch.GetTimestamp();
+		// The out argument has to be declared up front: the compiler cannot prove it is assigned
+		// when the lookup result is carried through a bool local instead of an if condition.
+		MilesSoundAsset asset = default;
+		// Bank first, loose .wav second. Keep this order: retail ships every sound in the Miles
+		// bank (no loose .wav entries), and a same-named loose file must never shadow the bank.
+		// A future mod/Northstar layer that wants to override audio therefore has to change this
+		// lookup (or the bank table) rather than only registering a .wav source.
+		var inBank = _milesArchive is not null && TryFindMilesAsset( key, out asset );
+		_soundLookupTicks += System.Diagnostics.Stopwatch.GetTimestamp() - started;
+		if ( inBank )
 		{
-			if ( !_milesArchive.TryReadBcf( asset, out var bcf, out var readError ) )
+			started = System.Diagnostics.Stopwatch.GetTimestamp();
+			var read = _milesArchive.TryReadBcf( asset, out var bcf, out var readError );
+			_soundReadTicks += System.Diagnostics.Stopwatch.GetTimestamp() - started;
+			if ( !read )
 			{
 				error = readError;
 			}
-			else if ( !_milesArchive.TryDecode( bcf, out var pcm, out var rate, out var channels, out var decodeError ) )
-			{
-				error = decodeError;
-			}
 			else
 			{
-				var sound = SoundFile.FromPcm( key, pcm, new SoundFile.PcmOptions
+				started = System.Diagnostics.Stopwatch.GetTimestamp();
+				var decoded = _milesArchive.TryDecode( bcf, out var pcm, out var rate, out var channels, out var decodeError );
+				_soundDecodeTicks += System.Diagnostics.Stopwatch.GetTimestamp() - started;
+				if ( !decoded )
 				{
-					Channels = channels,
-					Rate = rate,
-					Bits = 16,
-					Loop = loop
-				} );
-				if ( sound is not null ) return sound;
-				error = "SoundFile.FromPcm returned null";
+					error = decodeError;
+				}
+				else
+				{
+					started = System.Diagnostics.Stopwatch.GetTimestamp();
+					var sound = SoundFile.FromPcm( key, pcm, new SoundFile.PcmOptions
+					{
+						Channels = channels,
+						Rate = rate,
+						Bits = 16,
+						Loop = loop
+					} );
+					_soundCreateTicks += System.Diagnostics.Stopwatch.GetTimestamp() - started;
+					if ( sound is not null )
+					{
+						_soundPcmBytes += pcm.Length;
+						_soundLoadCount++;
+						return sound;
+					}
+					error = "SoundFile.FromPcm returned null";
+				}
 			}
 		}
 
@@ -270,7 +414,11 @@ public partial class Titanfall2Mount : BaseGameMount
 
 	/// <summary>
 	/// Finds the bank record for a sound name. Entity names are flat while the bank can store
-	/// them under a path, so an exact lookup is followed by a suffix match.
+	/// them under a path, so an exact lookup is followed by a suffixed variant match.
+	/// <para>
+	/// <paramref name="key"/> always comes from <c>NormalizeSoundKey</c>, so it carries
+	/// the "sound/" prefix every bank name has.
+	/// </para>
 	/// </summary>
 	bool TryFindMilesAsset( string key, out MilesSoundAsset asset )
 	{
@@ -278,29 +426,51 @@ public partial class Titanfall2Mount : BaseGameMount
 
 		var bareKey = StripSoundPrefix( key );
 
-		// 1: exact bare name (entity names already match most point emitters).
-		foreach ( var pair in _milesSoundAssets )
-		{
-			if ( !StripSoundPrefix( pair.Key ).Equals( bareKey, StringComparison.OrdinalIgnoreCase ) ) continue;
-			asset = pair.Value;
-			return true;
-		}
+		// 1: exact bare name. The dictionary lookup above already is that match: every bank
+		//    name is stored as "sound/<path>" (MilesBankArchive.TryNormalizeName), so a
+		//    stripped bank name equals bareKey only when the full name equals key. The table
+		//    wide scan that used to repeat this lookup could never hit.
 
 		// 2: authored logical name resolved to a bank variant. Map soundscapes reference
 		//    "amb_x_INT_SmallRoom" while the bank stores channel/format variants such as
 		//    "amb_x_int_smallroom_6ch_v1_lp". Prefer the shortest variant so the generic
-		//    loop wins over special-purpose ones.
+		//    loop wins over special-purpose ones. The records are sorted by resource name, so
+		//    a binary search finds the run sharing the "<key>_" prefix and only that run is
+		//    scanned. Candidates still arrive in table order, so ties resolve as before.
 		MilesSoundAsset best = null;
 		string bestKey = null;
-		foreach ( var pair in _milesSoundAssets )
+		var ordered = _milesSoundOrdered;
+		if ( ordered is not null )
 		{
-			var bare = StripSoundPrefix( pair.Key );
-			if ( bare.Length <= bareKey.Length ) continue;
-			if ( !bare.StartsWith( bareKey, StringComparison.OrdinalIgnoreCase ) ) continue;
-			if ( bare[bareKey.Length] != '_' ) continue;
-			if ( bestKey is not null && bare.Length >= bestKey.Length ) continue;
-			best = pair.Value;
-			bestKey = bare;
+			var low = 0;
+			var high = ordered.Length - 1;
+			var first = -1;
+			while ( low <= high )
+			{
+				var middle = (low + high) >> 1;
+				if ( StringComparer.OrdinalIgnoreCase.Compare( ordered[middle].ResourceName, key ) < 0 )
+				{
+					low = middle + 1;
+				}
+				else
+				{
+					first = middle;
+					high = middle - 1;
+				}
+			}
+
+			if ( first >= 0 )
+			{
+				for ( var index = first; index < ordered.Length; index++ )
+				{
+					var name = ordered[index].ResourceName;
+					if ( !name.StartsWith( key, StringComparison.OrdinalIgnoreCase ) ) break;
+					if ( name.Length <= key.Length || name[key.Length] != '_' ) continue;
+					if ( bestKey is not null && name.Length >= bestKey.Length ) continue;
+					best = ordered[index];
+					bestKey = name;
+				}
+			}
 		}
 
 		if ( best is not null )
@@ -380,6 +550,30 @@ public partial class Titanfall2Mount : BaseGameMount
 	/// <summary>Maps a <c>trigger_soundscape.play_event</c> soundscape name to its looping sound.</summary>
 	internal int MilesSoundCount => _milesSoundAssets.Count;
 	internal int WavSoundCount => _soundFileSources.Count;
+
+	/// <summary>Where the time of the sound files loaded through this mount went.</summary>
+	internal readonly record struct SoundLoadStatistics(
+		int Sounds,
+		long LookupTicks,
+		long ReadTicks,
+		long DecodeTicks,
+		long CreateTicks,
+		long PcmBytes )
+	{
+		public double LookupMilliseconds => TicksToMilliseconds( LookupTicks );
+		public double ReadMilliseconds => TicksToMilliseconds( ReadTicks );
+		public double DecodeMilliseconds => TicksToMilliseconds( DecodeTicks );
+		public double CreateMilliseconds => TicksToMilliseconds( CreateTicks );
+		static double TicksToMilliseconds( long ticks ) => ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+	}
+
+	internal SoundLoadStatistics SoundLoads => new(
+		_soundLoadCount,
+		_soundLookupTicks,
+		_soundReadTicks,
+		_soundDecodeTicks,
+		_soundCreateTicks,
+		_soundPcmBytes );
 
 	internal bool TryGetSoundscapeLoop( string soundscapeName, out string soundName )
 	{
@@ -467,8 +661,11 @@ public partial class Titanfall2Mount : BaseGameMount
 		}
 
 		_milesArchive = archive;
+		// Sorted table for TryFindMilesAsset's binary search. Only references are stored;
+		// the record names are the strings the asset dictionary already keeps.
+		_milesSoundOrdered = archive.Assets.ToArray();
 		var sounds = 0;
-		foreach ( var asset in archive.Assets )
+		foreach ( var asset in _milesSoundOrdered )
 		{
 			_milesSoundAssets[asset.ResourceName] = asset;
 			if ( !registered.Add( asset.ResourceName + ".vsnd" ) ) continue;
@@ -481,16 +678,6 @@ public partial class Titanfall2Mount : BaseGameMount
 	void MountVpkResources( MountContext context, HashSet<string> registered )
 	{
 		var vpkDirectory = Path.Combine( _root, "vpk" );
-		_legacyMaterialSources.Clear();
-		_legacyTextureSources.Clear();
-		lock ( _materialMetadataLock )
-		{
-			_legacyMaterialDefinitions.Clear();
-			_legacyMaterialErrors.Clear();
-		}
-		_legacyAnimatedTexturePaths.Clear();
-		_modelSources.Clear();
-		ResetParticleCatalog();
 		var archives = new List<VpkArchive>();
 		foreach ( var directoryFile in System.IO.Directory.EnumerateFiles( vpkDirectory, "*_dir.vpk", SearchOption.TopDirectoryOnly )
 			.OrderBy( static path => string.Equals( Path.GetFileName( path ), "englishclient_mp_common.bsp.pak000_dir.vpk", StringComparison.OrdinalIgnoreCase ) ? 0 : 1 )
@@ -645,7 +832,10 @@ public partial class Titanfall2Mount : BaseGameMount
 							context.Add( ResourceType.Model, allLodsPath, new ModelLoader( source, staticInstance: true ) );
 						break;
 					case ".wav":
-						_soundFileSources[NormalizeSoundKey( entry.Path ) + ".wav"] = source;
+						// First registration wins, like every other source table. Retail ships no
+						// loose .wav entries at all (every sound lives in the Miles bank), so this
+						// can only matter for repacks and for a mod layer registering ahead of us.
+						_soundFileSources.TryAdd( NormalizeSoundKey( entry.Path ) + ".wav", source );
 						context.Add( ResourceType.Sound, entry.Path, new SoundLoader( source ) );
 						break;
 				}
@@ -700,24 +890,6 @@ public partial class Titanfall2Mount : BaseGameMount
 			}
 		}
 
-		_texturePaths.Clear();
-		_shaderSetNames.Clear();
-		_shaderSetSources.Clear();
-		_shaderSources.Clear();
-		_materialPaths.Clear();
-		_materialSources.Clear();
-		lock ( _materialMetadataLock ) _materialMetadata.Clear();
-		lock ( _materialDescriptorLock )
-		{
-			_materialDescriptors.Clear();
-			_textureGuidDependencies.Clear();
-			_texturePathDependencies.Clear();
-		}
-		lock ( _shaderReflectionLock )
-		{
-			_shaderReflections.Clear();
-			_shaderReflectionErrors.Clear();
-		}
 		foreach ( var archive in archives )
 		{
 			foreach ( var asset in archive.Assets )

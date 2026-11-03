@@ -107,6 +107,9 @@ public static partial class Titanfall2BspReader
 		public byte[] SkyB { get; init; } = Array.Empty<byte>();
 		public byte[] RealTimeA { get; init; } = Array.Empty<byte>();
 		public byte[] RealTimeB { get; init; } = Array.Empty<byte>();
+		// Never populated: no shader samples this page. The property only remains because the
+		// on-disk parse cache payload (Titanfall2MapCache) serializes it and that format must not
+		// change without a PayloadVersion bump.
 		public byte[] RealTimeC { get; init; } = Array.Empty<byte>();
 	}
 
@@ -433,10 +436,15 @@ public static partial class Titanfall2BspReader
 			? ParseWorldCollision( stream, headers, overrideLumps, playerOnly: !allCollisionContents, includeParts: allCollisionContents )
 			: new BspWorldCollision();
 		var staticProps = ParseStaticProps( stream, headers, overrideLumps );
+		// Probe IDs also need WORLD_LIGHTS when lightmap pages themselves are not requested.
+		var worldLights = parseLightmaps || parseStaticPropLightProbes
+			? Titanfall2WorldLight.Read( ReadLumpBytes( stream, headers, overrideLumps, WorldLightsLumpId ), headers[WorldLightsLumpId].Version )
+			: Array.Empty<Titanfall2WorldLight>();
 		Titanfall2LightProbeLookup lightProbes = null;
 		if ( parseStaticPropLightProbes )
 		{
 			var probeBytes = ReadLumpBytes( stream, headers, overrideLumps, LightProbesLumpId );
+			probeBytes = Titanfall2LightProbe.RemapLocalLightIndices( probeBytes, worldLights );
 			ApplyStaticPropLightProbes(
 				staticProps,
 				probeBytes,
@@ -447,9 +455,6 @@ public static partial class Titanfall2BspReader
 		}
 		// Lightmap pages are ~73 MB on mp_angel_city and are copied again by ReadLightmaps;
 		// skip the whole read when the runtime lightmap path is disabled.
-		var worldLights = parseLightmaps
-			? Titanfall2WorldLight.Read( ReadLumpBytes( stream, headers, overrideLumps, WorldLightsLumpId ), headers[WorldLightsLumpId].Version )
-			: Array.Empty<Titanfall2WorldLight>();
 		var lightmaps = parseLightmaps
 			? ReadLightmaps(
 				ReadLumpBytes( stream, headers, overrideLumps, LightmapHeadersLumpId ),
@@ -532,6 +537,10 @@ public static partial class Titanfall2BspReader
 		var vertexLitBump = ReadVertexRefs( ReadLumpBytes( stream, headers, overrideLumps, VertexLitBumpLumpId ), 44, true );
 		var vertexUnlitTs = ReadVertexRefs( ReadLumpBytes( stream, headers, overrideLumps, VertexUnlitTsLumpId ), 28, false );
 
+		// MESH_INDICES stores 16-bit indices, so one slot table serves every mesh this parse
+		// builds; it is reused instead of a per-mesh dictionary.
+		var vertexDeduper = new WorldVertexDeduper();
+
 		return BuildModel;
 
 		BspWorld BuildModel( int modelIndex )
@@ -567,7 +576,8 @@ public static partial class Titanfall2BspReader
 					vertexUnlit,
 					vertexLitFlat,
 					vertexLitBump,
-					vertexUnlitTs );
+					vertexUnlitTs,
+					vertexDeduper );
 				if ( modelIndex > 0 && meshes[sourceMeshIndex].NumTriangles > 0
 					&& (worldMesh is null || worldMesh.Indices.Length != meshes[sourceMeshIndex].NumTriangles * 3) )
 					throw new InvalidDataException( $"Incomplete BSP inline model {modelIndex} mesh {sourceMeshIndex}." );
@@ -812,7 +822,8 @@ public static partial class Titanfall2BspReader
 		IReadOnlyList<VertexRef> vertexUnlit,
 		IReadOnlyList<VertexRef> vertexLitFlat,
 		IReadOnlyList<VertexRef> vertexLitBump,
-		IReadOnlyList<VertexRef> vertexUnlitTs )
+		IReadOnlyList<VertexRef> vertexUnlitTs,
+		WorldVertexDeduper vertexDeduper )
 	{
 		if ( mesh.MaterialSort < 0 || mesh.MaterialSort >= materialSorts.Count )
 			return null;
@@ -830,6 +841,10 @@ public static partial class Titanfall2BspReader
 
 		var vertices = new List<WorldVertex>( endIndex - startIndex );
 		var indices = new List<int>( endIndex - startIndex );
+		// Reuse the source vertices instead of duplicating three of them per triangle. Every
+		// consumer still reads the same triangle corners in the same order - only the vertex
+		// table becomes a source-vertex table rather than a triangle soup.
+		vertexDeduper.BeginMesh();
 		for ( int index = startIndex; index + 2 < endIndex; index += 3 )
 		{
 			if ( !TryResolveWorldVertex( mesh.Flags, materialSort.VertexOffset + meshIndices[index], positions, normals, vertexUnlit, vertexLitFlat, vertexLitBump, vertexUnlitTs, out var vertex0 ) ||
@@ -839,13 +854,9 @@ public static partial class Titanfall2BspReader
 				continue;
 			}
 
-			int baseIndex = vertices.Count;
-			vertices.Add( vertex0 );
-			vertices.Add( vertex1 );
-			vertices.Add( vertex2 );
-			indices.Add( baseIndex );
-			indices.Add( baseIndex + 1 );
-			indices.Add( baseIndex + 2 );
+			indices.Add( vertexDeduper.Resolve( meshIndices[index], vertices, vertex0 ) );
+			indices.Add( vertexDeduper.Resolve( meshIndices[index + 1], vertices, vertex1 ) );
+			indices.Add( vertexDeduper.Resolve( meshIndices[index + 2], vertices, vertex2 ) );
 		}
 
 		if ( vertices.Count == 0 )
@@ -860,6 +871,42 @@ public static partial class Titanfall2BspReader
 			Vertices = vertices.ToArray(),
 			Indices = indices.ToArray()
 		};
+	}
+
+	/// <summary>
+	/// Deduplicates the vertices of the mesh <see cref="BuildWorldMesh"/> is currently building.
+	/// MESH_INDICES is a 16-bit table relative to the material sort's VertexOffset, so the raw
+	/// index identifies one source vertex; a 65,536-entry slot table replaces a per-corner
+	/// dictionary lookup. Only the touched entries are cleared between meshes.
+	/// </summary>
+	private sealed class WorldVertexDeduper
+	{
+		readonly int[] _slots = new int[ushort.MaxValue + 1];
+		readonly List<int> _touched = new();
+
+		/// <summary>Clears the slots the previous mesh used.</summary>
+		public void BeginMesh()
+		{
+			foreach ( var raw in _touched )
+				_slots[raw] = 0;
+
+			_touched.Clear();
+		}
+
+		/// <summary>Returns the compact index of <paramref name="raw"/>, appending the vertex on first use.</summary>
+		public int Resolve( int raw, List<WorldVertex> vertices, WorldVertex vertex )
+		{
+			var stored = _slots[raw];
+			if ( stored != 0 )
+				return stored - 1;
+
+			var slot = vertices.Count;
+			vertices.Add( vertex );
+			// Slot 0 is stored as 1 so an untouched entry reads back as "not seen".
+			_slots[raw] = slot + 1;
+			_touched.Add( raw );
+			return slot;
+		}
 	}
 
 	private static string ResolveMaterialName( MaterialSortEntry materialSort, IReadOnlyList<TextureDataEntry> textureData, IReadOnlyList<string> textureNames )
@@ -1342,7 +1389,11 @@ public static partial class Titanfall2BspReader
 			var skyB = ReadImage( skyBytes, ref skyOffset, fullImageBytes );
 			var realTimeA = ReadImage( realTimeBytes, ref realTimeOffset, fullImageBytes );
 			var realTimeB = ReadImage( realTimeBytes, ref realTimeOffset, fullImageBytes );
-			var realTimeC = ReadImage( realTimeBytes, ref realTimeOffset, halfImageBytes );
+			// RealTimeC is never sampled by a shader, so its bytes are not copied (one page-sized
+			// allocation and BlockCopy less per page). The cursor must still advance exactly like
+			// ReadImage would - including leaving it untouched for a short lump - or the next page
+			// would read shifted data.
+			SkipImage( realTimeBytes, ref realTimeOffset, halfImageBytes );
 			pages.Add( new BspLightmapPage
 			{
 				Type = type,
@@ -1351,8 +1402,7 @@ public static partial class Titanfall2BspReader
 				SkyA = skyA,
 				SkyB = skyB,
 				RealTimeA = realTimeA,
-				RealTimeB = realTimeB,
-				RealTimeC = realTimeC
+				RealTimeB = realTimeB
 			} );
 		}
 
@@ -1369,6 +1419,15 @@ public static partial class Titanfall2BspReader
 			Buffer.BlockCopy( source, offset, image, 0, length );
 			offset += length;
 			return image;
+		}
+
+		// Same bounds check as ReadImage, but without allocating or copying: used for channels that
+		// are decoded past but never consumed.
+		static void SkipImage( byte[] source, ref int offset, int length )
+		{
+			if ( length <= 0 || offset < 0 || (long)offset + length > source.Length )
+				return;
+			offset += length;
 		}
 	}
 

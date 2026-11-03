@@ -62,8 +62,13 @@ static class RpakTextureDecoder
 			var uploaded = System.Threading.Interlocked.Add( ref _uploadedBytes, decoded.Data.LongLength );
 			if ( created % 512 == 0 )
 			{
+				// The STARPAK counters are cumulative: the delta between two of these lines
+				// is what one batch of 512 textures cost in reads, batches and opens.
+				var starpak = StarPakIndex.GetStatistics();
 				Log.Info( $"Titanfall 2 resident textures: {created} created, {uploaded / (1024.0 * 1024.0):0.0} MB uploaded, "
-					+ $"maximum dimension {Titanfall2StreamingSettings.TextureMaxDimension}." );
+					+ $"maximum dimension {Titanfall2StreamingSettings.TextureMaxDimension}; STARPAK {starpak.RangeReads} range reads "
+					+ $"in {starpak.Batches} batched serves, {starpak.MergedRanges} coalesced, {starpak.FileOpens} opens "
+					+ $"({starpak.OpenFiles} files held), {starpak.BytesRead / (1024.0 * 1024.0):0.0} MB read, {starpak.Failures} failures." );
 			}
 			return true;
 		}

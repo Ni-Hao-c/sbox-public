@@ -114,6 +114,10 @@ engine/TestResults/
 # Local test projects, scripts and logs
 /.tmp/
 
+# Local scratch output from live-render and probe runs (screenshots, logs, json dumps, throwaway projects)
+/artifacts/
+/engine/Tests/**/*DumpTemp.cs
+
 # Local runtime config and baked editor cache (machine-specific, never commit)
 /game/core/cfg/machine_convars.json
 /game/core/cfg/user_keys_*.json

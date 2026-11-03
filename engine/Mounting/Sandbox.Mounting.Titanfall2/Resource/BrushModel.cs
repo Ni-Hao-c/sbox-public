@@ -9,6 +9,8 @@ sealed class Titanfall2BrushModelSource( ITitanfall2AssetSource source, ITitanfa
 	readonly Dictionary<WorldMaterialKey, Material> _materials = new();
 	Color _skyColor;
 	bool _disposed;
+	// Per-page coverage masks for the lightmap dilate + mip path (G6b); null when mips are off.
+	bool[][] _lightmapCoverage;
 
 	internal static int ReadCount( ITitanfall2AssetSource source )
 	{
@@ -39,7 +41,18 @@ sealed class Titanfall2BrushModelSource( ITitanfall2AssetSource source, ITitanfa
 		var entities = environmentSource?.TryReadAllBytes( out var entityBytes, out _ ) == true
 			? Titanfall2EntityText.Parse( entityBytes ) : parsed.Entities;
 		_skyColor = MapLoader.ReadBakedSkyColor( new Titanfall2BspReader.ParsedBsp { WorldLights = parsed.WorldLights, World = parsed.WorldBounds }, entities );
+		// Inline models share the map's lightmap pages, so they get the same dilate + mip treatment.
+		// Their geometry is tiny (a few hundred triangles per map), so the mask build is cheap.
+		if ( Titanfall2StreamingSettings.LightmapMips )
+			_lightmapCoverage = MapLoader.BuildLightmapCoverage(
+				parsed.Models.SelectMany( static model => model.Geometry.Meshes ), parsed.Lightmaps.Pages, out _ );
 		_parsed = parsed;
+	}
+
+	bool[] LightmapCoverage( int pageIndex )
+	{
+		var coverage = _lightmapCoverage;
+		return coverage is not null && pageIndex >= 0 && pageIndex < coverage.Length ? coverage[pageIndex] : null;
 	}
 
 	/// <summary>
@@ -153,7 +166,8 @@ sealed class Titanfall2BrushModelSource( ITitanfall2AssetSource source, ITitanfa
 			{
 				if ( !_pages.TryGetValue( key.LightmapPage, out var runtime ) )
 				{
-					runtime = MapLoader.CreateLightmapPage( page, _parsed.Lightmaps.RealTimeLightPages, _parsed.WorldLights );
+					runtime = MapLoader.CreateLightmapPage( page, _parsed.Lightmaps.RealTimeLightPages, _parsed.WorldLights,
+						LightmapCoverage( key.LightmapPage ), $"{source.Description}/brush" );
 					_pages.Add( key.LightmapPage, runtime );
 				}
 				material = MapLoader.CreateLightmappedMaterial( $"{source.Description}/brush/lightmap/{_materials.Count}", material, runtime, _skyColor );

@@ -290,6 +290,9 @@ partial class MapLoader
 		var failed = 0;
 		var animated = 0;
 		var colliders = 0;
+		// Collected so the first animation update can run during loading instead of on the first
+		// frame these props are visible (see WarmSkinnedAnimationFirstUpdate).
+		var skinnedRenderers = new List<SkinnedModelRenderer>();
 		var propsByGuid = new Dictionary<string, GameObject>( StringComparer.OrdinalIgnoreCase );
 		foreach ( var values in entities )
 		{
@@ -344,6 +347,7 @@ partial class MapLoader
 					renderer.PlaybackRate = 1f;
 				}
 				animated++;
+				skinnedRenderers.Add( renderer );
 			}
 			else if ( !Application.IsDedicatedServer )
 			{
@@ -398,10 +402,64 @@ partial class MapLoader
 		}
 
 		var rotators = CreateRotatingMovers( root, entities, propsByGuid );
+		// Opportunistic only: the scene animation pass creates each SceneModel lazily, so at load
+		// time there is usually nothing to warm yet (the log line stays quiet when it warmed none).
+		var (warmedRenderers, warmupMilliseconds) = WarmSkinnedAnimationFirstUpdate( skinnedRenderers );
+		var warmup = warmedRenderers > 0
+			? $", {warmedRenderers} animation warmups in {warmupMilliseconds:0.00} ms"
+			: string.Empty;
 		Log.Info( $"Titanfall 2 scripted dynamic props created: {created} models, "
 			+ $"{animated} skinned, {rotators} rotating movers, {colliders} colliders, "
-			+ $"{probed} light probes, {failed} failures ({Path})." );
+			+ $"{probed} light probes, {failed} failures{warmup} ({Path})." );
 		return created;
+	}
+
+	/// <summary>
+	/// The scene animation pass first calls <c>SkinnedModelRenderer.AnimationUpdate</c> on the frame a
+	/// renderer becomes visible, so several animated props coming into view at once each pay their
+	/// one-time bone sampling and bone-buffer upload inside a single game frame. This runs that first
+	/// update during loading instead, which only moves the cost: playback is paused for the warmup
+	/// call (PlaybackRate is restored immediately), so the sequence keeps its position and the first
+	/// real update samples exactly the same pose it would have.
+	/// <para>
+	/// The engine method is internal, so it is resolved by reflection once and skipped silently when
+	/// the name or signature changes - a warmup is never allowed to break map loading.
+	/// </para>
+	/// </summary>
+	static (int Renderers, double Milliseconds) WarmSkinnedAnimationFirstUpdate( List<SkinnedModelRenderer> renderers )
+	{
+		if ( renderers.Count == 0 ) return (0, 0);
+		var update = typeof( SkinnedModelRenderer ).GetMethod( "AnimationUpdate",
+			System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic );
+		if ( update is null ) return (0, 0);
+
+		var probe = System.Diagnostics.Stopwatch.StartNew();
+		var warmed = 0;
+		// One reusable boxed argument array; the parameter is "previewBindPose" and false is the
+		// normal (non editor preview) path.
+		var arguments = new object[] { false };
+		foreach ( var renderer in renderers )
+		{
+			if ( !renderer.IsValid() || !renderer.SceneModel.IsValid() ) continue;
+			var playbackRate = renderer.PlaybackRate;
+			try
+			{
+				renderer.PlaybackRate = 0f;
+				update.Invoke( renderer, arguments );
+				warmed++;
+			}
+			catch ( Exception exception )
+			{
+				Log.Warning( $"Titanfall 2 animation warmup failed: {exception.Message}" );
+				break;
+			}
+			finally
+			{
+				if ( renderer.IsValid() ) renderer.PlaybackRate = playbackRate;
+			}
+		}
+		probe.Stop();
+		return (warmed, probe.Elapsed.TotalMilliseconds);
 	}
 
 	static string ResolveDynamicAnimation(

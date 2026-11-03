@@ -53,7 +53,7 @@ partial class MapLoader
 			}
 			if ( states.Count > 0 ) gameObject.AddComponent<Titanfall2EnvironmentController>().Configure( definitions, states.ToArray() );
 		}
-		light.ShadowCascadeCount = Titanfall2StreamingSettings.MapShadows ? 2 : 1;
+		light.ShadowCascadeCount = Titanfall2StreamingSettings.ShadowCascadeCount;
 		light.ContactShadows = Titanfall2StreamingSettings.NativeContactShadows;
 
 		var fogEntities = ReferenceEquals( entities, parsed.Entities ) ? entities.ToArray()

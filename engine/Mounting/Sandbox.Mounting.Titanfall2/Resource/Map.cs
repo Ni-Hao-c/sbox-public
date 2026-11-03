@@ -90,9 +90,15 @@ partial class MapLoader(
 		// only built when that collision is missing or incomplete.
 		var server = Application.IsDedicatedServer;
 		var lightmaps = !server && Titanfall2StreamingSettings.UseBspLightmaps;
+		// The parse result is derived data keyed on the mount's content fingerprint and this
+		// source, so a later build of the same map can skip the read, the decompress and the
+		// decode. The read starts here so it runs on a worker while this thread does the
+		// bookkeeping below; a missing entry costs one file probe.
+		var parseIdentity = Titanfall2MapCache.ParseIdentity( Host, _source, lightmaps );
+		var cachedParse = Titanfall2MapCache.BeginRead( parseIdentity );
 		// The full and the pure-world scene of one map parse identical data, so they share a
 		// single reference counted parse; the last of them to finish building frees it.
-		using var import = Host.BeginMapImport( $"{_source.CacheIdentity}|lightmaps:{lightmaps}", ReadBsp );
+		using var import = Host.BeginMapImport( $"{_source.CacheIdentity}|lightmaps:{lightmaps}", () => ReadBsp( cachedParse ) );
 		if ( import.Error is not null )
 		{
 			Log.Warning( $"Failed to read Titanfall 2 BSP '{Path}': {import.Error}" );
@@ -100,13 +106,27 @@ partial class MapLoader(
 		}
 		var parsed = import.Parsed;
 
-		(Titanfall2BspReader.ParsedBsp, string) ReadBsp()
+		(Titanfall2BspReader.ParsedBsp, string) ReadBsp( Task<Titanfall2MapCache.MapParseCacheRead> pendingParse )
 		{
+			// A cached parse is plain managed data, so it takes part in the shared import and its
+			// lease counting (MapImport.cs) exactly like a freshly decoded one. Anything the cache
+			// cannot vouch for is reported as a miss and the map is decoded normally.
+			if ( Titanfall2MapCache.TryTake( pendingParse, out var cached ) )
+			{
+				Log.Info( $"Titanfall 2 map parse cache: hit, {cached.FileBytes / (1024.0 * 1024.0):0.0} MB payload "
+					+ $"decoded in {cached.Seconds:0.00}s ({Path})." );
+				return (cached.Parsed, null);
+			}
+
+			Log.Info( $"Titanfall 2 map parse cache: miss ({cached.MissReason}) ({Path})." );
 			if ( !_source.TryReadAllBytes( out var bytes, out var readError ) ) return (null, readError);
 			if ( !Titanfall2BspReader.TryRead( bytes, System.IO.Path.GetFileNameWithoutExtension( _source.Description ), ReadCollisionLumpOverrides(),
 				parseWorldCollision: true, parseLightmaps: lightmaps,
 				parseStaticPropLightProbes: lightmaps, out var result, out var parseError, allCollisionContents: true ) )
 				return (null, $"parse failed: {parseError}");
+			// Written by a worker from the parse this build already owns: a failed or skipped write
+			// never changes what this load uses.
+			Titanfall2MapCache.BeginWrite( parseIdentity, result, _source, Path, Log );
 			return (result, null);
 		}
 		Log.Info( $"Titanfall 2 BSP read/parse {timer.Elapsed.TotalSeconds:0.00}s ({Path})." );
@@ -163,8 +183,31 @@ partial class MapLoader(
 		{
 			// PerfKit owns the wiring (child object, IsStatic, AggregateRenderer) so each mount
 			// does not repeat it.
-			MountedAggregateBuilder.Attach( world, $"world_aggregate_{aggregateIndex}", aggregate, Titanfall2StreamingSettings.MapShadows );
+			MountedAggregateBuilder.Attach( world, $"world_aggregate_{aggregateIndex}", aggregate,
+				worldBuild.WorldAggregateCastShadows is { } casters && aggregateIndex < casters.Count
+					? casters[aggregateIndex]
+					: Titanfall2StreamingSettings.MapShadows );
 			aggregateIndex++;
+		}
+		// Depth-only world shadow casters: same triangles as the forward aggregates, but drawn from
+		// one mesh per spatial cell with a single shared material and never in the camera views.
+		foreach ( var chunk in worldBuild.WorldShadowChunks ?? [] )
+		{
+			var shadow = new GameObject( world, true, $"titanfall2_world_shadow_{chunk.Cell}" );
+			shadow.IsStatic = true;
+			var shadowRenderer = shadow.AddComponent<ModelRenderer>();
+			shadowRenderer.Model = chunk.Model;
+			shadowRenderer.RenderType = ModelRenderer.ShadowRenderType.ShadowsOnly;
+		}
+		if ( !server && Titanfall2StreamingSettings.MapShadows )
+		{
+			var shadowChunkCount = worldBuild.WorldShadowChunks?.Count ?? 0;
+			var directCasterCount = worldBuild.WorldAggregateCastShadows is { } casterFlags
+				? casterFlags.Count( static cast => cast )
+				: worldBuild.WorldAggregates.Count;
+			Log.Info( shadowChunkCount > 0
+				? $"Titanfall 2 world shadow source: shadow-only geometry ({shadowChunkCount} chunks, {directCasterCount} alpha-tested aggregates still casting) ({Path})."
+				: $"Titanfall 2 world shadow source: {directCasterCount} world aggregate models cast directly ({Path})." );
 		}
 		foreach ( var chunk in worldBuild.DecalChunks )
 		{

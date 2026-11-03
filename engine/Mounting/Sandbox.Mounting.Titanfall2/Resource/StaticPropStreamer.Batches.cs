@@ -74,6 +74,35 @@ public sealed partial class Titanfall2StaticPropStreamer
 				}
 			}
 		}
+
+		// The gate needs one visibility sweep from the current anchor before the first submitted
+		// frame. Forcing it only when gating is on keeps the disabled configuration (prop shadows
+		// off, or distance 0) exactly on its previous timing: the sweep is otherwise driven by the
+		// camera refresh, and its own per-frame budget still bounds the work.
+		if ( _shadowGateActive )
+		{
+			_runtimePvsUpdatePending = true;
+			RebuildRuntimeClusterQueue();
+		}
+
+		LogBatchShadowConfiguration();
+	}
+
+	/// <summary>
+	/// Reports the effective shadow and LOD distances once, when the batches are built. Both
+	/// switches change what the frame submits, so an A/B run has to read the effective values from
+	/// the log rather than assume the environment variable took effect (a value that fails to
+	/// parse falls back to the default silently). The sweep-time gated counts are logged by
+	/// <see cref="LogShadowGateSweep"/> when a sweep actually crosses the distance.
+	/// </summary>
+	void LogBatchShadowConfiguration()
+	{
+		var shadowGate = _shadowGateActive
+			? $"distance gate {MathF.Sqrt( _shadowGateDistanceSquared ):0} units (restore inside {MathF.Sqrt( _shadowGateRestoreDistanceSquared ):0})"
+			: "distance gate disabled (SBOX_TITANFALL2_PROP_SHADOWS off, or SBOX_TITANFALL2_PROP_SHADOW_DISTANCE 0)";
+		Log.Info( $"Titanfall 2 prop shadows: {shadowGate} on {_batchCount} batches; LOD switch distances "
+			+ $"{ModelLoader.GetLodSwitchDistance( 1 ):0}/{ModelLoader.GetLodSwitchDistance( 2 ):0}/{ModelLoader.GetLodSwitchDistance( 3 ):0} "
+			+ $"(SBOX_TITANFALL2_PROP_LOD_SCALE {Titanfall2StreamingSettings.PropLodDistanceScale:0.00}) ({MapPath})." );
 	}
 
 	static bool ShouldCastShadows( float radius )

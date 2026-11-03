@@ -87,9 +87,32 @@ static class Titanfall2ProcessedCache
 		return hit;
 	}
 
-	internal static void Write( string kind, string identity, Action<BinaryWriter> write )
+	/// <summary>
+	/// Publishes the finished temporary file over the cache entry. The rename can lose a race with a
+	/// scanner that holds the destination open (Windows indexer, antivirus) even though nothing in the
+	/// mount does, so one retry keeps a transient sharing violation from silently dropping a cache
+	/// entry - a dropped entry is not corruption, it just costs the next load a full re-import.
+	/// </summary>
+	static void PublishAtomically( string temporary, string path )
 	{
-		if ( !Titanfall2StreamingSettings.ProcessedCache ) return;
+		try
+		{
+			File.Move( temporary, path, overwrite: true );
+		}
+		catch ( IOException )
+		{
+			Thread.Sleep( 10 );
+			File.Move( temporary, path, overwrite: true );
+		}
+	}
+
+	/// <summary>
+	/// Compresses one derived payload and publishes it atomically. Returns false when caching is
+	/// disabled or the write failed; callers must keep using the freshly computed result either way.
+	/// </summary>
+	internal static bool Write( string kind, string identity, Action<BinaryWriter> write )
+	{
+		if ( !Titanfall2StreamingSettings.ProcessedCache ) return false;
 		string temporary = null;
 		try
 		{
@@ -104,14 +127,16 @@ static class Titanfall2ProcessedCache
 				using var writer = new BinaryWriter( compressed, Encoding.UTF8, leaveOpen: true );
 				write( writer );
 			}
-			File.Move( temporary, path, overwrite: true );
+			PublishAtomically( temporary, path );
 			temporary = null;
 			if ( Interlocked.Increment( ref _writes ) % 64 == 1 || kind == "map" ) Trim();
+			return true;
 		}
 		catch ( Exception exception )
 		{
 			if ( Interlocked.Increment( ref _writeFailures ) <= 2 )
 				Titanfall2Log.Warning( $"Titanfall 2 derived cache unavailable; using original importer: {exception.Message}" );
+			return false;
 		}
 		finally
 		{
@@ -169,17 +194,21 @@ static class Titanfall2ProcessedCache
 			if ( count < 0 || count > maximum ) throw new InvalidDataException( "Cache count outside supported range." );
 			return count;
 		}
-		internal T[] Array<T>( int maximum = 16_000_000 ) where T : unmanaged
+		internal T[] Array<T>( int maximum = 16_000_000 ) where T : unmanaged => Blittable<T>( maximum );
+		// Exact managed element size: Marshal.SizeOf would over-count bool fields, and the budget
+		// below has to bound the bytes the next allocation actually asks for.
+		internal T[] Blittable<T>( int maximum ) where T : unmanaged
 		{
 			var count = Count( maximum );
-			var bytes = (long)count * Marshal.SizeOf<T>();
+			var bytes = (long)count * System.Runtime.CompilerServices.Unsafe.SizeOf<T>();
 			_remaining -= bytes;
 			if ( _remaining < 0 ) throw new InvalidDataException( "Cache allocation budget exceeded." );
 			var result = new T[count];
 			BaseStream.ReadExactly( MemoryMarshal.AsBytes( result.AsSpan() ) );
 			return result;
 		}
-		internal string Text() => Encoding.UTF8.GetString( Array<byte>( 16384 ) );
+		internal string Text() => Text( 16384 );
+		internal string Text( int maximum ) => Encoding.UTF8.GetString( Blittable<byte>( maximum ) );
 		internal T Json<T>() => JsonSerializer.Deserialize<T>( Array<byte>( 64 * 1024 * 1024 ), JsonOptions )
 			?? throw new InvalidDataException( "Missing cache metadata." );
 	}

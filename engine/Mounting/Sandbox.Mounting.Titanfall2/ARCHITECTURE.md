@@ -196,6 +196,7 @@ solid 类型不为 0 时，有效 contents 由 `Titanfall2CollisionSource.Static
 - 光照贴图的 t35 通道每个像素存 4 个 6 位光源索引和一个 8 位页号，索引 63 表示没有光源。t36 存储可双线性过滤的遮挡值。
 - 页表中的索引指向 `flags & 8` 的光源组成的紧凑列表，不是 `WORLD_LIGHTS` 的原始下标（[Formats/Bsp/Titanfall2WorldLight.cs](Formats/Bsp/Titanfall2WorldLight.cs)）。
 - 地形按像素选择太阳遮挡通道。静态道具从光照探针获取太阳可见性。
+- 探针中的灯光编号不计入 `SkyAmbientType` 记录。BSP 解析时先把共享探针 lump 中的编号映射到完整 `WORLD_LIGHTS` 下标，再供静态道具和动态实体采样；这与实时光照贴图页表的紧凑列表是两套映射。无效编号保持为 `0xFFFF`，不猜测附近灯光。
 - 每个着色点最多计算 4 盏局部光源。光源数据通过 `Titanfall2LocalLightController` 上传为 GPU 缓冲区，不创建引擎的 `PointLight`。
 
 ### 静态道具光照探针
@@ -213,6 +214,7 @@ solid 类型不为 0 时，有效 contents 由 `Titanfall2CollisionSource.Static
 
 ### 雾
 
+- 导入的高度雾常量通过场景渲染属性绑定，并设置 `ImportedHeightFogBound`。`Titanfall2HeightFog` 禁用时写入全零雾参数，标记仍表示缓冲区已绑定。引擎的 `SpriteBatchSceneObject` 在场景没有该标记时绑定 5 个全零 `float4`，确保菜单和普通场景的 sprite shader 也始终有可读的雾常量缓冲区。
 - `fog_volume` 的 `*N` 模型由 CM 数据重建为带优先级的凸体并集（[Formats/Bsp/Titanfall2BspFogVolumes.cs](Formats/Bsp/Titanfall2BspFogVolumes.cs)）。
 - 默认雾控制器取第一个 `env_fog_controller`，存在 `master` 控制器时取最后一个 `master`。
 - 雾体积按优先级从高到低检查，`fogenable=0` 的体积清除雾。
@@ -334,6 +336,8 @@ solid 类型不为 0 时，有效 contents 由 `Titanfall2CollisionSource.Static
   - LOD 重排和可见子集使用动态缓冲区。
   - 批次销毁时释放它的 3 个 GPU 缓冲区。
 - 带光照探针的批次（`Titanfall2ProbeInstanceBatch`）在深度预通道中跳过探针绑定（`SkipDepthProbeBindings`），前向和阴影通道绑定全部数据。
+- 模型太阳直射光在实时级联阴影覆盖范围内使用表面逐像素遮挡，不再重复乘上单个烘焙探针的太阳可见度。
+  各级联球的边缘平滑回退到烘焙可见度；未覆盖或未启用实时阴影时仍使用探针。天空光方向、间接光和局部灯光权重保持各自含义。
 - 场景中序列化的道具数据带魔数和版本号，读取时检查版本范围，并按实际字节数限制解码出的数量。
 
 ## 10. 粒子
@@ -393,9 +397,28 @@ solid 类型不为 0 时，有效 contents 由 `Titanfall2CollisionSource.Static
 | 碰撞流式 | 每帧最多创建或释放 2 个碰撞体、1 ms；1536 单位内启用，2560 单位外释放 |
 | 距离保留带 | 道具进入绘制距离后，再多保留 512 单位 |
 | 大型道具 | 半径不小于 256 的道具不做距离剔除 |
-| 阴影 | 开启道具阴影时，半径小于 48 的道具不投射阴影 |
+| 阴影 | 开启道具阴影时，半径小于 48 的道具不投射阴影；批次整体离开 `SBOX_TITANFALL2_PROP_SHADOW_DISTANCE`（默认 2048，回归 1843）后整批退出 shadow pass |
 
 预加载阶段没有创建完的道具碰撞，留给运行时的碰撞流式处理。纯世界场景要求全部常驻碰撞都创建完成后才发布就绪标签。
+
+### 帧率预算
+
+每帧的成本主要不是这些预算，而是**一次性创建、之后每帧被渲染线程提交的对象数**：`mp_angel_city` 实测 2,840 个渲染对象、3,044 draw、3.2M 三角形，其中 2,717 个是静态道具实例批次。C# 每帧回调（`Titanfall2StaticPropStreamer` 的三条流式通道合计 5.5 ms 预算）只占 `Update` 的 1.5 ms 量级。
+
+因此调帧率改的是"提交多少"：`SBOX_TITANFALL2_FPS_PRESET` 一档设好下面几项，单项变量显式设置时优先于预设。
+
+| 预设 | 说明 |
+|------|------|
+| `0` / `60` | 默认档：阴影距离 0（门控关闭 = 整批投影，与旧行为一致）、LOD 缩放 1、cell 2048、批次簇 4 |
+| `120` | 阴影距离 1024、LOD 缩放 0.5、cell 4096、批次簇 8、绘制距离 6144，并关掉接触阴影与 Godray |
+
+单项旋钮：`PROP_SHADOW_DISTANCE`（道具批次投影距离，0 = 关闭门控）、`PROP_LOD_SCALE`（乘到 1536/4096/8192 三个 LOD 切换距离）、`WORLD_CELL_SIZE`（世界几何 cell 边长，越大 fragment 越少、剔除越粗）、`BATCH_CLUSTER`（多少个 prop cell 合成一个实例批次）。
+
+阴影门控不在可见性 sweep 里，而是独立 pass：只在相机移动 512 单位或换 PVS cell 时重算，重算只把差异排队，`ApplyPendingShadowChanges` 每帧最多写 32 次 `Flags.CastShadows`。一次 sweep 内批量翻转一百多个批次的标志会让整片实例在 shadow pass 进出，走动时表现为一顿一顿；这个上限是为此加的。阈值按 256 单位粗桶比较，关闭距离 D 与恢复距离 D×0.5 之间留足回滞。`Flags.CastShadows` 的切换走引擎原生的 `ChangeFlags` + `NotifyChanged(Flags)`，与 `LineRenderer`、`MeshComponent` 的运行时切换同一条路径。
+
+LOD 判定使用 32 单位量化的相机位置：探针批次的逐实例 LOD 分组一变就要重传索引缓冲，量化把走动时的重排从每帧降到每跨一格。
+
+比较帧率时必须固定机位、同一相机、同一分辨率，并同时记录 `draws` / `triangles` / `objects`：局部视角的差异主要来自 PVS 与视锥，不能当成整图结论。
 
 ## 14. 处理缓存
 

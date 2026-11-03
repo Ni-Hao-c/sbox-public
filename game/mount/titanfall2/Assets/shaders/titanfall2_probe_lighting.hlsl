@@ -26,6 +26,22 @@ float3 T2DiffuseFresnel( CombinerInput combiner, float3 directionToLight )
 
 #include "titanfall2_local_lights.hlsl"
 
+float T2ProbeSunVisibility( T2LightProbeData probe, float3 positionWithOffsetWs )
+{
+	float bakedVisibility = probe.metadata.x > 0.5 ? saturate( probe.skyDirectionSunVisibility.w ) : 1;
+	// ComputeDirectionalLight already evaluates the surface's CSM/contact shadow.
+	// A prop's single baked sample can be inside its own geometry; multiplying
+	// that occlusion again would black out even its sunlit exterior. Retain the
+	// baked fallback beyond CSM coverage, including the last cascade's fade.
+	float4 coverage = float4(
+		g_DirectionalLightCascadeCount > 0 ? CascadeBlendWeight( 0, positionWithOffsetWs ) : 0,
+		g_DirectionalLightCascadeCount > 1 ? CascadeBlendWeight( 1, positionWithOffsetWs ) : 0,
+		g_DirectionalLightCascadeCount > 2 ? CascadeBlendWeight( 2, positionWithOffsetWs ) : 0,
+		g_DirectionalLightCascadeCount > 3 ? CascadeBlendWeight( 3, positionWithOffsetWs ) : 0 );
+	float covered = max( max( coverage.x, coverage.y ), max( coverage.z, coverage.w ) );
+	return lerp( bakedVisibility, 1, covered );
+}
+
 void T2ComputeDirectLighting( inout LightingTerms_t lighting, CombinerInput combiner, float sunVisibility )
 {
 	lighting.vDiffuse = float3( 0, 0, 0 );
@@ -66,7 +82,7 @@ float4 T2ShadeWithProbe( PixelInput i, Material m, T2LightProbeData probe, float
 	AdjustAlphaToCoverage( m );
 	CombinerInput combiner = T2MaterialToCombinerInput( m, specularColor );
 	LightingTerms_t lighting = InitLightingTerms();
-	T2ComputeDirectLighting( lighting, combiner, probe.metadata.x > 0.5 ? saturate( probe.skyDirectionSunVisibility.w ) : 1 );
+	T2ComputeDirectLighting( lighting, combiner, T2ProbeSunVisibility( probe, i.vPositionWithOffsetWs ) );
 	T2AddProbeLocalLights( lighting, combiner, probe );
 	CalculateIndirectLighting( lighting, combiner );
 	// Replace diffuse fill only. Albedo, emission and probe reflections keep

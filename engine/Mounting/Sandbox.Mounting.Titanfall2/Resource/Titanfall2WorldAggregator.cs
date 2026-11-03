@@ -32,16 +32,21 @@ static class Titanfall2WorldAggregator
 	/// <summary>
 	/// One model per material, one fragment per spatial cell. The returned list can be passed
 	/// straight to <see cref="MountedAggregateBuilder.Attach"/>; <paramref name="totalMeshCount"/>
-	/// is the number of models, including split slices.
+	/// is the number of models, including split slices. <paramref name="cellSize"/> is only logged,
+	/// so an A/B run can be told apart in the load log. <paramref name="aggregateKeys"/> gives the
+	/// material key each returned aggregate was built from, in the same order; the caller needs it
+	/// to decide which aggregates still have to cast shadows themselves.
 	/// </summary>
 	public static List<MountedAggregate> Build(
 		Dictionary<WorldRenderCell, Dictionary<WorldMaterialKey, MapMeshGroup>> chunks,
 		string mapName,
 		string category,
+		float cellSize,
 		string resourcePath,
 		Sandbox.Diagnostics.Logger log,
 		Func<WorldMaterialKey, int, Material> materialFactory,
-		out int totalMeshCount )
+		out int totalMeshCount,
+		out IReadOnlyList<WorldMaterialKey> aggregateKeys )
 	{
 		var byMaterial = new Dictionary<WorldMaterialKey, List<(WorldRenderCell Cell, MapMeshGroup Group)>>();
 		foreach ( var (cell, materials) in chunks )
@@ -60,6 +65,9 @@ static class Titanfall2WorldAggregator
 
 		var batches = new List<MaterialBatch>( byMaterial.Count );
 		var sourceVertexCount = 0;
+		// Largest fragment that will be drawn: one part is one (cell, material) draw.
+		var largestPartVertices = 0;
+		var largestPartIndices = 0;
 		foreach ( var (materialKey, cells) in byMaterial
 			.OrderBy( static pair => pair.Key.MaterialName, StringComparer.OrdinalIgnoreCase )
 			.ThenBy( static pair => pair.Key.LightmapPage ) )
@@ -72,6 +80,8 @@ static class Titanfall2WorldAggregator
 			{
 				parts.Add( new MountedGeometryPart<TitanfallMapVertex>( source.Vertices, source.Indices, source.Bounds ) );
 				batchVertexCount += source.Vertices.Count;
+				largestPartVertices = Math.Max( largestPartVertices, source.Vertices.Count );
+				largestPartIndices = Math.Max( largestPartIndices, source.Indices.Count );
 			}
 			sourceVertexCount += batchVertexCount;
 			batches.Add( new MaterialBatch( materialKey, parts ) );
@@ -144,6 +154,7 @@ static class Titanfall2WorldAggregator
 		var meshTime = TimeSpan.Zero;
 		var stageTimer = new Stopwatch();
 		var modelIndex = 0;
+		var keys = new List<WorldMaterialKey>( slices.Count );
 
 		// The consumer runs on the calling (main) thread: Material.Load/Create and Model.Builder
 		// are engine objects. While it waits for the next slice, the producer keeps merging.
@@ -158,6 +169,7 @@ static class Titanfall2WorldAggregator
 				stageTimer.Restart();
 				var name = $"{BuildResourceNamePrefix( mapName, category )}_aggregate_{modelIndex}";
 				result.Add( MountedAggregateBuilder.CreateAggregate( material, prepared.Geometry, name ) );
+				keys.Add( prepared.Key );
 				meshTime += stageTimer.Elapsed;
 				modelIndex++;
 			}
@@ -175,9 +187,11 @@ static class Titanfall2WorldAggregator
 
 		wallTimer.Stop();
 		totalMeshCount = result.Count;
+		aggregateKeys = keys;
 		var fragmentCount = result.Sum( static aggregate => aggregate.Fragments.Count );
-		log.Info( $"Titanfall 2 world aggregates: {resourcePath} ({result.Count} models/{totalMeshCount} meshes, "
-			+ $"{fragmentCount} cell fragments, {sourceVertexCount} vertices; "
+		log.Info( $"Titanfall 2 world aggregates: {resourcePath} ({result.Count} models/{totalMeshCount} meshes from "
+			+ $"{batches.Count} materials, {fragmentCount} cell fragments, {sourceVertexCount} vertices; "
+			+ $"cell {cellSize:0}u, up to {maxFragments} fragments/aggregate, largest fragment {largestPartVertices}V/{largestPartIndices}I; "
 			+ $"materials {materialTime.TotalSeconds:0.00}s, "
 			+ $"vertex/index prepare {prepareTimer.Elapsed.TotalSeconds:0.00}s, "
 			+ $"mesh build {meshTime.TotalSeconds:0.00}s, total {wallTimer.Elapsed.TotalSeconds:0.00}s)" );
