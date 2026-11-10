@@ -1,4 +1,4 @@
-﻿# Titanfall 2 挂载：技术参考
+# Titanfall 2 挂载：技术参考
 
 本文记录挂载的数据流、零售版文件格式中确认过的结论、对象所有权规则和流式加载预算。功能概览和使用方法见 [README.md](README.md)，环境变量见 [ENVIRONMENT_SWITCHES.md](ENVIRONMENT_SWITCHES.md)。
 
@@ -18,7 +18,7 @@
 
 - 后台线程只读取文件、解压和准备 CPU 数据。
 - `Texture`、`Material`、`Mesh`、`Model` 和场景对象只在主线程创建。
-- 材质预取（[Resource/MaterialPrefetch.cs](Resource/MaterialPrefetch.cs)）最多同时准备 4 个材质，已准备但未消费的数据上限为 128 MB。
+- 材质预取（[Resource/MaterialPrefetch.cs](Resource/MaterialPrefetch.cs)）最多同时准备 4 个材质，以 128 MiB 为已准备但未消费数据的目标预算。所有保留的 payload 都记账，包括跨过目标的那一份；达到目标后停止后续贴图预取，未预取的绑定仍由普通加载器加载。已经开始的解码允许暂时超出目标，不把这个值当作硬内存上限。峰值、目标与释放后的剩余字节分别记录。
 
 挂载程序集不会经过 s&box 的编译器改写，因此有以下约定：
 
@@ -58,6 +58,7 @@
 - 目录树和数据区间都做边界检查，字符串必须有明确的终止符。
 - 数据来源由条目的归档索引决定：`0x7FFF` 表示目录文件自身，其他值表示 `_NNN.vpk` 分卷。外部分卷读取失败时报错，不返回空数据。
 - 本地化目录 `englishclient_*.vpk` 的数据分卷映射到 `client_*.vpk`。
+- `vpk.json` 的 `MapOnly`（第三方约定，Northstar main 只读 `Preload`）与 `Preload` 一样预载对应包：未指定 `NORTHSTAR_MAP` 时按其声明地图载入并留下诊断，选中其他地图时仍推迟。`MapOnly` 声明的地图同时作为该 Mod 的 RPAK 地图上下文；`Preload`/`MapOnly` 的键容忍 `client_x`、`client_x.bsp` 与完整目录文件名三种写法。
 - 压缩块使用 LZHAM，字典大小为 2^20，由原生桥 `titanfall2_lzham.dll` 解压。
 - `depot/` 路径下的镜像条目不注册。
 
@@ -485,3 +486,24 @@ LOD 判定使用 32 单位量化的相机位置：探针批次的逐实例 LOD �
 - `StaticPropGpuScene.Commands.cs` 在固定槽位加载时预录制 compute、barrier、draw 的 GPU scope，标注 pass 类别及 recording slot。私有 compute 属性与既有同步顺序保留，不新增跨视图可见集共享。
 - `GpuSceneCompatibility` 一次性绑定现有托管 playback 与 action recorder，统一检查兼容性；不兼容时保留 CPU 路径。
 - 曝光、Bloom 与显示变换增加 GPU marker。具体实现、SPIR-V 对照与验收范围见 `../docs/TITANFALL2_GPU_PIXEL_REFACTOR_2026-11-06.zh-CN.md`。
+
+## 17. 玩家画质与挂载配置边界（2026-11-09）
+
+- `Titanfall2GraphicsSettings` 负责把已保存的玩家纹理质量转为不可变导入策略；挂载时读取一次，监听 `RenderSettings.OnVideoSettingsChanged`，卸载时取消订阅。后台解码只读原子发布的快照，不访问视频设置 Cookie。
+- 独立运行使用公开 `Application.RenderSettings`；菜单/编辑器的该入口为 null，仅在挂载连接阶段集中访问既有托管 singleton。取不到时回退 1K，不引入对菜单/编辑器程序集的依赖，不改引擎源码。
+- RPAK 缓存键和 mip 选择使用同一个局部分辨率快照，避免保存设置与 worker 解码交错时污染磁盘缓存。VTF 2D/cubemap 同样在单次解码入口固定策略。
+- 方向光默认组件上限恢复为原生支持的 4 级，由引擎质量配置裁剪；不复制原生阴影、后处理、抗锯齿或超分控制器。显式兼容覆盖与旧性能预设保留。
+- 删除无人调用的 `ITitanfall2TextureSource` / `TryCreateTexture` / RPAK 直接创建包装，正式链路统一为 source → CPU decode/cache → 主线程 upload。
+- 质量改变不会销毁可见场景资源或强制切图。现有纹理在正常离图释放后重建；编辑器缓存仍遵守原有资源所有权规则。TF2 自定义水面、高度雾和粒子需要独立的效果质量设计，不能仅按菜单名称绑定。
+
+玩家入口、覆盖优先级与生效时机见 [ENVIRONMENT_SWITCHES.md](ENVIRONMENT_SWITCHES.md)。
+
+## 18. 高画质下的预取背压（2026-11-09）
+
+后续环境实体、曝光与资源销毁的代码路径修正记录见 [TF2_ENVIRONMENT_DEBUG_2026-11-09.zh-CN.md](../docs/TF2_ENVIRONMENT_DEBUG_2026-11-09.zh-CN.md)。该批修正已随局部调色与 Bloom 版本完成构建、针对性检查和部署；全部场景仍需逐项实图验收。
+
+`TexturePreparationBudget` 统一管理预取数据的保留量与实际峰值。材质描述缓存路径和原始 RPAK 绑定路径都遵守回调返回的停止信号。跨预算 payload 保留供主线程直接消费，并在上传或取消时返还其完整记账；共享贴图不重复读取、记账或释放。预算判断不等待主线程，避免主线程等待材质 worker 时形成循环等待。这个预算只覆盖 CPU 预取数据，不代表 GPU 显存预算，也不降低玩家选择的纹理分辨率。
+
+## 19. 局部调色与 Bloom 分支（2026-11-09）
+
+径向调色、静态凸刷体范围、相机进出淡化和多 LUT GPU 合成已接入；单表保留直接采样路径。曝光与 Bloom 生成拆分为独立 partial，增加 wide/streak 分支。wide/streak 的参数与最终叠加参考本地零售导出，生成分辨率和核半径仍需零售对照。实现与边界见 [TF2_COLOR_BLOOM_IMPLEMENTATION_2026-11-09.zh-CN.md](../docs/TF2_COLOR_BLOOM_IMPLEMENTATION_2026-11-09.zh-CN.md)。托管与 shader 构建、50 项托管检查和 10 项原生图形检查已通过（另有 1 项可选内容审计跳过），并已部署；版本身份及未完成的实图验收见 [部署记录](../docs/TF2_COLOR_BLOOM_DEPLOYMENT_2026-11-09.zh-CN.md)。

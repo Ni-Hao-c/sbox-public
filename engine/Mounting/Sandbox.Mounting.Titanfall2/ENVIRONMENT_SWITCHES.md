@@ -1,13 +1,27 @@
-﻿# Titanfall 2 挂载环境变量
+# Titanfall 2 挂载环境变量
 
-挂载的 `SBOX_TITANFALL2_*` 环境变量集中定义在 [Titanfall2StreamingSettings.cs](Titanfall2StreamingSettings.cs)；内容配置在首次挂载时读取；日志、缓存目录和导出目录分别见 [Titanfall2Log.cs](Titanfall2Log.cs)、[Resource/ProcessedCache.cs](Resource/ProcessedCache.cs) 和 [Resource/ModelExporter.cs](Resource/ModelExporter.cs)。流式加载预算、LOD 距离、粒子上限等调优值都是常量，写在使用它们的类里。
+挂载后端与诊断覆盖集中在 [Titanfall2StreamingSettings.cs](Titanfall2StreamingSettings.cs)，玩家画质适配在 [Titanfall2GraphicsSettings.cs](Titanfall2GraphicsSettings.cs)。内容配置在首次挂载时读取；日志、缓存目录和导出目录分别见 [Titanfall2Log.cs](Titanfall2Log.cs)、[Resource/ProcessedCache.cs](Resource/ProcessedCache.cs) 和 [Resource/ModelExporter.cs](Resource/ModelExporter.cs)。
+
+## 玩家画质设置
+
+正常游玩直接使用游戏的画质菜单，无需设置环境变量：
+
+| 玩家设置 | TF2 挂载行为 | 修改后生效时机 |
+| --- | --- | --- |
+| 纹理低 / 中 / 高 / 极高 | RPAK、VTF 2D 与 VTF cubemap 的单张源纹理上限为 1024 / 2048 / 4096 / 原始尺寸；只有现有 mip，不放大源图 | 保存设置后更新导入策略；已有贴图保持不变，完全离开地图、待资源释放后重新加载。编辑器保留资源缓存时需重新挂载或重启编辑器 |
+| 阴影低 / 中 / 高 / 极高 | 地图方向光默认允许 4 级级联，引擎质量配置实际限制为 1 / 2 / 3 / 4 级，并控制分辨率、距离和接触阴影 | 引擎按其画质设置即时应用，不必重建地图 |
+| 抗锯齿、渲染比例、超分、原生后处理 | 使用引擎已有实现与质量配置 | 按引擎设置的生效方式 |
+
+优先级：单项环境变量覆盖 > 显式旧 `FPS_PRESET` 的相关限制 > 玩家设置 / 引擎质量配置。纹理只受 `TEXTURE_MAX` 显式覆盖，`FPS_PRESET` 不改变它。阴影覆盖是组件上限，仍受引擎全局质量上限裁剪。菜单中的帧率上限不会自动变成旧 `FPS_PRESET`。
+
+TF2 高度/方向雾、godray 面片和粒子不是引擎体积雾，TF2 自定义折射水面也不使用原生水面质量实现；这次没有把这些内容错误绑定到同名的菜单选项。烘焙光照、曝光标定、碰撞、导航、GPU/CPU 后端、缓存预算及内容优先级保持各自职责。专用服务器或不兼容引擎无法取得画质对象时，纹理回退为 1024，显式覆盖仍有效。
 
 ## 怎么设置
 
 - 在启动 `sbox.exe` 之前设置环境变量，再从同一个窗口启动游戏。PowerShell 示例：`$env:SBOX_TITANFALL2_PROP_SHADOWS = "1"`。
 - 开关：`1`、`true`、`yes`、`on` 为开，不区分大小写。不设置或留空时用默认值，其它非空值都算关。
 - 数值按英文小数点解析。超出范围的值会夹到边界，解析失败时用默认值。
-- `Titanfall2StreamingSettings` 中的开关和数值在首次初始化时读取，修改后要重启游戏。缓存目录和模型导出目录在各自的使用路径中读取；为便于复现，仍建议启动前统一设置。
+- 环境变量覆盖在首次初始化时读取，修改后要重启游戏；玩家纹理设置监听保存事件，不需要重启进程。缓存目录和模型导出目录在各自的使用路径中读取；为便于复现，仍建议启动前统一设置。
 
 下表省略了 `SBOX_TITANFALL2_` 前缀。
 
@@ -18,7 +32,7 @@
 | `PROCESSED_CACHE` | 开 | 开/关 | 缓存模型、贴图、材质描述和道具淡出距离；不缓存地图几何或光照贴图 |
 | `CACHE_MB` | 2048 | 128–8192 | 处理缓存的磁盘预算（MB） |
 | `CACHE_PATH` | `%LOCALAPPDATA%\sbox\mount-cache\titanfall2\processed` | 路径 | 处理缓存目录 |
-| `TEXTURE_MAX` | 1024 | 64–2048 | 贴图最大边长。低显存可设 512 |
+| `TEXTURE_MAX` | 跟随玩家纹理设置 | 64–16384 | 显式覆盖贴图最大边长；未设置、空值或非法数值时跟随玩家设置。低显存可显式设 512 |
 | `LIGHTMAP_16BIT` | 开 | 开/关 | 默认单级光照页使用 SkyB（BGR565）与 RealTimeB（BGRA4444）：光照片 17→13 B/px。SkyB 使用原生上传验证过的 BGR565（R 高位、B 低位），不能替换为会返回有效但数据失真的 RGB565。多级 mip 下 RealTimeB 使用 RGBA8888，避开原生 BGRA4444 下级 mip 失真。设 0 全部回到 RGBA8888 |
 | `LIGHTMAP_MIPS` | 关（120 档为开） | 开/关 | 给 SkyA / SkyB / RealTimeB 生成 L0–L2 mip 链，生成前先按几何覆盖率把图集 chart 向外 dilate 4 步，避免 mip 把 chart 外的空洞混进来。按原生 API 要求以最小 mip 在前上传；RealTimeB 多级页使用 RGBA8888。代价是远景 chart 边缘略糊和额外显存占用 |
 
@@ -40,7 +54,7 @@
 
 | 变量 | 默认 | 范围 | 作用 |
 | --- | --- | --- | --- |
-| `FPS_PRESET` | 0 | 0–240 | 一档式帧率预设。0 与 60 等于下表默认值；120 改为阴影距离 1024、级联 1、LOD 缩放 0.5、cell 4096、批次簇 8、绘制距离 6144，并关掉接触阴影与 Godray。任何一个变量显式设置时都优先于预设 |
+| `FPS_PRESET` | 0 | 0–240 | 旧性能覆盖预设，不读取玩家帧率上限。0 与 60 不加额外限制；120 改为阴影距离 1024、级联上限 1、LOD 缩放 0.5、cell 4096、批次簇 8、绘制距离 6144，并关掉接触阴影与 Godray。任何一个变量显式设置时都优先于预设 |
 | `PROP_SHADOW_DISTANCE` | 0 | 0–65536 | 道具方向光阴影距离。0 关闭距离门控，保留原批次的投影资格。CPU 参照路径按批次门控，每帧最多改 32 次标志；GPU 路径以主相机为锚逐实例门控并保存距离回滞状态，不扫描 CPU 实例、不改原生对象标志 |
 | `PROP_LOD_SCALE` | 1 | 0.1–4 | 乘到静态 prop 的 LOD 切换距离（1536/4096/8192）上。小于 1 更早切到低模，减少前向与深度通道三角形 |
 | `BATCH_CLUSTER` | 4 | 1/2/4/8/16 | 多少个 prop cell（512 单位）合成一个实例批次。越大提交对象越少，但 PVS 和阴影按批次聚合，粒度变粗 |
@@ -55,7 +69,7 @@
 | --- | --- | --- | --- |
 | `BSP_LIGHTMAPS` | 开 | 开/关 | 使用地图烘焙的 lightmap、光照探针和本地光。关掉后改用 s&box 原生光照，只用于排查不支持的地图 |
 | `MAP_SHADOWS` | 开 | 开/关 | 让导入的世界几何参与方向光级联阴影（CSM） |
-| `SHADOW_CASCADES` | 2 | 1–3 | 方向光级联数。每个级联都会把所有投影体再画一遍，所以它直接乘在整条 shadow pass 上：1 = 减半，3 = 适合很长的阴影距离。`MAP_SHADOWS=0` 时强制为 1；120 fps 预设用 1 |
+| `SHADOW_CASCADES` | 4（由引擎按玩家画质裁剪） | 1–4 | 方向光组件的级联上限。`MAP_SHADOWS=0` 时强制为 1；旧 120 fps 预设用 1。显式设置仍不能超过引擎全局质量允许的级联数 |
 | `CONTACT_SHADOWS` | 开 | 开/关 | s&box 屏幕空间接触阴影 |
 | `EXPOSURE_EV` | 0 | -5–5 | 在零售曝光标定上再加的曝光补偿（档） |
 | `GODRAYS` | 开 | 开/关 | 显示 godray 光束面片。它们随相机距离淡入，移动时可能闪烁；设为 0 可关闭 |
@@ -88,7 +102,7 @@
 | 变量 | 默认 | 作用 |
 | --- | --- | --- |
 | `NORTHSTAR_PROFILE` | 原游戏安装下存在的 `R2Northstar`，否则仅原版 | Northstar 配置根，包含 `mods/`、`packages/`、`enabledmods.json`。显式空字符串禁用。不是启动器源码目录。 |
-| `NORTHSTAR_MAP` | 未指定 | 固定会话地图名，例如 `mp_angel_city`。启用匹配的条件 RPAK/VPK；指定后仅发布该地图场景，避免地图专属覆盖泄漏到其他地图。切换需要新进程。 |
+| `NORTHSTAR_MAP` | 未指定 | 固定会话地图名，例如 `mp_angel_city`。启用匹配的条件 RPAK/VPK；指定后仅发布该地图场景，避免地图专属覆盖泄漏到其他地图。未指定时，`vpk.json` 声明为 `MapOnly` 的包仍按其声明地图预载（与 `Preload` 等效）并留下诊断。切换需要新进程。 |
 
 例如在启动前设置 `$env:SBOX_TITANFALL2_NORTHSTAR_PROFILE = "D:\northstar"`。源码参考 `D:\northstar\NorthstarLauncher-main`；该目录本身不作为 Mod profile。
 

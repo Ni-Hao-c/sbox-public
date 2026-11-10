@@ -19,10 +19,13 @@ class Titanfall2TextureLoader( ITitanfall2AssetSource source, bool animatedVtfAt
 	{
 		if ( _source is RpakTextureAssetSource packed )
 		{
+			// The cache key and worker decode must use one snapshot even if the player
+			// applies another quality level while this texture is being prepared.
+			var maximumDimension = Titanfall2StreamingSettings.TextureMaxDimension;
 			var identity = Titanfall2StreamingSettings.ProcessedCache
-				? $"{Host.ContentFingerprint}|{Path}|texture:{Titanfall2StreamingSettings.TextureMaxDimension}" : null;
+				? $"{Host.ContentFingerprint}|{Path}|texture:{maximumDimension}" : null;
 			if ( identity is not null && Titanfall2TextureCache.TryRead( identity, out var cached ) ) return new( cached, null, null );
-			if ( !packed.TryReadTexture( out var texture, out var error ) ) return new( null, null, error );
+			if ( !packed.TryReadTexture( out var texture, out var error, maximumDimension ) ) return new( null, null, error );
 			if ( identity is not null ) Titanfall2TextureCache.Write( identity, texture );
 			return new( texture, null, null );
 		}
@@ -31,19 +34,19 @@ class Titanfall2TextureLoader( ITitanfall2AssetSource source, bool animatedVtfAt
 	}
 
 	// Only CPU data may be prepared by a worker. Texture creation stays in Load().
-	internal void Prepare( Func<long, bool> reserve, Action<long> release )
+	internal bool Prepare( Func<long, bool> reserve, Action<long> release )
 	{
 		lock ( _prepareLock )
 		{
-			if ( _loaded || _prepared is not null ) return;
+			if ( _loaded || _prepared is not null ) return true;
 			var data = ReadData();
 			var withinBudget = reserve( data.Length );
 			_prepared = data;
-			// Keep an over-budget payload instead of dropping it. The bytes are already
-			// decoded, so discarding them would only force Load() to decode the same
-			// texture again on the main thread; the pool still stops starting new jobs
-			// until this one is consumed.
-			_releaseBudget = withinBudget ? release : null;
+			// Keep the payload that crosses the target, account for it, and tell the
+			// caller to stop reading this material's remaining textures. Load can consume
+			// it without decoding again; both consumption and cancellation return its bytes.
+			_releaseBudget = release;
+			return withinBudget;
 		}
 	}
 

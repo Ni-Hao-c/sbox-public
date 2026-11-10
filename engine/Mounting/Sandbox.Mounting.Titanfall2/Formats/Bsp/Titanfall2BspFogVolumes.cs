@@ -10,7 +10,7 @@ public static partial class Titanfall2BspReader
 	static void PopulateFogVolumeBrushes( List<Dictionary<string, string>> entities, Stream stream,
 		IReadOnlyList<LumpHeader> headers, IReadOnlyDictionary<int, byte[]> overrides )
 	{
-		var volumes = entities.Where( e => e.GetValueOrDefault( "classname" ) == "fog_volume"
+		var volumes = entities.Where( e => (e.GetValueOrDefault( "classname" ) is "fog_volume" or "color_correction_volume")
 			&& !e.ContainsKey( "*trigger_bounds_mins" ) ).ToArray();
 		if ( volumes.Length == 0 ) return;
 		var models = ReadModels( ReadLumpBytes( stream, headers, overrides, ModelsLumpId ) );

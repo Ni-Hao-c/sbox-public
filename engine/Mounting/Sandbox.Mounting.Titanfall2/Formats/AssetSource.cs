@@ -25,11 +25,6 @@ interface ITitanfall2PrefixAssetSource
 	bool TryReadPrefix( int minimumBytes, out byte[] bytes, out string error );
 }
 
-interface ITitanfall2TextureSource
-{
-	bool TryCreateTexture( out Texture texture, out string error );
-}
-
 /// <summary>
 /// Standalone loose-file reader retained for import/export fixtures. Production mounting
 /// uses Titanfall2SnapshotFile and snapshot-bound sources: companion/path resolution
@@ -187,7 +182,7 @@ sealed class VpkAssetSource( VpkArchive archive, VpkEntry entry, VpkPathResolver
 	}
 }
 
-sealed class RpakTextureAssetSource( RpakArchive archive, RpakAsset asset ) : ITitanfall2AssetSource, ITitanfall2TextureSource
+sealed class RpakTextureAssetSource( RpakArchive archive, RpakAsset asset ) : ITitanfall2AssetSource
 {
 	public string Description => $"{Path.GetFileName( archive.FilePath )}:{asset.Name}";
 
@@ -198,6 +193,6 @@ sealed class RpakTextureAssetSource( RpakArchive archive, RpakAsset asset ) : IT
 		return false;
 	}
 
-	public bool TryCreateTexture( out Texture texture, out string error ) => RpakTextureDecoder.TryCreate( archive, asset, out texture, out error );
-	internal bool TryReadTexture( out RpakTextureData data, out string error ) => RpakTextureDecoder.TryRead( archive, asset, out data, out error );
+	internal bool TryReadTexture( out RpakTextureData data, out string error, int? maximumDimension = null ) =>
+		RpakTextureDecoder.TryRead( archive, asset, out data, out error, maximumDimension );
 }

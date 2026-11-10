@@ -359,7 +359,8 @@ public static partial class Titanfall2BspReader
 	/// </summary>
 	public static bool TryRead( byte[] bspBytes, string mapName, IReadOnlyDictionary<int, byte[]> overrideLumps,
 		bool parseWorldCollision, bool parseLightmaps, bool parseStaticPropLightProbes,
-		out ParsedBsp parsedBsp, out string error, bool allCollisionContents = false )
+		out ParsedBsp parsedBsp, out string error, bool allCollisionContents = false,
+		IReadOnlyList<Dictionary<string, string>> environmentEntities = null )
 	{
 		parsedBsp = null;
 		error = null;
@@ -382,7 +383,7 @@ public static partial class Titanfall2BspReader
 				parseLightmaps,
 				parseStaticPropLightProbes,
 				out parsedBsp,
-				out error, allCollisionContents );
+				out error, allCollisionContents, environmentEntities );
 		}
 		catch ( Exception exception )
 		{
@@ -400,7 +401,8 @@ public static partial class Titanfall2BspReader
 		bool parseLightmaps,
 		bool parseStaticPropLightProbes,
 		out ParsedBsp parsedBsp,
-		out string error, bool allCollisionContents = false )
+		out string error, bool allCollisionContents = false,
+		IReadOnlyList<Dictionary<string, string>> environmentEntities = null )
 	{
 		parsedBsp = null;
 		error = null;
@@ -464,6 +466,12 @@ public static partial class Titanfall2BspReader
 			: new BspLightmaps();
 		var cubemaps = ReadCubemaps( ReadLumpBytes( stream, headers, overrideLumps, CubemapsLumpId ) );
 		var entities = Titanfall2EntityText.Parse( ReadLumpBytes( stream, headers, overrideLumps, EntitiesLumpId ) );
+		// External brush correction entities still reference this BSP's inline CM model.
+		// Recover them while the lump stream is open and persist the enriched rows in the parse.
+		if ( environmentEntities is not null )
+			foreach ( var entity in environmentEntities.Where( e => e.GetValueOrDefault( "classname" ) == "color_correction_volume" ) )
+				if ( !entities.Any( existing => existing.Count == entity.Count && entity.All( pair => existing.TryGetValue( pair.Key, out var value ) && value == pair.Value ) ) )
+					entities.Add( new Dictionary<string, string>( entity, StringComparer.OrdinalIgnoreCase ) );
 		PopulateFogVolumeBrushes( entities, stream, headers, overrideLumps );
 		var entityPartitions = ReadEntityPartitions( ReadLumpBytes( stream, headers, overrideLumps, EntityPartitionsLumpId ) );
 		var visibility = ParseVisibility( stream, headers, overrideLumps, world.SourceMeshCount );

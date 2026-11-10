@@ -1190,8 +1190,7 @@ partial class MapLoader
 
 	Color ReadBakedSkyColor( Titanfall2BspReader.ParsedBsp parsed )
 	{
-		var entities = ReadEntities( _environmentEntitySource );
-		return ReadBakedSkyColor( parsed, entities.Count == 0 ? parsed.Entities : entities );
+		return ReadBakedSkyColor( parsed, ReadEnvironmentEntities( parsed ) );
 	}
 
 	internal static Color ReadBakedSkyColor( Titanfall2BspReader.ParsedBsp parsed, IReadOnlyList<Dictionary<string, string>> entities )

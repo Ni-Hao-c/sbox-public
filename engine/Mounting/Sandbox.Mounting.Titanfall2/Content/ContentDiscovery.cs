@@ -81,7 +81,7 @@ static class Titanfall2ContentDiscovery
 				if ( required ) throw new InvalidDataException( $"Cannot index Mod RPAK {path}: {error}" );
 				diagnostics.Add( $"Cannot index retail RPAK {path}: {error}" ); return;
 			}
-			archive.FreezeSources();
+			identities.AddRange( archive.FreezeSources() );
 			if ( Stamp( path ) != identity ) throw new InvalidDataException( $"RPAK changed while indexing: {path}" );
 			var unsupported = 0;
 			foreach ( var asset in archive.Assets )

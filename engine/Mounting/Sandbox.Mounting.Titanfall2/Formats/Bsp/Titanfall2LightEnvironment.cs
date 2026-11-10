@@ -43,6 +43,7 @@ public static class Titanfall2LightEnvironment
 		readonly Quaternion _inverse = Quaternion.Identity;
 		readonly NumericsVector4[][] _brushes = [];
 		readonly bool _valid;
+		public bool IsValid => _valid;
 		public int EnvironmentIndex { get; }
 
 		public Volume( IReadOnlyDictionary<string, string> volume )

@@ -36,11 +36,7 @@ partial class MapLoader
 		var vistaProps = parsed.StaticProps.Where( static prop => IsVistaModelPath( prop.ModelPath ) ).ToArray();
 		if ( vistaProps.Length == 0 ) return 0;
 
-		// The environment partition is authoritative, but community repacks sometimes drop it;
-		// the rBSP ENTITIES lump still carries sky_camera in that case.
-		var environmentEntities = ReadEntities( _environmentEntitySource );
-		if ( environmentEntities.Count == 0 ) environmentEntities = parsed.Entities;
-		else environmentEntities = environmentEntities.Concat( parsed.Entities.Where( e => e.GetValueOrDefault( "classname" ) == "fog_volume" ) ).ToArray();
+		var environmentEntities = ReadEnvironmentEntities( parsed );
 		var candidates = new List<SkyboxCandidate>();
 		foreach ( var values in environmentEntities )
 		{
@@ -509,7 +505,8 @@ partial class MapLoader
 		var culture = System.Globalization.CultureInfo.InvariantCulture;
 		if ( !float.TryParse( components[0], style, culture, out var x )
 			|| !float.TryParse( components[1], style, culture, out var y )
-			|| !float.TryParse( components[2], style, culture, out var z ) ) return false;
+			|| !float.TryParse( components[2], style, culture, out var z )
+			|| !float.IsFinite( x ) || !float.IsFinite( y ) || !float.IsFinite( z ) ) return false;
 		result = new Vector3( x, y, z );
 		return true;
 	}
@@ -518,7 +515,7 @@ partial class MapLoader
 		value,
 		System.Globalization.NumberStyles.Float,
 		System.Globalization.CultureInfo.InvariantCulture,
-		out result );
+		out result ) && float.IsFinite( result );
 
 	static bool IsVistaModelPath( string path )
 	{

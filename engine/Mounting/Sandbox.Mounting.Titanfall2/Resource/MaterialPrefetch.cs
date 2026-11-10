@@ -3,14 +3,14 @@ using System.Collections.Concurrent;
 using System.Threading;
 
 /// <summary>
-/// A bounded, map-scoped CPU pipeline. Workers read/decompress texture data; the
+/// A windowed, map-scoped CPU pipeline. Workers read/decompress texture data; the
 /// main thread still creates every Material/Texture. Slots advance as materials
 /// are consumed, so a slow GPU cannot accumulate an entire map of decoded mips.
 /// </summary>
 sealed class Titanfall2MaterialPrefetch : IDisposable
 {
 	static readonly Sandbox.Diagnostics.Logger Log = new( "Titanfall2Prefetch" );
-	const long Budget = 128L * 1024 * 1024;
+	const long BudgetBytes = 128L * 1024 * 1024;
 	// Number of materials whose textures are prepared ahead of consumption.
 	const int Window = 4;
 	readonly Titanfall2Mount _host;
@@ -18,16 +18,16 @@ sealed class Titanfall2MaterialPrefetch : IDisposable
 	readonly Dictionary<string, Task> _jobs = new( StringComparer.OrdinalIgnoreCase );
 	readonly ConcurrentBag<Titanfall2TextureLoader> _textures = new();
 	readonly CancellationTokenSource _cancel = new();
-	long _bytes;
-	long _peakBytes;
+	readonly Titanfall2TexturePreparationBudget _budget;
 	long _waitTicks;
 	readonly ConcurrentDictionary<int, byte> _workers = new();
 	int _preparedMaterials;
-	bool _disposed;
+	volatile bool _disposed;
 
-	internal Titanfall2MaterialPrefetch( Titanfall2Mount host, IEnumerable<string> materials )
+	internal Titanfall2MaterialPrefetch( Titanfall2Mount host, IEnumerable<string> materials, long budgetBytes = BudgetBytes )
 	{
 		_host = host;
+		_budget = new( budgetBytes );
 		_pending = new Queue<string>( materials.Distinct( StringComparer.OrdinalIgnoreCase ) );
 		for ( var i = 0; i < Window; i++ ) StartNext();
 	}
@@ -40,11 +40,7 @@ sealed class Titanfall2MaterialPrefetch : IDisposable
 			try
 			{
 				_workers.TryAdd( Environment.CurrentManagedThreadId, 0 );
-				_host.PrepareMaterialTextures( name, _cancel.Token, loader =>
-				{
-					_textures.Add( loader );
-					loader.Prepare( Reserve, bytes => Interlocked.Add( ref _bytes, -bytes ) );
-				} );
+				_host.PrepareMaterialTextures( name, _cancel.Token, PrepareTexture );
 				Interlocked.Increment( ref _preparedMaterials );
 			}
 			catch ( OperationCanceledException ) { }
@@ -52,18 +48,13 @@ sealed class Titanfall2MaterialPrefetch : IDisposable
 		} );
 	}
 
-	bool Reserve( long bytes )
+	internal long RetainedBytes => _budget.RetainedBytes;
+
+	internal bool PrepareTexture( Titanfall2TextureLoader loader )
 	{
-		var current = Interlocked.Add( ref _bytes, bytes );
-		if ( current <= Budget )
-		{
-			long peak;
-			do { peak = Interlocked.Read( ref _peakBytes ); }
-			while ( current > peak && Interlocked.CompareExchange( ref _peakBytes, current, peak ) != peak );
-			return true;
-		}
-		Interlocked.Add( ref _bytes, -bytes );
-		return false;
+		if ( _disposed || !_budget.HasCapacity ) return false;
+		_textures.Add( loader );
+		return loader.Prepare( _budget.Reserve, _budget.Release );
 	}
 
 	internal void Wait( string name )
@@ -90,15 +81,21 @@ sealed class Titanfall2MaterialPrefetch : IDisposable
 		_cancel.Cancel();
 		Task.WhenAll( _jobs.Values ).GetAwaiter().GetResult();
 		foreach ( var loader in _textures ) loader.ClearPreparation();
+		_textures.Clear();
+		_jobs.Clear();
+		_pending.Clear();
 		_cancel.Dispose();
-		Log.Info( $"Titanfall 2 material prefetch: {_preparedMaterials} materials prepared on {_workers.Count} worker threads; "
-			+ $"peak {_peakBytes / (1024.0 * 1024.0):0.0}/128 MB, main wait {_waitTicks / (double)System.Diagnostics.Stopwatch.Frequency:0.00}s; GPU creation on main thread." );
+		Log.Info( $"Titanfall 2 material prefetch: {_preparedMaterials} material jobs on {_workers.Count} worker threads; "
+			+ $"retained peak {_budget.PeakBytes / (1024.0 * 1024.0):0.0} MiB, target {_budget.CapacityBytes / (1024.0 * 1024.0):0.0} MiB "
+			+ $"(in-flight textures may exceed target), remaining {RetainedBytes} bytes; "
+			+ $"main wait {_waitTicks / (double)System.Diagnostics.Stopwatch.Frequency:0.00}s; GPU creation on main thread." );
+		_workers.Clear();
 	}
 }
 
 public partial class Titanfall2Mount
 {
-	internal void PrepareMaterialTextures( string name, CancellationToken cancellation, Action<Titanfall2TextureLoader> prepare )
+	internal void PrepareMaterialTextures( string name, CancellationToken cancellation, Func<Titanfall2TextureLoader, bool> prepare )
 	{
 		cancellation.ThrowIfCancellationRequested();
 		if ( TryGetCachedMaterialDescriptor( name, out var descriptor ) )
@@ -107,14 +104,13 @@ public partial class Titanfall2Mount
 			{
 				cancellation.ThrowIfCancellationRequested();
 				if ( !descriptor.UsesTexture( binding ) ) continue;
-				if ( GetByPath( $"mount://{Ident}/{binding.TexturePath}.vtex" ) is Titanfall2TextureLoader prepared ) prepare( prepared );
+				if ( GetByPath( $"mount://{Ident}/{binding.TexturePath}.vtex" ) is Titanfall2TextureLoader prepared && !prepare( prepared ) ) return;
 			}
 			return;
 		}
 		if ( !_materialSources.TryGetValue( name, out var source ) || source.Asset.Version != 12 ) return;
 		if ( !source.Archive.TryReadAsset( source.Asset, out var data, out _ ) || data.Header.Length < 168 ) return;
 		TryGetShaderSetName( MaterialLoader.GetShaderSetGuid( data.Header ), out var shaderSetName );
-		var metadata = MaterialLoader.ReadMetadata( data.Header, name, shaderSetName );
 		var needsNormal = !(shaderSetName?.Contains( "Unlit", StringComparison.OrdinalIgnoreCase ) ?? false)
 			&& !MaterialLoader.IsVistaMaterial( name ) && !MaterialLoader.IsGodrayMaterial( name );
 		var handles = new RpakPagePointer( BinaryPrimitives.ReadInt32LittleEndian( data.Header.AsSpan( 152, 4 ) ), BinaryPrimitives.ReadInt32LittleEndian( data.Header.AsSpan( 156, 4 ) ) );
@@ -127,7 +123,7 @@ public partial class Titanfall2Mount
 			var guid = BinaryPrimitives.ReadUInt64LittleEndian( guids.AsSpan( i * 8, 8 ) );
 			if ( !_texturePaths.TryGetValue( guid, out var path ) ) continue;
 			if ( !needsNormal && Titanfall2MaterialDescriptor.InferTextureSemantic( null, path, false ) == Titanfall2TextureSemantic.Normal ) continue;
-			if ( GetByPath( $"mount://{Ident}/{path}.vtex" ) is Titanfall2TextureLoader loader ) prepare( loader );
+			if ( GetByPath( $"mount://{Ident}/{path}.vtex" ) is Titanfall2TextureLoader loader && !prepare( loader ) ) return;
 		}
 	}
 }

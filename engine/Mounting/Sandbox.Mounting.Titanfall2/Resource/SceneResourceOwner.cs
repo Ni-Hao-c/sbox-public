@@ -35,7 +35,18 @@ public sealed class Titanfall2SceneResourceOwner : Component, Component.DontExec
 	protected override void OnDestroy()
 	{
 		foreach ( var resource in _ownedResources )
-			resource.Dispose();
+		{
+			try
+			{
+				resource.Dispose();
+			}
+			catch ( Exception exception )
+			{
+				// One failing native resource must not prevent the remaining releases or
+				// strand this scene's mount lease forever.
+				Titanfall2Log.Warning( exception, $"Titanfall 2 scene resource release failed ({resource.GetType().Name})." );
+			}
+		}
 		_ownedResources.Clear();
 		// Returns the lease; once no scene shows a map any more the mount drops the
 		// map-scoped caches. Only a component that took a lease returns one, otherwise the

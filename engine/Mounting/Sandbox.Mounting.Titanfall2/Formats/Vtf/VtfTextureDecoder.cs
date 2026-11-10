@@ -363,14 +363,14 @@ static class VtfTextureDecoder
 		return true;
 	}
 
-	internal static bool TryRead( byte[] bytes, bool animatedAtlas, out VtfTextureData texture, out string error )
+	internal static bool TryRead( byte[] bytes, bool animatedAtlas, out VtfTextureData texture, out string error, int? maximumDimension = null )
 	{
 		// Malformed headers overflow the checked mip-size/offset math (e.g. 65535x65535
 		// RGBA16F). TryCreate/TryCreateFrames/TryCreateSheetFrames call this outside
 		// their try blocks, so the OverflowException escaped into the texture loader.
 		try
 		{
-			return TryReadCore( bytes, animatedAtlas, out texture, out error );
+			return TryReadCore( bytes, animatedAtlas, out texture, out error, maximumDimension ?? Titanfall2StreamingSettings.TextureMaxDimension );
 		}
 		catch ( Exception exception )
 		{
@@ -380,7 +380,7 @@ static class VtfTextureDecoder
 		}
 	}
 
-	static bool TryReadCore( byte[] bytes, bool animatedAtlas, out VtfTextureData texture, out string error )
+	static bool TryReadCore( byte[] bytes, bool animatedAtlas, out VtfTextureData texture, out string error, int maximumDimension )
 	{
 		texture = default;
 		error = null;
@@ -448,7 +448,7 @@ static class VtfTextureDecoder
 		var skippedLargeMips = 0;
 		while ( skippedLargeMips + 1 < mipCount
 			&& Math.Max( Math.Max( 1, width >> skippedLargeMips ), Math.Max( 1, height >> skippedLargeMips ) )
-				> Titanfall2StreamingSettings.TextureMaxDimension )
+				> maximumDimension )
 		{
 			skippedLargeMips++;
 		}
@@ -526,7 +526,7 @@ static class VtfTextureDecoder
 		// Same checked-overflow exposure as TryRead; TryCreateCube calls this outside its try.
 		try
 		{
-			return TryReadCubeFrameCore( bytes, frameIndex, out texture, out error );
+			return TryReadCubeFrameCore( bytes, frameIndex, out texture, out error, Titanfall2StreamingSettings.TextureMaxDimension );
 		}
 		catch ( Exception exception )
 		{
@@ -536,7 +536,7 @@ static class VtfTextureDecoder
 		}
 	}
 
-	static bool TryReadCubeFrameCore( byte[] bytes, int frameIndex, out VtfCubeTextureData texture, out string error )
+	static bool TryReadCubeFrameCore( byte[] bytes, int frameIndex, out VtfCubeTextureData texture, out string error, int maximumDimension )
 	{
 		texture = default;
 		error = null;
@@ -588,7 +588,7 @@ static class VtfTextureDecoder
 		}
 
 		var skippedLargeMips = 0;
-		while ( skippedLargeMips + 1 < mipCount && Math.Max( 1, width >> skippedLargeMips ) > Titanfall2StreamingSettings.TextureMaxDimension )
+		while ( skippedLargeMips + 1 < mipCount && Math.Max( 1, width >> skippedLargeMips ) > maximumDimension )
 			skippedLargeMips++;
 		var retainedMipCount = mipCount - skippedLargeMips;
 		var outputSize = 0;

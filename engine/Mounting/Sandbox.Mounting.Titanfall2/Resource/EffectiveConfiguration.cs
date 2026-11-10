@@ -6,6 +6,7 @@ static class Titanfall2EffectiveConfiguration
 		ModuleVersionId = typeof( Titanfall2Mount ).Assembly.ManifestModule.ModuleVersionId,
 		ModuleLocation = typeof( Titanfall2Mount ).Assembly.Location,
 		EngineVersionId = typeof( Scene ).Assembly.ManifestModule.ModuleVersionId,
+		PlayerGraphics = Titanfall2GraphicsSettings.Current,
 		Quality = new
 		{
 			Titanfall2StreamingSettings.TextureMaxDimension,

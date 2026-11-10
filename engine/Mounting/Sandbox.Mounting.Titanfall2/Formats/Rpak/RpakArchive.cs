@@ -279,10 +279,11 @@ sealed class RpakArchive
 	}
 
 	/// <summary>Pin source locations and versions before publishing the content directory.</summary>
-	internal void FreezeSources()
+	internal IReadOnlyList<string> FreezeSources()
 	{
 		_snapshotFileIdentity = Titanfall2SourceIdentity.Stamp( FilePath );
 		_snapshotStreamingIdentities = new string[_streamingFiles.Length];
+		var identities = new List<string> { _snapshotFileIdentity };
 		for ( var index = 0; index < _streamingFiles.Length; ++index )
 		{
 			var path = ResolveStreamingFilePath( index );
@@ -292,7 +293,13 @@ sealed class RpakArchive
 				Titanfall2SourceIdentity.RejectReparse( path );
 				_snapshotStreamingIdentities[index] = Titanfall2SourceIdentity.Stamp( path );
 			}
+			// Publish the dependencies actually resolved, including missing references.
+			// A flat directory scan misses nested and game-relative STARPAK files and
+			// would otherwise let their replacement reuse stale decoded texture caches.
+			identities.Add( _streamingFiles[index] );
+			identities.Add( _snapshotStreamingIdentities[index] ?? "missing" );
 		}
+		return identities.AsReadOnly();
 	}
 
 	string ResolveStreamingFilePath( int index )

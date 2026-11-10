@@ -1,7 +1,7 @@
 /// <summary>
-/// The few environment switches of the Titanfall 2 mount. Each is read once at startup
-/// from an SBOX_TITANFALL2_* variable; see ENVIRONMENT_SWITCHES.md. Streaming budgets and
-/// other tuning values are constants next to the code that uses them.
+/// Mount backend, compatibility and diagnostic overrides, read once at startup.
+/// Player-facing texture quality is adapted by Titanfall2GraphicsSettings; native
+/// rendering quality is controlled by the engine. See ENVIRONMENT_SWITCHES.md.
 /// </summary>
 static class Titanfall2StreamingSettings
 {
@@ -17,9 +17,7 @@ static class Titanfall2StreamingSettings
 	// Prefer load-time preparation to walking-time body/resource creation. Explicitly disable
 	// on memory-constrained clients; dedicated servers and pure-world maps always stay resident.
 	public static bool ResidentWorld { get; } = GetBool( "SBOX_TITANFALL2_RESIDENT_WORLD", true );
-	// 1K keeps the first useful mip of most 1K/2K materials. 512 suits low-VRAM machines,
-	// 2048 is for inspecting a few models up close.
-	public static int TextureMaxDimension { get; } = GetInt( "SBOX_TITANFALL2_TEXTURE_MAX", 1024, 64, 2048 );
+	public static int TextureMaxDimension => Titanfall2GraphicsSettings.Current.TextureMaxDimension;
 
 	// Upload the two largest lightmap channels as 16-bit textures: SkyB as BGR565 and RealTimeB as
 	// BGRA4444. The shader keeps sampling float4, so only precision changes (retail RealTimeB is
@@ -76,15 +74,16 @@ static class Titanfall2StreamingSettings
 	public static bool MapShadows { get; } = GetBool( "SBOX_TITANFALL2_MAP_SHADOWS", true );
 	// Draw a dedicated depth-only copy of the opaque world (one mesh per spatial cell, all sharing a
 	// single runtime material) and stop the forward aggregates from casting. The world keeps
-	// projecting through two cascades, but the shadow pass binds one shader and issues one draw per
+	// projecting through the configured cascades, but the shadow pass binds one shader and issues one draw per
 	// cell instead of one per (cell, material) fragment with 300+ materials. Off restores the old
 	// behaviour (aggregates cast with their own materials) for A/B; independent of SHADOW_CASCADES.
 	public static bool ShadowGeometry { get; } = GetBool( "SBOX_TITANFALL2_SHADOW_GEOMETRY", true );
 	// Directional shadow cascade count. Every cascade renders all shadow casters into its own depth
 	// target, so this multiplies the whole shadow pass: 1 halves it, 3 suits very long shadow
-	// distances. Forced to 1 when shadows are off; 2 keeps the shipped look.
+	// distances. Native player quality clamps this ceiling at draw time, so the default
+	// allows all four cascades. Explicit overrides and the legacy FPS preset remain ceilings.
 	public static int ShadowCascadeCount { get; } = MapShadows
-		? GetInt( "SBOX_TITANFALL2_SHADOW_CASCADES", AggressiveFps ? 1 : 2, 1, 3 )
+		? GetInt( "SBOX_TITANFALL2_SHADOW_CASCADES", AggressiveFps ? 1 : 4, 1, 4 )
 		: 1;
 	public static bool PropShadows { get; } = GetBool( "SBOX_TITANFALL2_PROP_SHADOWS", true );
 	// Screen-space contact shadows supplement directional shadows on small details. The 120 fps
@@ -127,15 +126,17 @@ static class Titanfall2StreamingSettings
 
 	static int GetInt( string name, int fallback, int minimum, int maximum )
 	{
-		return int.TryParse( Environment.GetEnvironmentVariable( name ), out var value )
-			? Math.Clamp( value, minimum, maximum )
-			: fallback;
+		return GetOptionalInt( name, minimum, maximum ) ?? fallback;
 	}
+
+	internal static int? GetOptionalInt( string name, int minimum, int maximum ) =>
+		int.TryParse( Environment.GetEnvironmentVariable( name ), out var value )
+			? Math.Clamp( value, minimum, maximum ) : null;
 
 	static float GetFloat( string name, float fallback, float minimum, float maximum )
 	{
 		return float.TryParse( Environment.GetEnvironmentVariable( name ), System.Globalization.NumberStyles.Float,
-			System.Globalization.CultureInfo.InvariantCulture, out var value )
+			System.Globalization.CultureInfo.InvariantCulture, out var value ) && float.IsFinite( value )
 			? Math.Clamp( value, minimum, maximum )
 			: fallback;
 	}

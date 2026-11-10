@@ -93,21 +93,38 @@ sealed class Titanfall2NorthstarProfile
 		{
 			var vpks = new List<string>();
 			using var vpkConfig = ReadJson( Path.Combine( mod.Directory, "vpk", "vpk.json" ), identities );
+			var preload = ReadPackageNames( vpkConfig?.RootElement, "Preload" );
+			// MapOnly is a third-party vpk.json convention (Northstar main only reads Preload):
+			// it names the map a VPK belongs to. Preload such a package as well, but only for
+			// the map it declares, or when no map was selected at all. A different selected
+			// map still defers it, so one map's art cannot override another.
+			var mapOnly = ReadMapOnlyPackages( vpkConfig?.RootElement );
 			foreach ( var path in Files( Path.Combine( mod.Directory, "vpk" ), recursive: false ).Where( path => path.EndsWith( ".bsp.pak000_dir.vpk", StringComparison.OrdinalIgnoreCase ) ) )
 			{
 				var name = Path.GetFileName( path );
 				if ( !name.StartsWith( "english", StringComparison.OrdinalIgnoreCase ) ) continue;
 				name = name[7..^".bsp.pak000_dir.vpk".Length];
-				if ( vpkConfig is null || IsTrue( vpkConfig.RootElement, "Preload", name ) || name.Equals( "client_" + map, StringComparison.OrdinalIgnoreCase ) ) vpks.Add( path );
+				if ( vpkConfig is null
+					|| preload.Contains( name )
+					|| IsMapOnlyPackageFor( mapOnly, name, map )
+					|| name.Equals( "client_" + map, StringComparison.OrdinalIgnoreCase ) )
+				{
+					vpks.Add( path );
+					if ( string.IsNullOrEmpty( map ) && mapOnly.TryGetValue( name, out var declaredMap ) )
+						diagnostics.Add( $"{mod.Name}: map-only VPK {name} preloaded for {declaredMap}; the content snapshot is session-wide." );
+				}
 				else diagnostics.Add( $"{mod.Name}: deferred VPK {name}; select NORTHSTAR_MAP for map-specific content." );
 			}
-			var rpaks = SelectRpaks( mod.Directory, map, basePackages, identities, diagnostics, aliasMap );
+			// A map-only declaration also supplies this Mod's map context, so RPAK rules that gate
+			// on the same map (for example "mp_nexus.rpak": "^mp_nexus$") stay in step with it.
+			var declaredMaps = mapOnly.Values.Where( value => !string.IsNullOrEmpty( value ) ).Distinct( StringComparer.OrdinalIgnoreCase ).ToArray();
+			var rpaks = SelectRpaks( mod.Directory, string.IsNullOrEmpty( map ) ? declaredMaps : new[] { map }, basePackages, identities, diagnostics, aliasMap );
 			mods.Add( new( mod.Name, mod.Version, mod.Priority, mod.Directory, vpks.AsReadOnly(), rpaks ) );
 		}
 		Mods = mods.AsReadOnly(); Identities = identities.AsReadOnly(); Diagnostics = diagnostics.AsReadOnly();
 	}
 
-	static IReadOnlyList<string> SelectRpaks( string directory, string map, IEnumerable<string> basePackages, List<string> identities, List<string> diagnostics, Dictionary<string, string> aliasMap )
+	static IReadOnlyList<string> SelectRpaks( string directory, IReadOnlyList<string> maps, IEnumerable<string> basePackages, List<string> identities, List<string> diagnostics, Dictionary<string, string> aliasMap )
 	{
 		var folder = Path.Combine( directory, "paks" );
 		var files = Files( folder, recursive: false ).Where( path => path.EndsWith( ".rpak", StringComparison.OrdinalIgnoreCase ) ).ToDictionary( Path.GetFileName, StringComparer.OrdinalIgnoreCase );
@@ -115,11 +132,16 @@ sealed class Titanfall2NorthstarProfile
 		var selected = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
 		var baseNames = basePackages.Select( PackageBaseName ).ToHashSet( StringComparer.OrdinalIgnoreCase );
 		var loaded = new HashSet<string>( baseNames, StringComparer.OrdinalIgnoreCase );
-		if ( !string.IsNullOrEmpty( map ) )
+		foreach ( var map in maps )
 		{
-			var mapPak = map + ".rpak";
-			if ( !baseNames.Contains( mapPak ) && files.ContainsKey( mapPak ) ) selected.Add( mapPak );
-			loaded.Add( mapPak );
+			// Northstar requests both names for a map. FixupPakPath supplies a Mod
+			// package only when retail has no package under that requested name.
+			foreach ( var suffix in new[] { ".rpak", "_patch.rpak" } )
+			{
+				var mapPak = map + suffix;
+				if ( !baseNames.Contains( mapPak ) && files.ContainsKey( mapPak ) ) selected.Add( mapPak );
+				loaded.Add( mapPak );
+			}
 		}
 		if ( config is not null )
 		{
@@ -127,8 +149,8 @@ sealed class Titanfall2NorthstarProfile
 			foreach ( var name in files.Keys )
 			{
 				if ( IsTrue( json, "Preload", name ) ) selected.Add( name );
-				else if ( !string.IsNullOrEmpty( map ) && json.TryGetProperty( name, out var expression ) && expression.ValueKind == JsonValueKind.String
-					&& Regex.IsMatch( map, "\\A(?:" + expression.GetString() + ")\\z", RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds( 100 ) ) ) selected.Add( name );
+				else if ( maps.Count > 0 && json.TryGetProperty( name, out var expression ) && expression.ValueKind == JsonValueKind.String
+					&& maps.Any( map => Regex.IsMatch( map, "\\A(?:" + expression.GetString() + ")\\z", RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds( 100 ) ) ) ) selected.Add( name );
 			}
 			if ( json.TryGetProperty( "Aliases", out var aliases ) && aliases.ValueKind == JsonValueKind.Object )
 				foreach ( var alias in aliases.EnumerateObject() )
@@ -161,6 +183,69 @@ sealed class Titanfall2NorthstarProfile
 
 	static bool IsTrue( JsonElement json, string section, string name ) => json.TryGetProperty( section, out var values )
 		&& values.ValueKind == JsonValueKind.Object && values.TryGetProperty( name, out var value ) && value.ValueKind == JsonValueKind.True;
+
+	/// <summary>Package names in vpk.json may be Preloaded under any of the name shapes below.</summary>
+	static IReadOnlySet<string> ReadPackageNames( JsonElement? config, string section )
+	{
+		var names = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
+		if ( config is null ) return names;
+		var json = config.Value;
+		if ( json.ValueKind != JsonValueKind.Object || !json.TryGetProperty( section, out var values ) || values.ValueKind != JsonValueKind.Object ) return names;
+		foreach ( var entry in values.EnumerateObject() )
+		{
+			if ( entry.Value.ValueKind != JsonValueKind.True ) continue;
+			var name = NormalizePackageKey( entry.Name );
+			if ( name.Length > 0 ) names.Add( name );
+		}
+		return names;
+	}
+
+	/// <summary>Map a package name to the single map a MapOnly declaration assigns it to.</summary>
+	static IReadOnlyDictionary<string, string> ReadMapOnlyPackages( JsonElement? config )
+	{
+		var packages = new Dictionary<string, string>( StringComparer.OrdinalIgnoreCase );
+		if ( config is null ) return packages;
+		var json = config.Value;
+		if ( json.ValueKind != JsonValueKind.Object || !json.TryGetProperty( "MapOnly", out var values ) || values.ValueKind != JsonValueKind.Object ) return packages;
+		foreach ( var entry in values.EnumerateObject() )
+		{
+			var name = NormalizePackageKey( entry.Name );
+			if ( name.Length == 0 ) continue;
+			packages[name] = entry.Value.ValueKind switch
+			{
+				JsonValueKind.String => entry.Value.GetString()?.Trim().ToLowerInvariant() ?? string.Empty,
+				JsonValueKind.True => string.Empty,
+				_ => null
+			};
+		}
+		return packages;
+	}
+
+	static bool IsMapOnlyPackageFor( IReadOnlyDictionary<string, string> mapOnly, string packageName, string map )
+	{
+		if ( !mapOnly.TryGetValue( packageName, out var declaredMap ) ) return false;
+		if ( string.IsNullOrEmpty( map ) ) return true;
+		return !string.IsNullOrEmpty( declaredMap ) && declaredMap.Equals( map, StringComparison.OrdinalIgnoreCase );
+	}
+
+	/// <summary>
+	/// vpk.json keys can be "client_mp_x", "client_mp_x.bsp" (Northstar main's own vpkName shape)
+	/// or the full "englishclient_mp_x.bsp.pak000_dir.vpk". Reduce all of them to the name the
+	/// mount derives from the directory file, so Preload and MapOnly match every spelling.
+	/// </summary>
+	static string NormalizePackageKey( string value )
+	{
+		if ( string.IsNullOrWhiteSpace( value ) ) return string.Empty;
+		var name = value.Replace( '\\', '/' ).Trim();
+		var slash = name.LastIndexOf( '/' );
+		if ( slash >= 0 ) name = name[(slash + 1)..];
+		if ( name.EndsWith( "_dir.vpk", StringComparison.OrdinalIgnoreCase ) ) name = name[..^"_dir.vpk".Length];
+		else if ( name.EndsWith( ".vpk", StringComparison.OrdinalIgnoreCase ) ) name = name[..^".vpk".Length];
+		if ( name.EndsWith( ".pak000", StringComparison.OrdinalIgnoreCase ) ) name = name[..^".pak000".Length];
+		if ( name.StartsWith( "english", StringComparison.OrdinalIgnoreCase ) ) name = name[7..];
+		if ( name.EndsWith( ".bsp", StringComparison.OrdinalIgnoreCase ) ) name = name[..^".bsp".Length];
+		return name.Trim().ToLowerInvariant();
+	}
 
 	static JsonDocument ReadJson( string path, List<string> identities )
 	{

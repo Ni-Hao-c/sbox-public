@@ -77,6 +77,7 @@ public partial class Titanfall2Mount : BaseGameMount
 
 	protected override Task Mount( MountContext context )
 	{
+		Titanfall2GraphicsSettings.Connect();
 		InvalidateSceneReleaseWork();
 		_contentFingerprint = null;
 		EnsureRuntimeTypesRegistered();
@@ -153,6 +154,7 @@ public partial class Titanfall2Mount : BaseGameMount
 
 	protected override void Shutdown()
 	{
+		Titanfall2GraphicsSettings.Disconnect();
 		InvalidateSceneReleaseWork();
 		_contentSnapshot = null;
 		ReleaseSoundEventSessions();

@@ -4,12 +4,18 @@ partial class MapLoader
 {
 	// Multiplier for authored _ambient sky colour when no compiled sky light exists.
 	const float AmbientScale = 1.35f;
+	IReadOnlyList<Dictionary<string, string>> _environmentEntities;
+	IReadOnlyList<Dictionary<string, string>> _externalEnvironmentEntities;
+
+	IReadOnlyList<Dictionary<string, string>> ReadExternalEnvironmentEntities() =>
+		_externalEnvironmentEntities ??= ReadEntities( _environmentEntitySource );
+
+	IReadOnlyList<Dictionary<string, string>> ReadEnvironmentEntities( Titanfall2BspReader.ParsedBsp parsed ) =>
+		_environmentEntities ??= Titanfall2EnvironmentEntities.Merge( ReadExternalEnvironmentEntities(), parsed.Entities );
 
 	void CreateEnvironment( Titanfall2BspReader.ParsedBsp parsed )
 	{
-		var entities = ReadEntities( _environmentEntitySource );
-		// Repacks that omit the environment partition still ship the rBSP entity lump.
-		if ( entities.Count == 0 ) entities = parsed.Entities;
+		var entities = ReadEnvironmentEntities( parsed );
 		var lightValues = Titanfall2LightEnvironment.Default( entities );
 
 		var gameObject = new GameObject( true, "titanfall2_environment_light" );
@@ -41,23 +47,31 @@ partial class MapLoader
 			light.SkyColor = ReadBakedSkyColor( parsed );
 			var definitions = entities.Where( e => e.GetValueOrDefault( "classname" ) is "light_environment" or "light_environment_volume" ).ToArray();
 			var states = new List<float[]>();
+			var stateIndices = new HashSet<int>();
 			foreach ( var definition in definitions.Where( e => e.GetValueOrDefault( "classname" ) == "light_environment" ) )
 			{
 				var index = Titanfall2LightEnvironment.Index( definition );
 				var sourceSun = SelectBakedEnvironmentLight( parsed, definition, Titanfall2WorldLight.SunType );
 				var sourceSky = SelectBakedEnvironmentLight( parsed, definition, Titanfall2WorldLight.SkyAmbientType );
-				if ( index < 0 || sourceSun is null || sourceSky is null ) continue;
+				if ( index < 0 || sourceSun is null || sourceSky is null || !stateIndices.Add( index ) ) continue;
 				states.Add( [index, sourceSun.Intensity.X, sourceSun.Intensity.Y, sourceSun.Intensity.Z,
 					sourceSun.Direction.X, sourceSun.Direction.Y, sourceSun.Direction.Z,
 					sourceSky.Intensity.X, sourceSky.Intensity.Y, sourceSky.Intensity.Z] );
 			}
-			if ( states.Count > 0 ) gameObject.AddComponent<Titanfall2EnvironmentController>().Configure( definitions, states.ToArray() );
+			if ( states.Count > 0 )
+			{
+				// A default light may have no authored index or no complete compiled pair.
+				// Preserve the actual import baseline so leaving a local volume can restore it.
+				var direction = gameObject.WorldRotation.Forward;
+				states.Add( [-1, light.LightColor.r, light.LightColor.g, light.LightColor.b,
+					direction.x, direction.y, direction.z, light.SkyColor.r, light.SkyColor.g, light.SkyColor.b] );
+				gameObject.AddComponent<Titanfall2EnvironmentController>().Configure( definitions, states.ToArray() );
+			}
 		}
 		light.ShadowCascadeCount = Titanfall2StreamingSettings.ShadowCascadeCount;
 		light.ContactShadows = Titanfall2StreamingSettings.NativeContactShadows;
 
-		var fogEntities = ReferenceEquals( entities, parsed.Entities ) ? entities.ToArray()
-			: entities.Concat( parsed.Entities.Where( e => e.GetValueOrDefault( "classname" ) == "fog_volume" ) ).ToArray();
+		var fogEntities = entities;
 		var fogValues = new Titanfall2FogEnvironment( fogEntities ).Select( System.Numerics.Vector3.Zero );
 		if ( fogValues is not null )
 		{
@@ -80,19 +94,13 @@ partial class MapLoader
 			// and local controller volumes still need their own entity/IO path.
 			Titanfall2Tonemapping.CreateMapDisplay( postProcess, Titanfall2StreamingSettings.BakedExposureCompensation );
 		}
-		// Global enabled correction entities are explicit authored map data.
-		// Local volumes and scripted fades need their own spatial/IO handling.
-		var correction = entities.FirstOrDefault( values => values.GetValueOrDefault( "classname" ) == "color_correction"
-			&& !IsEntityTrue( values.GetValueOrDefault( "StartDisabled" ) )
-			&& GetEntityFloat( values, "minfalloff", -1 ) < 0 && GetEntityFloat( values, "maxfalloff", -1 ) < 0 );
-		if ( correction?.TryGetValue( "filename", out var lookupPath ) == true )
+		var corrections = entities.Where( values => (values.GetValueOrDefault( "classname" ) is "color_correction" or "color_correction_volume")
+			&& !IsEntityTrue( values.GetValueOrDefault( "StartDisabled" ) ) ).ToArray();
+		if ( corrections.Length > 0 )
 		{
-			// The table is mounted as its own volume texture, so the scene stores the
-			// resource path instead of the 98,304 bytes of samples.
-			var weight = GetEntityFloat( correction, "maxweight", 1 );
-			var gradingPath = $"mount://{Host.Ident}/{lookupPath.Replace( '\\', '/' ).TrimStart( '/' )}.vtex";
-			postProcess.AddComponent<Titanfall2ColorCorrection>().Configure( gradingPath, lookupPath, weight );
-			Log.Info( $"Titanfall 2 map color correction: {lookupPath}, weight {weight} ({Path})." );
+			postProcess.AddComponent<Titanfall2ColorCorrection>().ConfigureStack( Host.Ident, corrections );
+			Log.Info( $"Titanfall 2 color correction: {corrections.Length} enabled radial/global/brush definitions; "
+				+ $"weights evaluated per camera and LUTs composed on the GPU ({Path})." );
 		}
 
 		Log.Info( $"Titanfall 2 environment created from map entities: "

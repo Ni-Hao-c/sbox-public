@@ -1,4 +1,4 @@
-﻿using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
 using System.Text;
 using ResourceType = Sandbox.Mounting.ResourceType;
 
@@ -200,6 +200,50 @@ public class ContentSnapshotTests
 	}
 
 	[TestMethod]
+	public void MapOnlyVpkPreloadsWithoutASelectedMapAndAcceptsBspSuffixedKeys()
+	{
+		using var fixture = new Fixture(); fixture.Mod( "mods/a", "A" );
+		fixture.Write( "mods/a/vpk/vpk.json", "{\"MapOnly\":{\"client_mp_nexus.bsp\":\"mp_nexus\"}}" );
+		WriteVpk( Path.Combine( fixture.Root, "mods/a/vpk/englishclient_mp_nexus.bsp.pak000_dir.vpk" ), "map" );
+		var snapshot = Titanfall2ContentDiscovery.Build( fixture.Root, fixture.Root );
+		Assert.IsTrue( snapshot.GetSource( "test.txt" ).TryReadAllBytes( out var bytes, out var error ), error );
+		Assert.AreEqual( "map", Encoding.UTF8.GetString( bytes ) );
+		Assert.IsTrue( snapshot.Diagnostics.Any( text => text.Contains( "map-only VPK client_mp_nexus" ) ) );
+	}
+
+	[TestMethod]
+	public void MapOnlyPackageStaysDeferredForADifferentSelectedMap()
+	{
+		using var fixture = new Fixture(); fixture.Mod( "mods/a", "A" );
+		fixture.Write( "mods/a/vpk/vpk.json", "{\"MapOnly\":{\"client_mp_nexus\":\"mp_nexus\"}}" );
+		WriteVpk( Path.Combine( fixture.Root, "mods/a/vpk/englishclient_mp_nexus.bsp.pak000_dir.vpk" ), "map" );
+		Assert.IsNull( Titanfall2ContentDiscovery.Build( fixture.Root, fixture.Root, "mp_angel_city" ).GetSource( "test.txt" ) );
+		Assert.IsNotNull( Titanfall2ContentDiscovery.Build( fixture.Root, fixture.Root, "mp_nexus" ).GetSource( "test.txt" ) );
+	}
+
+	[TestMethod]
+	public void PreloadSectionAcceptsNorthstarBspSuffixedPackageKeys()
+	{
+		using var fixture = new Fixture(); fixture.Mod( "mods/a", "A" );
+		fixture.Write( "mods/a/vpk/vpk.json", "{\"Preload\":{\"client_mp_nexus.bsp\":true}}" );
+		WriteVpk( Path.Combine( fixture.Root, "mods/a/vpk/englishclient_mp_nexus.bsp.pak000_dir.vpk" ), "map" );
+		Assert.IsNotNull( Titanfall2ContentDiscovery.Build( fixture.Root, fixture.Root ).GetSource( "test.txt" ) );
+	}
+
+	[TestMethod]
+	public void MapOnlyDeclarationSelectsTheSameMapRpakWithoutASelectedMap()
+	{
+		using var fixture = new Fixture(); fixture.Mod( "mods/a", "A" );
+		fixture.Write( "mods/a/vpk/vpk.json", "{\"MapOnly\":{\"client_mp_nexus.bsp\":\"mp_nexus\"}}" );
+		fixture.Write( "mods/a/paks/mp_nexus.rpak", "fixture" );
+		fixture.Write( "mods/a/paks/rpak.json", "{\"mp_nexus.rpak\":\"^mp_nexus$\"}" );
+		var withoutMap = new Titanfall2NorthstarProfile( fixture.Root, null, [] );
+		CollectionAssert.AreEqual( new[] { "mp_nexus.rpak" }, withoutMap.Mods[0].Rpaks.Select( Path.GetFileName ).ToArray() );
+		var otherMap = new Titanfall2NorthstarProfile( fixture.Root, "mp_angel_city", [] );
+		Assert.IsFalse( otherMap.Mods[0].Rpaks.Any( path => path.EndsWith( "mp_nexus.rpak" ) ) );
+	}
+
+	[TestMethod]
 	public void AliasMayRedirectToRetailPackageAndCannotEscapePackageDirectory()
 	{
 		using var fixture = new Fixture(); fixture.Mod( "mods/a", "A" );
@@ -236,6 +280,61 @@ public class ContentSnapshotTests
 		fixture.Write( "mods/a/paks/mp_custom.rpak", "fixture" );
 		var profile = new Titanfall2NorthstarProfile( fixture.Root, "mp_custom", ["common.rpak"] );
 		Assert.AreEqual( "mp_custom.rpak", Path.GetFileName( profile.Mods[0].Rpaks.Single() ) );
+	}
+
+	[TestMethod]
+	public void MapPatchPakAndItsPostloadDependencyAreSelectedWithoutPreload()
+	{
+		using var fixture = new Fixture(); fixture.Mod( "mods/a", "A" );
+		foreach ( var name in new[] { "mp_custom", "mp_custom_patch", "patch_art", "mp_other_patch" } )
+			fixture.Write( $"mods/a/paks/{name}.rpak", "fixture" );
+		fixture.Write( "mods/a/paks/rpak.json", "{\"Postload\":{\"patch_art.rpak\":\"mp_custom_patch.rpak\"}}" );
+		var profile = new Titanfall2NorthstarProfile( fixture.Root, "mp_custom", ["common.rpak"] );
+		CollectionAssert.AreEquivalent( new[] { "mp_custom.rpak", "mp_custom_patch.rpak", "patch_art.rpak" },
+			profile.Mods.Single().Rpaks.Select( Path.GetFileName ).ToArray() );
+		var retail = new Titanfall2NorthstarProfile( fixture.Root, "mp_custom", ["mp_custom(01).rpak", "mp_custom_patch.rpak"] );
+		CollectionAssert.AreEqual( new[] { "patch_art.rpak" }, retail.Mods.Single().Rpaks.Select( Path.GetFileName ).ToArray() );
+		Assert.AreEqual( 0, new Titanfall2NorthstarProfile( fixture.Root, null, [] ).Mods.Single().Rpaks.Count );
+	}
+
+	static string WriteStreamingRpak( Fixture fixture )
+	{
+		var path = fixture.Write( "r2/paks/Win64/shared.rpak", "" );
+		var reference = Encoding.UTF8.GetBytes( "stream/shared.starpak\0" );
+		var bytes = new byte[0x58 + reference.Length];
+		System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian( bytes, 0x6B615052 );
+		System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian( bytes.AsSpan( 4 ), 7 );
+		System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian( bytes.AsSpan( 0x38 ), (ushort)reference.Length );
+		reference.CopyTo( bytes, 0x58 );
+		File.WriteAllBytes( path, bytes );
+		return path;
+	}
+
+	[TestMethod]
+	public void ResolvedNestedStreamingDependencyChangesTheSnapshotRevision()
+	{
+		using var fixture = new Fixture();
+		WriteStreamingRpak( fixture );
+		var stream = fixture.Write( "r2/paks/Win64/stream/shared.starpak", "first" );
+		var before = Titanfall2ContentDiscovery.Build( fixture.Root );
+		Assert.IsFalse( before.Diagnostics.Any( text => text.Contains( "Cannot index" ) ) );
+		File.WriteAllText( stream, "replacement" );
+		Assert.AreNotEqual( before.Revision, Titanfall2ContentDiscovery.Build( fixture.Root ).Revision,
+			"Every resolved STARPAK contributes to cache identity, including files below the flat package directory." );
+	}
+
+	[TestMethod]
+	public void MissingStreamingDependencyIsPinnedAndItsArrivalChangesTheNextSnapshot()
+	{
+		using var fixture = new Fixture();
+		var package = WriteStreamingRpak( fixture );
+		Assert.IsTrue( RpakArchive.TryOpen( package, out var archive, out var error ), error );
+		archive.FreezeSources();
+		var before = Titanfall2ContentDiscovery.Build( fixture.Root );
+		Assert.IsNull( archive.GetStreamingFilePath( 0 ) );
+		fixture.Write( "r2/paks/Win64/stream/shared.starpak", "new dependency" );
+		Assert.IsNull( archive.GetStreamingFilePath( 0 ), "An existing session must not silently adopt a new dependency." );
+		Assert.AreNotEqual( before.Revision, Titanfall2ContentDiscovery.Build( fixture.Root ).Revision );
 	}
 
 	[TestMethod]

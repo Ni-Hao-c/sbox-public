@@ -8,17 +8,6 @@ static class RpakTextureDecoder
 	static long _uploadedBytes;
 	static long _failedTextures;
 
-	public static bool TryCreate( RpakArchive archive, RpakAsset asset, out Texture texture, out string error )
-	{
-		texture = null;
-		if ( !TryRead( archive, asset, out var decoded, out error ) )
-		{
-			System.Threading.Interlocked.Increment( ref _failedTextures );
-			return false;
-		}
-		return TryCreate( decoded, out texture, out error );
-	}
-
 	internal static bool TryCreate( RpakTextureData decoded, out Texture texture, out string error )
 	{
 		texture = null;
@@ -99,13 +88,13 @@ static class RpakTextureDecoder
 		System.Threading.Interlocked.Read( ref _failedTextures ),
 		Titanfall2StreamingSettings.TextureMaxDimension );
 
-	public static bool TryRead( RpakArchive archive, RpakAsset asset, out RpakTextureData texture, out string error )
+	public static bool TryRead( RpakArchive archive, RpakAsset asset, out RpakTextureData texture, out string error, int? maximumDimension = null )
 	{
 		// Malformed headers can overflow the checked mip-size math or the header
 		// size conversion; callers (texture loader Prepare/Load) do not catch.
 		try
 		{
-			return TryReadCore( archive, asset, out texture, out error );
+			return TryReadCore( archive, asset, out texture, out error, maximumDimension ?? Titanfall2StreamingSettings.TextureMaxDimension );
 		}
 		catch ( Exception exception )
 		{
@@ -115,7 +104,7 @@ static class RpakTextureDecoder
 		}
 	}
 
-	static bool TryReadCore( RpakArchive archive, RpakAsset asset, out RpakTextureData texture, out string error )
+	static bool TryReadCore( RpakArchive archive, RpakAsset asset, out RpakTextureData texture, out string error, int maximumDimension )
 	{
 		texture = default;
 		error = null;
@@ -168,7 +157,7 @@ static class RpakTextureDecoder
 		var streamedCount = optionalMipCount + streamedMipCount;
 		var baseLevel = 0;
 		while ( baseLevel + 1 < totalMipCount
-			&& Math.Max( Math.Max( 1, width >> baseLevel ), Math.Max( 1, height >> baseLevel ) ) > Titanfall2StreamingSettings.TextureMaxDimension )
+			&& Math.Max( Math.Max( 1, width >> baseLevel ), Math.Max( 1, height >> baseLevel ) ) > maximumDimension )
 		{
 			baseLevel++;
 		}

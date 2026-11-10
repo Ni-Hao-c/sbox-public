@@ -60,6 +60,8 @@ partial class MapLoader(
 		_cachedWorldBuild = null;
 		_classifiedWorldModels.Clear();
 		_materialPrefetch = null;
+		_environmentEntities = null;
+		_externalEnvironmentEntities = null;
 	}
 
 	protected override void BuildScene()
@@ -122,7 +124,8 @@ partial class MapLoader(
 			if ( !_source.TryReadAllBytes( out var bytes, out var readError ) ) return (null, readError);
 			if ( !Titanfall2BspReader.TryRead( bytes, System.IO.Path.GetFileNameWithoutExtension( _source.Description ), ReadCollisionLumpOverrides(),
 				parseWorldCollision: true, parseLightmaps: lightmaps,
-				parseStaticPropLightProbes: lightmaps, out var result, out var parseError, allCollisionContents: true ) )
+				parseStaticPropLightProbes: lightmaps, out var result, out var parseError, allCollisionContents: true,
+				environmentEntities: ReadExternalEnvironmentEntities() ) )
 				return (null, $"parse failed: {parseError}");
 			// Written by a worker from the parse this build already owns: a failed or skipped write
 			// never changes what this load uses.

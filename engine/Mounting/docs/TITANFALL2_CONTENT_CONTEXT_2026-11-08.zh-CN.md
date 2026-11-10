@@ -1,4 +1,4 @@
-﻿# Titanfall 2 不可变内容上下文与 Northstar 资产接入
+# Titanfall 2 不可变内容上下文与 Northstar 资产接入
 
 日期：2026-11-08。实现位于 `Sandbox.Mounting.Titanfall2/Content/`。当前工作区原有修改保留；本批不改宿主 ABI、引擎其他源码或 shader，不部署主运行目录 DLL。
 
@@ -33,10 +33,10 @@ RPAK 的 GUID、shader 与资源注册表从同一快照派生；材质转换、
 | 旧 `enabledmods.json` | `Name: bool`，只读解释、不迁移原文件 |
 | main `enabledmods.json` | `Version: 1`，按 `Name → ModVersion → bool` 选择；多个版本同时启用时全部禁用并报告 |
 | `<mod>/mod/` | loose 文件覆盖与新增内容；只对已索引虚拟路径解析依赖 |
-| `<mod>/vpk/vpk.json` | 缺少配置时自动载入；配置存在时按 Preload 或固定地图的 `client_<map>` 包选择 |
-| `<mod>/paks/rpak.json` | Preload、Postload（当前固定载入包集合及同 Mod 闭包）、固定地图正则；Aliases 支持指向本 Mod 或原版包 |
-| 自定义地图 RPAK | 指定地图名且原版没有同名包时，可通过同名 Mod RPAK 接入，无需旧式 rpak.json |
-| STARPAK | 沿用现有读取器，发布前固定其实际位置及文件版本 |
+| `<mod>/vpk/vpk.json` | 缺少配置时自动载入；配置存在时按 Preload、MapOnly 或固定地图的 `client_<map>` 包选择。MapOnly 视为 MapOnly 声明的地图专属预载：未指定地图时同样载入并报告诊断，选中其他地图时推迟。键可写 `client_x`、`client_x.bsp` 或完整目录文件名 |
+| `<mod>/paks/rpak.json` | Preload、Postload（当前固定载入包集合及同 Mod 闭包）、固定地图正则；Aliases 支持指向本 Mod 或原版包。未指定 `NORTHSTAR_MAP` 时，同 Mod 的 MapOnly 声明为该 Mod 的地图上下文，供这些正则匹配 |
+| 自定义地图 RPAK | 指定地图名且原版没有同名包时，可通过同名 Mod RPAK 接入，无需旧式 rpak.json；同时处理 `<map>.rpak` 和 `<map>_patch.rpak`，并接入同 Mod 的 Postload 依赖 |
+| STARPAK | 沿用现有读取器，发布前固定其实际位置及文件版本；所有已解析依赖与缺失状态参与内容修订，包括不在平铺包目录中的依赖 |
 
 文件覆盖顺序：全部启用 Mod 的 loose 层优先，Mod 按 LoadPriority 降序；再按同样 Mod 顺序处理 RPAK、VPK；最后为原版 RPAK、原版 VPK、生成天空材质与 Miles。loose 文件优先于 VPK 符合 Northstar 文件替换 hook。相同优先级采用目录 ordinal 顺序，避免依赖操作系统枚举顺序；Northstar 的等优先级排序本身没有稳定承诺。
 
