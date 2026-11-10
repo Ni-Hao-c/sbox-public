@@ -175,7 +175,7 @@ static class Program
 		foreach ( var entry in archives )
 			group.GetOrCreateCompiler( entry.Archive.CompilerName ).UpdateFromArchive( entry.Archive );
 
-		// BuildAsync handles dependency ordering, parallel compilation, Razor, source generators, blacklist walker, Emit.
+		// BuildAsync handles dependency ordering, parallel compilation, Razor, source generators, code-access analyzer, Emit.
 		if ( !await group.BuildAsync() )
 		{
 			result.Errors = group.BuildResult.Diagnostics
@@ -246,16 +246,20 @@ class EngineReferenceProvider : ICompileReferenceProvider
 		}
 	}
 
+	// CompileGroup builds its compilers in parallel, and they all resolve references through this one provider.
 	public PortableExecutableReference Lookup( string reference )
 	{
-		if ( _cache.TryGetValue( reference, out var cached ) )
-			return cached;
+		lock ( _cache )
+		{
+			if ( _cache.TryGetValue( reference, out var cached ) )
+				return cached;
 
-		if ( !_paths.TryGetValue( reference, out var path ) )
-			return null;
+			if ( !_paths.TryGetValue( reference, out var path ) )
+				return null;
 
-		try { return _cache[reference] = MetadataReference.CreateFromFile( path ); }
-		catch { return _cache[reference] = null; } // skip unreadable / native DLLs
+			try { return _cache[reference] = MetadataReference.CreateFromFile( path ); }
+			catch { return _cache[reference] = null; } // skip unreadable / native DLLs
+		}
 	}
 }
 
