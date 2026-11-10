@@ -62,67 +62,16 @@ public sealed partial class Titanfall2StaticPropStreamer
 	// is bounded by construction; the portal walk used to be the unbudgeted part.
 	readonly Stopwatch _refreshProbe = new();
 	bool _refreshGridValid;
-	// Per-camera-cell reachability cache. The reachable set depends only on the camera's PVS cell
-	// and the immutable portal graph, not on the exact anchor, so a map with 74 cells needs at most
-	// 74 BFS rounds for the whole session. That is what makes the portal walk cheap enough to turn
-	// into a budgeted job instead of a per-refresh hit.
-	int[][] _pvsAdjacency;
-	Titanfall2BspReader.BspVisibility _pvsAdjacencySource;
-	Titanfall2BspReader.VisibilityCellMask[] _pvsCachedReachable;
-	bool[] _pvsCachedKnown;
-	// One BFS round in flight: queue, visited mask and the anchor it was started for. The previous
-	// mask stays active until the round completes, so a frame never renders with a half-built set.
-	int[] _pvsRoundCells;
-	int[] _pvsRoundDepths;
-	int _pvsRoundHead;
-	int _pvsRoundTail;
-	Titanfall2BspReader.VisibilityCellMask _pvsRoundMask;
-	int _pvsRoundCell = -1;
-	Vector3 _pvsRoundAnchor;
-	bool _pvsRoundActive;
-	readonly Stopwatch _pvsRoundProbe = new();
-	double _pvsRoundMilliseconds;
-	double _pvsLastRoundMilliseconds;
+	Titanfall2CompiledVisibility _compiledVisibility;
 
-	/// <summary>
-	/// Drives the runtime cell refresh. A refresh runs when the anchor crossed a
-	/// <see cref="RefreshGridSize"/> grid bucket and moved at least
-	/// <see cref="RefreshHysteresisDistance"/> since the last one, or when the camera entered a new
-	/// PVS cell (which must apply immediately). Standing still does no work at all. The portal walk
-	/// is cached per PVS cell and, on a first visit, advanced by <see cref="AdvanceReachableRound"/>
-	/// under a per-frame budget while the previous mask stays active.
-	/// </summary>
+	/// <summary>Reachability is compiled at import (legacy scenes compile once during load).</summary>
 	void UpdateCellRefresh( Vector3 anchor, int pvsCell, bool pvsCellChanged )
 	{
-		// A round already running for the new cell is not a reason to refresh distances again:
-		// while it drains the previous mask is still active and pvsCellChanged stays true.
-		var forced = !_refreshGridValid || (pvsCellChanged && pvsCell != _pvsRoundCell);
-		var refreshed = false;
-		if ( forced || ShouldRefreshCells( anchor ) )
+		if ( !_refreshGridValid || pvsCellChanged || ShouldRefreshCells( anchor ) )
 		{
+			_visiblePvsCells = _compiledVisibility?[pvsCell] ?? default;
+			_pvsCameraCell = pvsCell;
 			RefreshCellDistances( anchor );
-			refreshed = true;
-		}
-
-		// A round for a cell the camera already left must not apply its mask for the new room: drop it
-		// when the current cell is already cached, otherwise restart it below for the current cell.
-		if ( pvsCell >= 0 && _pvsRoundActive && _pvsRoundCell != pvsCell && IsReachableCellsCached( pvsCell ) )
-			_pvsRoundActive = false;
-
-		if ( pvsCell >= 0 && !IsReachableCellsCached( pvsCell )
-			&& (!_pvsRoundActive || _pvsRoundCell != pvsCell) )
-			BeginReachableRound( pvsCell, anchor );
-
-		// Fast path: on a cell change the round starts and is advanced in this same frame, so a
-		// retail map's whole portal graph (~700 edges) fits one step and the new room's visibility
-		// applies immediately; a larger graph continues on following frames instead of stalling.
-		var applied = AdvanceReachableRound( PvsEdgesPerFrame, PvsBudgetMilliseconds );
-		// A mask applied on a frame that did no distance refresh still has to reach the visibility
-		// sweep, otherwise batches would keep the previous cell's render state until the next refresh.
-		if ( applied && !refreshed )
-		{
-			_runtimePvsUpdatePending = true;
-			QueueRuntimeCellRefresh();
 		}
 	}
 
@@ -147,8 +96,8 @@ public sealed partial class Titanfall2StaticPropStreamer
 	/// <summary>
 	/// The cheap half of a refresh: one distance per prop cell, the per-cluster minimum and the two
 	/// distance-sorted queues. O(cells) = 477 distance tests plus a 52- and a 477-entry sort over
-	/// reused list buffers, so it is bounded by construction and allocates nothing. The portal walk
-	/// that used to run here moved to the cached, budgeted reachability round. The spawn work queue
+	/// reused list buffers, so it is bounded by construction and allocates nothing. Portal
+	/// reachability is already compiled into the scene data. The spawn work queue
 	/// is not rebuilt at runtime: <see cref="RefreshCells"/> already skips it once loading finished.
 	/// </summary>
 	void RefreshCellDistances( Vector3 anchor )
@@ -179,157 +128,15 @@ public sealed partial class Titanfall2StaticPropStreamer
 		ReportSpike( _refreshProbe, "cell refresh ({0} cells)", _cells.Count );
 		if ( !Titanfall2Log.VerboseLogging ) return;
 		Titanfall2Log.Info( $"Titanfall 2 prop cell refresh: cells={_cells.Count} sort={elapsed:0.00}ms "
-			+ $"portals={_pvsLastRoundMilliseconds:0.00}ms (grid {RefreshGridSize:0}u, pvs cell {_pvsCameraCell}, "
+			+ $"compiled PVS (grid {RefreshGridSize:0}u, pvs cell {_pvsCameraCell}, "
 			+ $"sweep pending {(_runtimePvsUpdatePending ? 1 : 0)}) ({MapPath})." );
-		_pvsLastRoundMilliseconds = 0;
-	}
-
-	/// <summary>
-	/// Builds the portal graph once per visibility payload: adjacency[from] lists the ToCell of every
-	/// portal leaving <c>from</c>. The old walk scanned all portals for every dequeued cell
-	/// (74 x 712 comparisons per refresh); with this graph a round is O(cells + portals) = ~800 edge
-	/// visits, which is why it normally fits a single budgeted step.
-	/// </summary>
-	void EnsurePvsAdjacency()
-	{
-		var visibility = _visibility;
-		if ( _pvsAdjacency is not null && ReferenceEquals( _pvsAdjacencySource, visibility ) ) return;
-		_pvsAdjacency = null;
-		_pvsCachedReachable = null;
-		_pvsCachedKnown = null;
-		_pvsRoundCells = null;
-		_pvsRoundDepths = null;
-		_pvsAdjacencySource = visibility;
-		if ( visibility is not { IsValid: true } ) return;
-
-		var cellCount = visibility.CellCount;
-		var adjacency = new int[cellCount][];
-		var sizes = new int[cellCount];
-		foreach ( var portal in visibility.Portals )
-		{
-			if ( portal.FromCell < 0 || portal.FromCell >= cellCount || portal.ToCell < 0 || portal.ToCell >= cellCount ) continue;
-			sizes[portal.FromCell]++;
-		}
-		for ( var cell = 0; cell < cellCount; cell++ )
-			adjacency[cell] = sizes[cell] == 0 ? Array.Empty<int>() : new int[sizes[cell]];
-		var writes = new int[cellCount];
-		foreach ( var portal in visibility.Portals )
-		{
-			if ( portal.FromCell < 0 || portal.FromCell >= cellCount || portal.ToCell < 0 || portal.ToCell >= cellCount ) continue;
-			adjacency[portal.FromCell][writes[portal.FromCell]++] = portal.ToCell;
-		}
-
-		_pvsAdjacency = adjacency;
-		_pvsCachedReachable = new Titanfall2BspReader.VisibilityCellMask[cellCount];
-		_pvsCachedKnown = new bool[cellCount];
-		_pvsRoundCells = new int[cellCount];
-		_pvsRoundDepths = new int[cellCount];
-	}
-
-	bool IsReachableCellsCached( int cell )
-		=> _pvsCachedKnown is not null && cell >= 0 && cell < _pvsCachedKnown.Length && _pvsCachedKnown[cell];
-
-	void BeginReachableRound( int cell, Vector3 anchor )
-	{
-		EnsurePvsAdjacency();
-		if ( _pvsAdjacency is null || cell < 0 || cell >= _pvsAdjacency.Length ) return;
-		_pvsRoundCell = cell;
-		_pvsRoundAnchor = anchor;
-		_pvsRoundMask = new Titanfall2BspReader.VisibilityCellMask().Add( cell );
-		_pvsRoundCells[0] = cell;
-		_pvsRoundDepths[0] = 0;
-		_pvsRoundHead = 0;
-		_pvsRoundTail = 1;
-		_pvsRoundActive = true;
-		_pvsRoundMilliseconds = 0;
-		_pvsRoundProbe.Restart();
-	}
-
-	/// <summary>
-	/// Advances the reachability round by at most <paramref name="edgeBudget"/> portal edges and
-	/// <paramref name="timeBudgetMilliseconds"/> (a non-positive time budget means no time limit,
-	/// used by the synchronous first-visit path). Returns true when the round completed and the new
-	/// mask was applied. The queue strictly drains — every cell enters it at most once — so a round
-	/// finishes in at most CellCount steps regardless of budget, and the previous mask stays active
-	/// until then: no frame ever renders a half-built visibility set.
-	/// </summary>
-	bool AdvanceReachableRound( int edgeBudget, float timeBudgetMilliseconds )
-	{
-		if ( !_pvsRoundActive ) return false;
-		// The visibility payload can be replaced between frames (Configure with a new parse); the
-		// adjacency is rebuilt lazily, so a round that outlived it is simply abandoned.
-		if ( _pvsAdjacency is null )
-		{
-			_pvsRoundActive = false;
-			return false;
-		}
-		var edges = 0;
-		while ( _pvsRoundHead < _pvsRoundTail )
-		{
-			var cell = _pvsRoundCells[_pvsRoundHead];
-			var depth = _pvsRoundDepths[_pvsRoundHead];
-			_pvsRoundHead++;
-			if ( depth < PvsPortalDepth )
-			{
-				var neighbours = _pvsAdjacency[cell];
-				edges += neighbours.Length;
-				for ( var index = 0; index < neighbours.Length; index++ )
-				{
-					var next = neighbours[index];
-					if ( _pvsRoundMask.Contains( next ) ) continue;
-					_pvsRoundMask = _pvsRoundMask.Add( next );
-					_pvsRoundCells[_pvsRoundTail] = next;
-					_pvsRoundDepths[_pvsRoundTail] = depth + 1;
-					_pvsRoundTail++;
-				}
-			}
-
-			var overTime = timeBudgetMilliseconds > 0f
-				&& _pvsRoundProbe.Elapsed.TotalMilliseconds >= timeBudgetMilliseconds;
-			if ( edges >= edgeBudget || overTime ) break;
-		}
-
-		_pvsRoundMilliseconds += _pvsRoundProbe.Elapsed.TotalMilliseconds;
-		_pvsRoundProbe.Restart();
-		if ( _pvsRoundHead < _pvsRoundTail ) return false;
-
-		// Round complete: cache it per camera cell and only now replace the active mask.
-		_pvsRoundActive = false;
-		var reachable = _pvsRoundMask.Union( _visibility.AlwaysVisibleCells );
-		if ( _pvsCachedKnown is not null && _pvsRoundCell >= 0 && _pvsRoundCell < _pvsCachedKnown.Length )
-		{
-			_pvsCachedReachable[_pvsRoundCell] = reachable;
-			_pvsCachedKnown[_pvsRoundCell] = true;
-		}
-		_visiblePvsCells = reachable;
-		_pvsCameraCell = _pvsRoundCell;
-		_pvsLastRoundMilliseconds = _pvsRoundMilliseconds;
-		if ( _pvsRoundMilliseconds > PvsBudgetMilliseconds )
-			Titanfall2Log.Spike( $"PVS reachable round for cell {_pvsRoundCell} took {_pvsRoundMilliseconds:0.00} ms "
-				+ $"(budget {PvsBudgetMilliseconds:0.0} ms per frame, edges {PvsEdgesPerFrame})" );
-		LogPvsDiagnostics( _pvsRoundAnchor, applied: true );
-		return true;
-	}
-
-	/// <summary>Synchronous reachability for the loading path: computes and caches one cell's set.</summary>
-	Titanfall2BspReader.VisibilityCellMask ComputeReachableCells( int cell )
-	{
-		EnsurePvsAdjacency();
-		if ( _pvsAdjacency is null || cell < 0 || cell >= _pvsAdjacency.Length ) return default;
-		if ( _pvsCachedKnown[cell] ) return _pvsCachedReachable[cell];
-		BeginReachableRound( cell, _lastAnchor );
-		// A non-positive time budget means "no time limit", so this drains the whole round at once.
-		while ( _pvsRoundActive && !AdvanceReachableRound( int.MaxValue, 0f ) ) { }
-		return _pvsCachedKnown[cell] ? _pvsCachedReachable[cell] : default;
 	}
 
 	Titanfall2BspReader.VisibilityCellMask ResolveVisiblePvsCells( Vector3 anchor )
 	{
-		_pvsCameraCell = -1;
-		if ( !TryFindPvsCell( anchor, out _pvsCameraCell ) ) return default;
-		var reachable = ComputeReachableCells( _pvsCameraCell );
-		LogPvsDiagnostics( anchor, applied: true );
-		return reachable;
+		EnsureVisibility();
+		TryFindPvsCell( anchor, out _pvsCameraCell );
+		return _compiledVisibility?[_pvsCameraCell] ?? default;
 	}
 
 	bool TryFindPvsCell( Vector3 anchor, out int cell )
@@ -467,6 +274,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 
 		foreach ( var batch in cluster.Batches.Values )
 		{
+			if ( batch.GpuRendered ) continue;
 			var visible = IsRenderVisible( batch.PvsCells );
 			var wasRendered = batch.RenderingEnabled;
 
@@ -533,7 +341,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 		{
 			foreach ( var batch in cluster.Batches.Values )
 			{
-				if ( batch.ShadowedInstanceCount <= 0 || !batch.RenderBatch.IsValid() ) continue;
+				if ( batch.GpuRendered || batch.ShadowedInstanceCount <= 0 || !batch.RenderBatch.IsValid() ) continue;
 				var casting = batch.RenderBatch.CastShadows;
 				var bucket = ShadowGateBucketOf( NearestDistanceSquared( batch.Transforms, anchor ) );
 				if ( ShadowGateShouldCast( bucket, casting ) == casting ) continue;
@@ -690,19 +498,19 @@ public sealed partial class Titanfall2StaticPropStreamer
 		foreach ( var cluster in _clusters.Values )
 		{
 			if ( MathF.Sqrt( cluster.DistanceSquared ) <= renderDistance ) continue;
-			batches += cluster.Batches.Count;
+			batches += cluster.Batches.Values.Count( batch => !batch.GpuRendered );
 		}
 
 		foreach ( var cell in _cells.Values )
 		{
 			var cellDistance = MathF.Sqrt( cell.DistanceSquared );
 			if ( cellDistance <= renderDistance ) continue;
-			props += cell.Instances.Count;
+			props += cell.Instances.Count( instance => !instance.IsBatched );
 		}
 
 		Log.Info( $"Titanfall 2 prop render distance: active at "
 			+ $"{renderDistance:0} (+{RenderDistanceHysteresis:0} hysteresis); "
-			+ $"{batches} of {_batchCount} batches and {props} of {_liveProps} individual props sit beyond it "
+			+ $"{batches} of {_batchCount} CPU batches and {props} of {_plainProps + _skinnedProps} individual props sit beyond it "
 			+ $"relative to the anchor at the last cell refresh ({MapPath})." );
 	}
 }

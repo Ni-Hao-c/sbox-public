@@ -1,3 +1,4 @@
+// T2_MATERIAL_DECLARATIONS: ordinary and GPU-table paths share the same shading functions.
 HEADER
 {
 	Description = "Titanfall 2 alpha-tested PBR shader";
@@ -16,6 +17,7 @@ MODES
 
 COMMON
 {
+	DynamicCombo( D_T2_MATERIAL_TABLE, 0..1, Sys( ALL ) );
 	#define S_TRANSLUCENT 0
 	#define S_ALPHA_TEST 1
 	#define S_RENDER_BACKFACES 1
@@ -31,6 +33,10 @@ struct VertexInput
 	#include "common/vertexinput.hlsl"
 	float4 vColor : COLOR0 < Semantic( Color ); >;
 	uint nT2InstanceIndex : SV_InstanceID;
+#if D_T2_STATIC_SCENE
+	uint nT2VisibleBase : TEXCOORD8;
+	uint nT2MaterialId : TEXCOORD9;
+#endif
 };
 
 struct PixelInput
@@ -38,25 +44,42 @@ struct PixelInput
 	#include "common/pixelinput.hlsl"
 	float4 vProbeTint : COLOR1;
 	nointerpolation uint nT2ProbeInstance : TEXCOORD12;
+	nointerpolation uint nT2MaterialId : TEXCOORD13;
 };
 
 VS
 {
+	DynamicCombo( D_T2_STATIC_SCENE, 0..1, Sys( ALL ) );
 	#include "common/vertex.hlsl"
+	#include "titanfall2_static_scene_vertex.hlsl"
 
 	PixelInput MainVs( VertexInput v )
 	{
+#if D_T2_STATIC_SCENE
+		uint sourceId;
+		PixelInput i = T2ProcessStaticVertex( v, sourceId );
+#else
 		PixelInput i = ProcessVertex( v );
+#endif
 		i.vVertexColor *= float4( SrgbGammaToLinear( v.vColor.rgb ), v.vColor.a );
+#if D_T2_STATIC_SCENE
+		i.vProbeTint = float4( 1, 1, 1, 1 );
+		i.nT2ProbeInstance = sourceId;
+		i.nT2MaterialId = v.nT2MaterialId;
+#else
 		i.vProbeTint = GetExtraPerInstanceShaderData( v.nInstanceTransformID ).vTint;
 		i.nT2ProbeInstance = v.nT2InstanceIndex;
+		i.nT2MaterialId = 0;
+#endif
 		return FinalizeVertex( i );
 	}
 }
 
 PS
 {
+	DynamicCombo( D_T2_SIMPLE_SURFACE, 0..1, Sys( ALL ) );
 	#include "common/pixel.hlsl"
+	#include "titanfall2_gpu_material_table.hlsl"
 
 	CreateInputTexture2D( Albedo, Srgb, 8, "None", "_color", ",0/,0/0", Default4( 1.00, 1.00, 1.00, 1.00 ) );
 	CreateInputTexture2D( Normal, Linear, 8, "None", "_normal", ",0/,0/0", Default4( 0.50, 0.50, 1.00, 1.00 ) );
@@ -66,31 +89,83 @@ PS
 	CreateInputTexture2D( Opacity, Linear, 8, "None", "_opacity", ",0/,0/0", Default4( 1.00, 1.00, 1.00, 1.00 ) );
 	CreateInputTexture2D( Emissive, Srgb, 8, "None", "_emissive", ",0/,0/0", Default4( 0.00, 0.00, 0.00, 1.00 ) );
 
-	Texture2D g_tAlbedo < Channel( RGBA, Box( Albedo ), Srgb ); OutputFormat( DXT5 ); SrgbRead( true ); >;
-	Texture2D g_tNormal < Channel( RGBA, Box( Normal ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
-	Texture2D g_tGloss < Channel( RGBA, Box( Gloss ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
-	Texture2D g_tSpecular < Channel( RGBA, Box( Specular ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
-	Texture2D g_tAO < Channel( RGBA, Box( AO ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
-	Texture2D g_tOpacity < Channel( RGBA, Box( Opacity ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
-	Texture2D g_tEmissive < Channel( RGBA, Box( Emissive ), Srgb ); OutputFormat( DXT5 ); SrgbRead( true ); >;
+#if !D_T2_MATERIAL_TABLE
+Texture2D g_tAlbedo < Channel( RGBA, Box( Albedo ), Srgb ); OutputFormat( DXT5 ); SrgbRead( true ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+Texture2D g_tNormal < Channel( RGBA, Box( Normal ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+Texture2D g_tGloss < Channel( RGBA, Box( Gloss ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+Texture2D g_tSpecular < Channel( RGBA, Box( Specular ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+Texture2D g_tAO < Channel( RGBA, Box( AO ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+Texture2D g_tOpacity < Channel( RGBA, Box( Opacity ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+Texture2D g_tEmissive < Channel( RGBA, Box( Emissive ), Srgb ); OutputFormat( DXT5 ); SrgbRead( true ); >;
+#endif
 	// Optional Titanfall 2 MATL layers. Kept inline because mount shader include roots are isolated.
-	CreateInputTexture2D( Detail, Srgb, 8, "None", "_detail", ",0/,0/0", Default4( 0.50, 0.50, 0.50, 1.00 ) );
+	CreateInputTexture2D( Detail, Linear, 8, "None", "_detail", ",0/,0/0", Default4( 0.50, 0.50, 0.50, 1.00 ) );
 	CreateInputTexture2D( Distortion, Linear, 8, "None", "_distortion", ",0/,0/0", Default4( 0.50, 0.50, 0.00, 1.00 ) );
-	Texture2D g_tDetail < Channel( RGBA, Box( Detail ), Srgb ); OutputFormat( DXT5 ); SrgbRead( true ); >;
-	Texture2D g_tDistortion < Channel( RGBA, Box( Distortion ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
+
+#if !D_T2_MATERIAL_TABLE
+Texture2D g_tDetail < Channel( RGBA, Box( Detail ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+Texture2D g_tDistortion < Channel( RGBA, Box( Distortion ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
+#endif
 	CreateInputTextureCube( Environment, Srgb, 8, "None", "_cube", "Reflection", Default4( 0, 0, 0, 1 ) );
 	CreateTextureCube( g_tEnvironment ) < Channel( RGBA, Box( Environment ), Srgb ); OutputFormat( RGBA8888 ); SrgbRead( true ); >;
-	float g_flT2GlossScale < Default( 1.0 ); >;
-	float4 g_vT2SpecularTint < Default4( 1.0, 1.0, 1.0, 1.0 ); >;
-	float g_flT2EmissiveStrength < Default( 1.0 ); >;
-	float g_flT2DetailBlend < Default( 0.0 ); >;
-	float4 g_vT2UvDistortion < Default4( 0.0, 0.0, 0.0, 0.0 ); >;
-	float g_flT2DistortionUvChannel < Default( -1.0 ); >;
-	float g_flT2HasEnvironment < Default( 0.0 ); >;
-	float g_flT2EnvironmentIntensity < Default( 1.0 ); >;
-	float g_flT2FresnelStrength < Default( 0.0 ); >;
-	float2 T2ApplyDistortion( float2 uv ) { float2 vector = Tex2DS( g_tDistortion, g_sAniso, uv ).rg * 2.0 - 1.0; return uv + vector * g_vT2UvDistortion.xy; }
-	float3 T2ApplyDetail( float3 albedo, float2 uv ) { float3 detail = Tex2DS( g_tDetail, g_sAniso, uv ).rgb * 2.0; return albedo * lerp( float3( 1.0, 1.0, 1.0 ), detail, saturate( g_flT2DetailBlend ) ); }
+
+#if !D_T2_MATERIAL_TABLE
+float g_flT2GlossScale < Default( 1.0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+float4 g_vT2SpecularTint < Default4( 1.0, 1.0, 1.0, 1.0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+float g_flT2EmissiveStrength < Default( 1.0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+float g_flT2DetailBlend < Default( 0.0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+float4 g_vT2UvDistortion < Default4( 0.0, 0.0, 0.0, 0.0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+float g_flT2DistortionUvChannel < Default( -1.0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+float g_flT2HasEnvironment < Default( 0.0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+float g_flT2EnvironmentIntensity < Default( 1.0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+float g_flT2FresnelStrength < Default( 0.0 ); >;
+#endif
+	#include "titanfall2_optional_surface.hlsl"
 	float T2Roughness( float gloss ) { return 1.0 - saturate( gloss * max( 0.0, g_flT2GlossScale ) ); }
 	float T2Metalness( float3 specular ) { float3 tinted = specular * g_vT2SpecularTint.rgb; return saturate( max( tinted.r, max( tinted.g, tinted.b ) ) * g_vT2SpecularTint.a ); }
 	float3 T2Environment( float3 worldPosition, float3 worldNormal, float roughness )
@@ -103,22 +178,42 @@ PS
 		return g_tEnvironment.SampleLevel( g_sAniso, reflectionDirection, saturate( roughness ) * 5.0 ).rgb * strength;
 	}
 
-	float4 g_vT2Uv1RotScale < Default4( 1.0, 0.0, 0.0, 1.0 ); >;
-	float4 g_vT2Uv1Translate < Default4( 0.0, 0.0, 0.0, 0.0 ); >;
-	float4 g_vT2AlbedoTint < Default4( 1.0, 1.0, 1.0, 1.0 ); >;
-	float4 g_vT2EmissiveTint < Default4( 1.0, 1.0, 1.0, 1.0 ); >;
-	float g_flT2MaterialOpacity < Default( 1.0 ); >;
-	float g_flT2AlphaTestReference < Default( 0.5 ); >;
+#if !D_T2_MATERIAL_TABLE
+float4 g_vT2Uv1RotScale < Default4( 1.0, 0.0, 0.0, 1.0 ); >;
+#endif
 
+#if !D_T2_MATERIAL_TABLE
+float4 g_vT2Uv1Translate < Default4( 0.0, 0.0, 0.0, 0.0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+float4 g_vT2AlbedoTint < Default4( 1.0, 1.0, 1.0, 1.0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+float4 g_vT2EmissiveTint < Default4( 1.0, 1.0, 1.0, 1.0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+float g_flT2MaterialOpacity < Default( 1.0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+float g_flT2AlphaTestReference < Default( 0.5 ); >;
+#endif
 	float2 T2Uv1( float2 uv )
 	{
 		float2 transformed = float2( dot( uv, g_vT2Uv1RotScale.xy ), dot( uv, g_vT2Uv1RotScale.zw ) );
 		return transformed + g_vT2Uv1Translate.xy * lerp( 1.0, g_flTime, saturate( g_vT2Uv1Translate.z ) );
 	}
 
-	float g_flUseVertexColor < Default( 0.0 ); >;
-	float g_flUseVertexAlpha < Default( 0.0 ); >;
+#if !D_T2_MATERIAL_TABLE
+float g_flUseVertexColor < Default( 0.0 ); >;
+#endif
 
+#if !D_T2_MATERIAL_TABLE
+float g_flUseVertexAlpha < Default( 0.0 ); >;
+#endif
 	#define T2_HAS_PROBE_INDEX
 	#include "titanfall2_surface.hlsl"
 
@@ -129,10 +224,15 @@ PS
 	float2 T2DistortedUv( float2 rawUv )
 	{
 		float2 uv = T2Uv1( rawUv );
+		#if D_T2_SIMPLE_SURFACE
+			return uv;
+		#else
+		[branch] if ( all( g_vT2UvDistortion.xy == float2( 0, 0 ) ) ) return uv;
 		if ( g_flT2DistortionUvChannel < -0.5 ) return T2ApplyDistortion( uv );
 		float2 distortionUv = T2SurfaceUv( rawUv, uv, g_flT2DistortionUvChannel );
 		float2 vector = Tex2DS( g_tDistortion, g_sAniso, distortionUv ).rg * 2.0 - 1.0;
 		return uv + vector * g_vT2UvDistortion.xy * g_vT2Uv1RotScale.xw;
+		#endif
 	}
 
 	Material BuildTitanfall2Material( PixelInput i, out float opacity, out float3 specularColor )
@@ -150,7 +250,7 @@ PS
 		opacity = albedo.a * opacityMap * vertexAlpha * g_flT2MaterialOpacity;
 
 		Material m = Material::Init();
-		m.Albedo = T2ApplyDetail( albedo.rgb, uv ) * g_vT2AlbedoTint.rgb * vertexTint * i.vProbeTint.rgb;
+		m.Albedo = T2ApplyDetail( albedo.rgb, uv, g_flT2SpecularWorkflow ) * g_vT2AlbedoTint.rgb * vertexTint * i.vProbeTint.rgb;
 		m.Normal = surfaceNormal;
 		m.Roughness = T2Roughness( gloss );
 		m.Metalness = T2Metalness( specular );
@@ -166,6 +266,28 @@ PS
 
 	float4 MainPs( PixelInput i ) : SV_Target0
 	{
+#if D_T2_MATERIAL_TABLE
+		g_nT2GpuMaterialId = i.nT2MaterialId;
+#endif
+		if ( DepthNormals::WantsDepthNormals() )
+		{
+			float2 rawUv = i.vTextureCoords.xy;
+			float2 uv = T2DistortedUv( rawUv );
+			float gloss;
+			float3 normal;
+			// Keep derivatives before clip, including along cutout edges.
+			T2ReadDepthSurface( i, uv, gloss, normal );
+			float alpha = Tex2DS( g_tAlbedo, g_sAniso, T2SurfaceUv( rawUv, uv, g_vT2SurfaceUvChannels.x ) ).a;
+			float opacity = Tex2DS( g_tOpacity, g_sAniso, T2SurfaceUv( rawUv, uv, g_vT2AuxUvChannels.x ) ).r;
+			float vertexAlpha = lerp( 1.0, i.vVertexColor.a, saturate( g_flUseVertexAlpha ) );
+			clip( alpha * opacity * vertexAlpha * g_flT2MaterialOpacity - g_flT2AlphaTestReference );
+			Material depth = Material::Init();
+			depth.Normal = normal;
+			depth.Roughness = T2Roughness( gloss );
+			depth.Opacity = 1.0;
+			depth.TextureCoords = uv;
+			return T2DepthNormals( i, depth );
+		}
 		float opacity;
 		float3 specularColor;
 		Material m = BuildTitanfall2Material( i, opacity, specularColor );

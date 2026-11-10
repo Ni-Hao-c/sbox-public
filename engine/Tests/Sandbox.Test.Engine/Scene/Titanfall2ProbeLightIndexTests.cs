@@ -75,7 +75,8 @@ public class Titanfall2ProbeLightIndexTests
 			new() { Type = 1 }
 		] );
 		var tree = new byte[8];
-		BinaryPrimitives.WriteUInt32LittleEndian( tree, (1u << 2) | 3 );
+		BinaryPrimitives.WriteUInt32LittleEndian( tree, 3 );
+		BinaryPrimitives.WriteUInt32LittleEndian( tree.AsSpan( 4 ), 1 );
 		var lookup = Titanfall2LightProbeLookup.TryCreate( bytes, tree, new byte[20] );
 		Assert.IsNotNull( lookup );
 		Assert.AreEqual( (ushort)2, lookup.Find( NumericsVector3.Zero ).LightIndex0 );

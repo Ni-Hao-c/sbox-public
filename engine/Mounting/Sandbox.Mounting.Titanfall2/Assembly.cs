@@ -10,3 +10,4 @@ global using System.Threading.Tasks;
 // with no public surface, so their regression tests need access.
 [assembly: System.Runtime.CompilerServices.InternalsVisibleTo( "Sandbox.Test.Engine" )]
 [assembly: System.Runtime.CompilerServices.InternalsVisibleTo( "Sandbox.Test.Integration" )]
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo( "Sandbox.Mounting.Titanfall2.Refactor.Tests" )]

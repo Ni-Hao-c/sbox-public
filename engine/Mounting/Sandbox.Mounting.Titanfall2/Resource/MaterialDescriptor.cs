@@ -208,9 +208,9 @@ sealed class Titanfall2MaterialDescriptor
 		if ( binding.Layer > 0 && !UsesLayeredSurface ) return false;
 		return binding.Semantic switch
 		{
-			Titanfall2TextureSemantic.Unknown or Titanfall2TextureSemantic.DetailNormal or Titanfall2TextureSemantic.DetailMask => false,
+			Titanfall2TextureSemantic.Unknown or Titanfall2TextureSemantic.DetailMask => false,
 			Titanfall2TextureSemantic.LayerBlend => UsesLayeredSurface || UsesLayeredOpacity,
-			Titanfall2TextureSemantic.Normal => !IsGodray && !IsVista && !IsHologram && !Metadata.IsUnlit,
+			Titanfall2TextureSemantic.Normal or Titanfall2TextureSemantic.DetailNormal => !IsGodray && !IsVista && !IsHologram && !Metadata.IsUnlit,
 			_ => true
 		};
 	}
@@ -357,7 +357,8 @@ sealed class Titanfall2MaterialDescriptor
 			}
 			// A failed texture loader returns White. It is a colour fallback, not
 			// a normal pointing diagonally away from the surface.
-			if ( binding.Semantic == Titanfall2TextureSemantic.Normal && texture == Texture.White ) continue;
+			if ( binding.Semantic is Titanfall2TextureSemantic.Normal or Titanfall2TextureSemantic.DetailNormal
+				&& texture == Texture.White ) continue;
 			material.Set( parameter, texture );
 			if ( binding.Semantic == Titanfall2TextureSemantic.Normal )
 			{
@@ -366,6 +367,12 @@ sealed class Titanfall2MaterialDescriptor
 					UsesSlopeNormals( texture.ImageFormat ) ? 1f : 0f );
 				material.Set( binding.Layer == 1 ? "g_flT2NormalTwoChannel2" : "g_flT2NormalTwoChannel",
 					texture.ImageFormat == ImageFormat.ATI2N ? 1f : 0f );
+			}
+			if ( binding.Semantic == Titanfall2TextureSemantic.DetailNormal )
+			{
+				material.Set( "g_vT2DetailNormal", new Vector4( 1f,
+					UsesSlopeNormals( texture.ImageFormat ) ? 1f : 0f,
+					texture.ImageFormat == ImageFormat.ATI2N ? 1f : 0f, GetTextureUvChannel( binding ) ) );
 			}
 			if ( binding.Semantic == Titanfall2TextureSemantic.Detail ) material.Set( "g_flT2DetailBlend", 1f );
 			if ( binding.Semantic == Titanfall2TextureSemantic.EmissiveMultiply ) material.Set( "g_flT2HasEmissiveMultiply", 1f );
@@ -478,6 +485,7 @@ sealed class Titanfall2MaterialDescriptor
 		Titanfall2TextureSemantic.Emissive => "g_tEmissive",
 		Titanfall2TextureSemantic.EmissiveMultiply => "g_tEmissiveMultiply",
 		Titanfall2TextureSemantic.Detail => "g_tDetail",
+		Titanfall2TextureSemantic.DetailNormal => "g_tDetailNormal",
 		Titanfall2TextureSemantic.Distortion => "g_tDistortion",
 		Titanfall2TextureSemantic.Distortion2 => "g_tDistortion2",
 		Titanfall2TextureSemantic.Environment => "g_tEnvironment",

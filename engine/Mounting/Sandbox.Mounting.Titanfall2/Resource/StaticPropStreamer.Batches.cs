@@ -36,12 +36,14 @@ public sealed partial class Titanfall2StaticPropStreamer
 	{
 		if ( _batchesBuilt ) return;
 		_batchesBuilt = true;
+		BuildGpuStaticScene();
 
 		foreach ( var cluster in _clusters.Values )
 		{
 			foreach ( var pendingBatch in cluster.Batches.Values )
 			{
 				if ( pendingBatch.Transforms.Count == 0 ) continue;
+				if ( pendingBatch.GpuRendered ) continue;
 				var castShadows = pendingBatch.ShadowedInstanceCount > 0;
 				try
 				{
@@ -85,7 +87,9 @@ public sealed partial class Titanfall2StaticPropStreamer
 			RebuildRuntimeClusterQueue();
 		}
 
+		RefreshCpuRenderOwnership();
 		LogBatchShadowConfiguration();
+		CompileRenderCensus();
 	}
 
 	/// <summary>

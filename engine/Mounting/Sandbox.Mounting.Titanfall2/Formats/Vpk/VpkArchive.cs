@@ -31,6 +31,7 @@ sealed class VpkArchive
 	}
 
 	public IEnumerable<VpkEntry> Entries => _entries.Values;
+	internal string DirectoryPath => _directoryPath;
 
 	/// <summary>Looks up an entry by its normalized path inside this VPK.</summary>
 	public bool TryGetEntry( string path, out VpkEntry entry )
@@ -242,7 +243,7 @@ sealed class VpkArchive
 	}
 
 	// Every chunk (1 MiB) resolved its payload with a List, LINQ Distinct and File.Exists.
-	string ResolvePayloadPath( ushort archiveIndex ) => _payloadPaths.GetOrAdd( archiveIndex, ResolvePayloadPathUncached );
+	internal string ResolvePayloadPath( ushort archiveIndex ) => _payloadPaths.GetOrAdd( archiveIndex, ResolvePayloadPathUncached );
 
 	string ResolvePayloadPathUncached( ushort archiveIndex )
 	{

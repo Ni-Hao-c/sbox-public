@@ -6,6 +6,7 @@ HEADER
 FEATURES
 {
 	#include "common/features.hlsl"
+	Feature( F_T2_WORLD_MATERIAL_TABLE, 0..1, "World material table" );
 }
 
 MODES
@@ -16,6 +17,8 @@ MODES
 
 COMMON
 {
+	StaticCombo( S_T2_WORLD_MATERIAL_TABLE, F_T2_WORLD_MATERIAL_TABLE, Sys( ALL ) );
+	#define D_T2_MATERIAL_TABLE S_T2_WORLD_MATERIAL_TABLE
 	#ifndef S_ALPHA_TEST
 	#define S_ALPHA_TEST 0
 	#endif
@@ -34,6 +37,9 @@ struct VertexInput
 {
 	#include "common/vertexinput.hlsl"
 	float4 vColor : COLOR0 < Semantic( Color ); >;
+#if S_T2_WORLD_MATERIAL_TABLE
+	float nT2MaterialId : TEXCOORD9;
+#endif
 };
 
 struct PixelInput
@@ -42,6 +48,7 @@ struct PixelInput
 	float3 vPositionOs : TEXCOORD14;
 	float3 vNormalOs : TEXCOORD15;
 	float4 vTangentUOs_flTangentVSign : TANGENT < Semantic( TangentU_SignV ); >;
+	nointerpolation uint nT2MaterialId : TEXCOORD13;
 };
 
 VS
@@ -54,6 +61,11 @@ VS
 		i.vTextureCoords.zw = v.vTexCoord2;
 		i.vVertexColor *= float4( SrgbGammaToLinear( v.vColor.rgb ), v.vColor.a );
 		i.vPositionOs = v.vPositionOs.xyz;
+#if S_T2_WORLD_MATERIAL_TABLE
+		i.nT2MaterialId = v.nT2MaterialId;
+#else
+		i.nT2MaterialId = 0;
+#endif
 		VS_DecodeObjectSpaceNormalAndTangent( v, i.vNormalOs, i.vTangentUOs_flTangentVSign );
 		return FinalizeVertex( i );
 	}
@@ -62,6 +74,7 @@ VS
 PS
 {
 	#include "common/pixel.hlsl"
+	#include "titanfall2_detail.hlsl"
 
 	CreateInputTexture2D( Albedo, Srgb, 8, "None", "_color", ",0/,0/0", Default4( 1.00, 1.00, 1.00, 1.00 ) );
 	CreateInputTexture2D( Normal, Linear, 8, "None", "_normal", ",0/,0/0", Default4( 0.5, 0.5, 1, 1 ) );
@@ -69,7 +82,7 @@ PS
 	CreateInputTexture2D( Specular, Linear, 8, "None", "_specular", ",0/,0/0", Default4( 0, 0, 0, 1 ) );
 	CreateInputTexture2D( AO, Linear, 8, "None", "_ao", ",0/,0/0", Default4( 1.00, 1.00, 1.00, 1.00 ) );
 	CreateInputTexture2D( Emissive, Srgb, 8, "None", "_emissive", ",0/,0/0", Default4( 0.00, 0.00, 0.00, 1.00 ) );
-	CreateInputTexture2D( Detail, Srgb, 8, "None", "_detail", ",0/,0/0", Default4( 0.50, 0.50, 0.50, 1.00 ) );
+	CreateInputTexture2D( Detail, Linear, 8, "None", "_detail", ",0/,0/0", Default4( 0.50, 0.50, 0.50, 1.00 ) );
 	CreateInputTexture2D( LightmapSkyA, Linear, 8, "None", "_lightmap", ",0/,0/0", Default4( 0.50, 0.50, 0.50, 1.00 ) );
 	CreateInputTexture2D( LightmapSkyB, Linear, 8, "None", "_lightmap", ",0/,0/0", Default4( 0.50, 0.50, 1.00, 1.00 ) );
 	CreateInputTexture2D( LightmapRealTimeA, Linear, 8, "None", "_lightmap", ",0/,0/0", Default4( 0.00, 0.00, 0.00, 1.00 ) );
@@ -77,13 +90,15 @@ PS
 	CreateInputTexture2D( LightmapRealTimeC, Linear, 8, "None", "_lightmap", ",0/,0/0", Default4( 0.00, 0.00, 0.00, 1.00 ) );
 	CreateInputTexture2D( LightmapSunChannels, Linear, 8, "None", "_lightmap", ",0/,0/0", Default4( 0, 0, 0, 0 ) );
 
+#if !D_T2_MATERIAL_TABLE
 	Texture2D g_tAlbedo < Channel( RGBA, Box( Albedo ), Srgb ); OutputFormat( DXT5 ); SrgbRead( true ); >;
 	Texture2D g_tNormal < Channel( RGBA, Box( Normal ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
 	Texture2D g_tGloss < Channel( RGBA, Box( Gloss ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
 	Texture2D g_tSpecular < Channel( RGBA, Box( Specular ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
 	Texture2D g_tAO < Channel( RGBA, Box( AO ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
 	Texture2D g_tEmissive < Channel( RGBA, Box( Emissive ), Srgb ); OutputFormat( DXT5 ); SrgbRead( true ); >;
-	Texture2D g_tDetail < Channel( RGBA, Box( Detail ), Srgb ); OutputFormat( DXT5 ); SrgbRead( true ); >;
+	Texture2D g_tDetail < Channel( RGBA, Box( Detail ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
+#endif
 	Texture2D g_tLightmapSkyA < Channel( RGBA, Box( LightmapSkyA ), Linear ); OutputFormat( RGBA8888 ); SrgbRead( false ); >;
 	Texture2D g_tLightmapSkyB < Channel( RGBA, Box( LightmapSkyB ), Linear ); OutputFormat( RGBA8888 ); SrgbRead( false ); >;
 	Texture2D g_tLightmapRealTimeA < Channel( RGBA, Box( LightmapRealTimeA ), Linear ); OutputFormat( RGBA8888 ); SrgbRead( false ); >;
@@ -91,21 +106,29 @@ PS
 	Texture2D g_tLightmapRealTimeC < Channel( RGBA, Box( LightmapRealTimeC ), Linear ); OutputFormat( RGBA8888 ); SrgbRead( false ); >;
 	Texture2D g_tLightmapSunChannels < Channel( R, Box( LightmapSunChannels ), Linear ); OutputFormat( I8 ); SrgbRead( false ); >;
 
+#if !D_T2_MATERIAL_TABLE
 	float4 g_vT2Uv1RotScale < Default4( 1.0, 0.0, 0.0, 1.0 ); >;
 	float4 g_vT2Uv1Translate < Default4( 0.0, 0.0, 0.0, 0.0 ); >;
 	float4 g_vT2AlbedoTint < Default4( 1.0, 1.0, 1.0, 1.0 ); >;
 	float4 g_vT2EmissiveTint < Default4( 1.0, 1.0, 1.0, 1.0 ); >;
 	float g_flT2EmissiveStrength < Default( 1.0 ); >;
 	float g_flT2DetailBlend < Default( 0.0 ); >;
+#endif
 	float g_flT2LightmapIntensity < Default( 1.0 ); >;
 	float3 g_vT2LightmapSkyColor < Default3( 0, 0, 0 ); >;
 	float g_flT2RealTimeLightContribution < Default( 0.0 ); >;
 	float g_flT2HasSunLightmap < Default( 0 ); >;
+#if !D_T2_MATERIAL_TABLE
 	float g_flUseVertexColor < Default( 0 ); >;
+#endif
 	int g_nT2LightPageEntryCount < Attribute( "T2LightPageEntryCount" ); Default( 0 ); >;
 	StructuredBuffer<int> g_T2LightPages < Attribute( "T2LightPages" ); >;
+#if !D_T2_MATERIAL_TABLE
 	float g_flT2GlossScale < Default( 1 ); >;
 	float4 g_vT2SpecularTint < Default4( 1, 1, 1, 1 ); >;
+#endif
+	#define T2_MATERIAL_BUFFER_ATTRIBUTE "T2WorldMaterials"
+	#include "titanfall2_gpu_material_table.hlsl"
 	#include "titanfall2_surface.hlsl"
 
 	float2 T2Uv1( float2 uv )
@@ -116,12 +139,16 @@ PS
 
 	float4 MainPs( PixelInput i ) : SV_Target0
 	{
+#if D_T2_MATERIAL_TABLE
+		g_nT2GpuMaterialId = i.nT2MaterialId;
+#endif
 		float2 uv = T2Uv1( i.vTextureCoords.xy );
 		float2 lightmapUv = i.vTextureCoords.zw;
-		float4 albedo; float gloss; float3 specular; float3 normal;
-		T2ReadSurface( i, uv, albedo, gloss, specular, normal );
 		if ( DepthNormals::WantsDepthNormals() )
 		{
+			float gloss;
+			float3 normal;
+			T2ReadDepthSurface( i, uv, gloss, normal );
 			Material depth = Material::Init();
 			depth.Normal = normal;
 			depth.Roughness = 1.0 - saturate( gloss * max( 0.0, g_flT2GlossScale ) );
@@ -129,6 +156,8 @@ PS
 			depth.TextureCoords = uv;
 			return T2DepthNormals( i, depth );
 		}
+		float4 albedo; float gloss; float3 specular; float3 normal;
+		T2ReadSurface( i, uv, albedo, gloss, specular, normal );
 		// g_flT2DetailBlend comes from the material's constant buffer, so the compiler cannot prove
 		// it is zero and the unconditional sample below its lerp was paid by every pixel even when
 		// the blend discarded it. Sampling only when the blend is positive is bit-identical:
@@ -136,7 +165,7 @@ PS
 		// sample would have returned (NaN included - the comparison is false and the identity is
 		// used). Materials with a blend still take exactly the sample they took before.
 		float3 detail = g_flT2DetailBlend > 0.0
-			? Tex2DS( g_tDetail, g_sAniso, uv ).rgb * 2.0
+			? T2DetailMultiplier( Tex2DS( g_tDetail, g_sAniso, uv ).rgb, g_flT2SpecularWorkflow )
 			: float3( 1.0, 1.0, 1.0 );
 		float ao = Tex2DS( g_tAO, g_sAniso, T2SurfaceUv( i.vTextureCoords.xy, uv, g_vT2AuxUvChannels.z ) ).r;
 		float3 emissive = T2ReadEmissive( i.vTextureCoords.xy, uv )

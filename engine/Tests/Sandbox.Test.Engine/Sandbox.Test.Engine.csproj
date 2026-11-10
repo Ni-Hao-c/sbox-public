@@ -2,6 +2,12 @@
 
 	<!-- Engine-attached tests: loads the native engine DLLs (interop) but never boots the engine loop (see Assembly.cs). Needs FACEPUNCH_ENGINE. -->
 
+	<PropertyGroup>
+		<!-- This executable test project has no project consumers. Only its implementation
+		     assembly is needed; avoid requiring a separate refint assembly at copy time. -->
+		<ProduceReferenceAssembly>false</ProduceReferenceAssembly>
+	</PropertyGroup>
+
 	<ItemGroup>
 		<Using Include="Microsoft.AspNetCore.Components" />
 		<Using Include="Microsoft.AspNetCore.Components.Rendering" />

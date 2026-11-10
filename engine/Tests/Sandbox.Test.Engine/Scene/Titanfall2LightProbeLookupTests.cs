@@ -37,8 +37,8 @@ public class Titanfall2LightProbeLookupTests
 		// Root splits X at 0: children 1 (x < 0) and 2 (x >= 0).
 		var tree = new byte[3 * 8];
 		Node( tree, 0, (1u << 2) | 0, BitConverter.SingleToUInt32Bits( 0f ) );
-		Node( tree, 1, (1u << 2) | 3, 0 ); // one reference starting at 0
-		Node( tree, 2, (2u << 2) | 3, 1 ); // two references starting at 1
+		Node( tree, 1, 3, 1 ); // one reference starting at 0
+		Node( tree, 2, (1u << 2) | 3, 2 ); // two references starting at 1
 		var references = new byte[3 * 20];
 		Reference( references, 0, new NumericsVector3( -100, 0, 0 ), 0 );
 		Reference( references, 1, new NumericsVector3( 100, 0, 0 ), 1 );
@@ -55,12 +55,36 @@ public class Titanfall2LightProbeLookupTests
 	public void FindRejectsEmptyLeavesAndOutOfRangeProbes()
 	{
 		var tree = new byte[8];
-		Node( tree, 0, (1u << 2) | 3, 0 );
+		Node( tree, 0, 3, 1 );
 		var references = new byte[20];
 		Reference( references, 0, NumericsVector3.Zero, 5 );
 		var lookup = Titanfall2LightProbeLookup.TryCreate( Probes( 8192 ), tree, references );
 
 		Assert.IsNull( lookup.Find( NumericsVector3.Zero ) );
 		Assert.IsNull( Titanfall2LightProbeLookup.TryCreate( Probes( 8192 ), Array.Empty<byte>(), references ) );
+	}
+
+	[TestMethod]
+	public void FirstReferenceAndCountAreNotInterchangeable()
+	{
+		var tree = new byte[8];
+		Node( tree, 0, (2u << 2) | 3, 1 );
+		var references = new byte[3 * 20];
+		Reference( references, 0, NumericsVector3.Zero, 0 );
+		Reference( references, 1, NumericsVector3.Zero, 1 );
+		Reference( references, 2, new NumericsVector3( 100, 0, 0 ), 2 );
+		var lookup = Titanfall2LightProbeLookup.TryCreate( Probes( 8192, 4096, 2048 ), tree, references );
+		Assert.AreEqual( 0.25f, lookup.Find( NumericsVector3.Zero ).Red.W );
+	}
+
+	[TestMethod]
+	public void EmptyLeafDoesNotScanAdjacentReferences()
+	{
+		var tree = new byte[8];
+		Node( tree, 0, (1u << 2) | 3, 0 );
+		var references = new byte[20];
+		Reference( references, 0, NumericsVector3.Zero, 0 );
+		var lookup = Titanfall2LightProbeLookup.TryCreate( Probes( 8192 ), tree, references );
+		Assert.IsNull( lookup.Find( NumericsVector3.Zero ) );
 	}
 }

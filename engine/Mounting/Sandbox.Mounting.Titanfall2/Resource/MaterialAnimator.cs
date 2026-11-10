@@ -58,6 +58,10 @@ static class Titanfall2MaterialAnimationRegistry
 	static readonly List<Entry> Entries = [];
 	static float _lastUpdateTime = float.NegativeInfinity;
 	static int _animatorCount;
+	internal static bool IsAnimated( Material material )
+	{
+		lock ( Sync ) return Entries.Any( entry => entry.Material.TryGetTarget( out var existing ) && ReferenceEquals( existing, material ) );
+	}
 
 	internal static void Register( Material material, string name, IReadOnlyList<Titanfall2RuntimeExpression> expressions )
 	{

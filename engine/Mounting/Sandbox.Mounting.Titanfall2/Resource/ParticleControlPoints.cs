@@ -28,11 +28,21 @@ public sealed class Titanfall2ParticleControlPoints : Component
 
 	internal bool TryGetControlPoint( int index, out Vector3 position )
 	{
-		if ( _world.TryGetValue( index, out position ) ) return true;
+		// Entity endpoints and runtime updates must override a collection's default
+		// local CP, including defaults authored on child collections.
+		if ( TryGetWorldControlPoint( index, out position ) ) return true;
 		if ( _local.TryGetValue( index, out var local ) ) { position = WorldTransform.PointToWorld( local ); return true; }
 		if ( _parent.IsValid() ) return _parent.TryGetControlPoint( index, out position );
 		position = WorldPosition;
 		return index == 0;
+	}
+
+	bool TryGetWorldControlPoint( int index, out Vector3 position )
+	{
+		if ( _world.TryGetValue( index, out position ) ) return true;
+		if ( _parent.IsValid() ) return _parent.TryGetWorldControlPoint( index, out position );
+		position = default;
+		return false;
 	}
 
 	internal static bool IsFinite( Vector3 value ) => float.IsFinite( value.x ) && float.IsFinite( value.y ) && float.IsFinite( value.z );
@@ -51,6 +61,9 @@ public sealed class Titanfall2ParticleGeometry : ParticleController
 	float _textureAspect = 1f;
 	int _pathCount;
 	int _nextParticle;
+	float _sizeFadeStart;
+	float _sizeFadeEnd;
+	bool _sizeFade;
 	readonly Dictionary<Particle, float> _pathFractions = [];
 	readonly Dictionary<Particle, (float Radius, float Alpha)> _initialValues = [];
 	readonly Dictionary<Particle, (float In, float Out)> _randomFades = [];
@@ -69,6 +82,18 @@ public sealed class Titanfall2ParticleGeometry : ParticleController
 		_pathCount = Math.Max( 2, definition.Path is { UseParticleCount: true }
 			? Titanfall2ParticleFactory.GetBurstCount( definition, points ) : definition.Path?.Count ?? 2 );
 	}
+
+	internal void ConfigureSizeFade( float start, float end )
+	{
+		_sizeFade = float.IsFinite( start ) && float.IsFinite( end ) && start >= 0f && end > start;
+		_sizeFadeStart = start;
+		_sizeFadeEnd = end;
+	}
+
+	// Source SpriteCard compares radius with distance * fade-size; no FOV conversion.
+	internal static float EvaluateSizeFade( float radius, float distance, float start, float end ) =>
+		radius <= start * distance ? 1f : distance <= 0f || end <= start ? 0f
+			: Math.Clamp( (end * distance - radius) / ((end - start) * distance), 0f, 1f );
 
 	protected override void OnParticleCreated( Particle particle )
 	{
@@ -110,6 +135,21 @@ public sealed class Titanfall2ParticleGeometry : ParticleController
 			var min = definition.PositionWarpMinimum; var max = definition.PositionWarpMaximum;
 			local *= new Vector3( Warp( min.x, max.x ), Warp( min.y, max.y ), Warp( min.z, max.z ) );
 			particle.Position = centre + WorldRotation * local;
+			particle.StartPosition = particle.Position;
+		}
+		if ( _definition is { } offsetDefinition && Titanfall2ParticleFactory.HasShapePositionOffset( offsetDefinition ) )
+		{
+			// Sphere/ring sampling and Position Modify Offset Random are independent
+			// initializers. The emitter supplies the shape plus the offset's centre;
+			// restore the random spread instead of collapsing every birth to that centre.
+			var extent = Titanfall2ParticleFactory.MaximumEmitterExtent;
+			var minimum = offsetDefinition.PositionMinimum.Clamp( -extent, extent );
+			var maximum = offsetDefinition.PositionMaximum.Clamp( -extent, extent );
+			var centre = (minimum + maximum) * 0.5f;
+			var offset = RandomVector( minimum, maximum );
+			particle.Position += offsetDefinition.LocalPosition
+				? WorldRotation * (offset - centre)
+				: offset - WorldRotation * centre;
 			particle.StartPosition = particle.Position;
 		}
 		if ( _definition?.Path is not { } path || !_points.IsValid() ) return;
@@ -187,6 +227,14 @@ public sealed class Titanfall2ParticleGeometry : ParticleController
 				if ( fade.Out > 0f ) particle.Alpha *= Math.Clamp( remaining / fade.Out, 0f, 1f );
 			}
 			particle.Alpha *= visibility;
+			if ( _sizeFade && Scene.Camera.IsValid() )
+			{
+				var screenRadius = MathF.Abs( particle.Size.x * WorldScale.x );
+				var screenFade = EvaluateSizeFade( screenRadius, particle.Position.Distance( Scene.Camera.WorldPosition ), _sizeFadeStart, _sizeFadeEnd );
+				// SpriteCard attenuates the vertex tint's RGB and alpha together.
+				particle.Color = new Color( particle.Color.r * screenFade, particle.Color.g * screenFade, particle.Color.b * screenFade, particle.Color.a );
+				particle.Alpha *= screenFade;
+			}
 			if ( (_definition.Renderer & Titanfall2ParticleRenderer.Trail) == 0 )
 			{
 				// Source orientation 2 is a world-Z-aligned card, not an upright

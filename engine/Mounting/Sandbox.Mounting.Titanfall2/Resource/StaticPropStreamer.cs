@@ -12,11 +12,11 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 {
 	static readonly Sandbox.Diagnostics.Logger Log = new( "Titanfall2Props" );
 	const int DataMagic = 0x32505354; // TSP2
-	const int DataVersion = 8;
+	const int DataVersion = 9;
 	const int MaximumModelCount = 65536;
 	const int MaximumPropCount = 1_000_000;
 	const int VisibilityMagic = 0x32565354; // TSV2
-	const int VisibilityVersion = 1;
+	const int VisibilityVersion = 2;
 	// Encoded size of one element, used to bound a decoded count by the bytes that are
 	// actually present instead of by a guessed maximum.
 	const int PlaneBytes = 16;  // normal xyz + distance
@@ -24,7 +24,7 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	const int PortalBytes = 8;  // from cell + to cell
 
 	// Edge length of one BSP prop streaming cell, in world units.
-	const float CellSize = 512f;
+	const float CellSize = Titanfall2CompiledPropLayout.CellSize;
 	// Cells within this distance of the camera are populated first.
 	const float LoadRadius = 1024f;
 	// Prop cells per axis grouped into one batch cluster; batches are keyed per cluster and model.
@@ -74,15 +74,9 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	// grid bucket changed and the anchor moved at least RefreshHysteresisDistance since the last
 	// refresh: a camera sitting on a bucket boundary cannot refresh twice, while crossing a bucket
 	// always refreshes, so a fast camera still follows and a slow walk refreshes every ~256 units.
-	// This is the last pass that was not budgeted; the portal walk inside it is now cached per PVS
-	// cell and advanced as a budgeted job (see UpdateCellRefresh).
+	// Portal reachability is compiled at import; this refresh only updates spatial state.
 	const float RefreshGridSize = 256f;
 	const float RefreshHysteresisDistance = RefreshGridSize * 0.75f;
-	// Incremental PVS round budget: portal edges walked and wall time per frame. A retail map's
-	// portal graph has ~700 edges, so with the per-camera-cell cache a round normally completes in
-	// its first step; these caps only bound the first-visit worst case.
-	const int PvsEdgesPerFrame = 8192;
-	const float PvsBudgetMilliseconds = 2f;
 
 	[Property, Hide]
 	public string MountIdent { get; set; }
@@ -92,6 +86,9 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 
 	/// <summary>Pure-world maps keep collision resident independently of the render camera.</summary>
 	[Property, Hide] public bool KeepAllCollisions { get; set; }
+	/// <summary>The load-time transaction finished, including collision attempts in resident mode.</summary>
+	public bool PreparationComplete { get; private set; }
+	public bool ResourcesPrepared => PreparationComplete && !_initializationFailed && _failedProps == 0;
 	/// <summary>True only after the resident collision preload finishes without missing props/bodies.</summary>
 	public bool ResidentCollisionsReady { get; private set; }
 	/// <summary>Number of resident prop colliders expected in the native physics world.</summary>
@@ -133,6 +130,8 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	bool _hasAnchor;
 	bool _initialized;
 	bool _initializationFailed;
+	bool _releasing;
+	bool _residentCollisionDirty;
 	bool _completionLogged;
 	bool _batchesBuilt;
 	bool _runtimePvsUpdatePending;
@@ -183,6 +182,7 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	float _populateBudgetMilliseconds;
 	bool _pvsDiagnosticsLogged;
 	bool _visibilityRestoreFailed;
+	CompiledPropScene _compiledScene;
 
 	// Composition diagnostics for the render submission count, reported once when the batches are
 	// built. The render main thread costs about a microsecond per submitted object here, so the
@@ -213,10 +213,12 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		MapPath = mapPath;
 		FallbackAnchor = fallbackAnchor;
 		_visibility = visibility;
+		_compiledVisibility = null;
 		EncodedProps = EncodeWithFade( props, visibility, fadeDistances );
 		BakedSkyColor = bakedSkyColor;
 		EncodedLocalLights = Titanfall2LocalLightBuffer.Encode( localLights );
 		EncodedVisibility = EncodeVisibility( visibility );
+		_compiledScene = null;
 	}
 
 	protected override void OnAwake()
@@ -229,6 +231,7 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 
 	void SetResourcesEnabled( bool enabled )
 	{
+		if ( _gpuScene.IsValid() ) _gpuScene.RenderingEnabled = enabled;
 		// These native objects are created directly, so disabling the component
 		// does not automatically remove them from the scene's render lists.
 		foreach ( var cell in _cells.Values )
@@ -243,136 +246,22 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		{
 			foreach ( var batch in cluster.Batches.Values )
 			{
-				if ( batch.RenderBatch.IsValid() ) batch.RenderBatch.RenderingEnabled = enabled && batch.RenderingEnabled;
+				if ( batch.RenderBatch.IsValid() ) batch.RenderBatch.RenderingEnabled = enabled && !batch.GpuRendered && batch.RenderingEnabled;
 				foreach ( var fallback in batch.FallbackObjects )
 					if ( fallback.IsValid() ) fallback.RenderingEnabled = enabled && batch.RenderingEnabled;
 			}
 		}
 	}
 
-	protected override async Task OnLoad( LoadingContext context )
-	{
-		ResidentCollisionsReady = false;
-		if ( Application.IsDedicatedServer ) KeepAllCollisions = true;
-		if ( !_initialized ) InitializeCells();
-		if ( !_initialized || _initializationFailed ) return;
-		if ( _cells.Count == 0 || _totalProps == 0 )
-		{
-			ResidentCollisionsReady = KeepAllCollisions;
-			return;
-		}
-
-		var loadTimer = Stopwatch.StartNew();
-		var cacheBefore = Titanfall2ProcessedCache.GetStatistics();
-		context.Title = $"Loading Titanfall 2 static props (0/{_totalProps})";
-		// The active camera is not guaranteed to exist while the SceneFile is being
-		// deserialized. The first map spawn remains a deterministic priority anchor.
-		RefreshCells( FallbackAnchor );
-
-		while ( _liveProps + _failedProps < _totalProps )
-		{
-			if ( !this.IsValid() || !GameObject.IsValid() ) return;
-			PopulateCells( PreloadPerYield, PreloadBudgetMilliseconds );
-			var processed = _liveProps + _failedProps;
-			context.Title = $"Loading Titanfall 2 static props ({processed}/{_totalProps})";
-			if ( processed < _totalProps ) await Task.Yield();
-		}
-
-		if ( KeepAllCollisions )
-		{
-			// Readiness must arrive in a bounded number of yields. At the runtime churn cap
-			// (2 colliders per frame) a map with thousands of solid props would take
-			// thousands of frames after the prop pass, so the load pass uses the preload
-			// count/budget instead.
-			_collisionInstanceLimitOverride = PreloadCollisionBodiesPerYield;
-			_collisionBudgetOverrideMilliseconds = PreloadBudgetMilliseconds;
-			try
-			{
-				foreach ( var cell in _cells.Values )
-				{
-					cell.CollisionCursor = 0;
-					bool complete;
-					do
-					{
-						if ( !this.IsValid() || !GameObject.IsValid() ) return;
-						_collisionQueueTimer.Restart();
-						_collisionInstancesThisFrame = 0;
-						complete = UpdateCellCollisionState( cell, FallbackAnchor, _collisionQueueTimer );
-						context.Title = $"Loading Titanfall 2 prop collision ({_collidersCreated}/{_collidableProps})";
-						if ( !complete ) await Task.Yield();
-					} while ( !complete );
-				}
-			}
-			finally
-			{
-				_collisionInstanceLimitOverride = 0;
-				_collisionBudgetOverrideMilliseconds = 0f;
-			}
-			ResidentCollisionsReady = _failedProps == 0 && _colliderFailures == 0
-				&& _collidersCreated + _collisionFilteredProps == _collidableProps;
-		}
-
-		LogCompletion();
-		LogBatchComposition();
-		SetResourcesEnabled( Active );
-		Log.Info( $"Titanfall 2 static props finished during scene loading in "
-			+ $"{loadTimer.Elapsed.TotalSeconds:0.00}s ({MapPath})." );
-		if ( KeepAllCollisions && !ResidentCollisionsReady )
-			Log.Warning( $"Titanfall 2 resident prop collision is incomplete: {_failedProps} missing props, "
-				+ $"{_colliderFailures} missing collision models, {_collidersCreated}/{_collidableProps} colliders; "
-				+ $"ttf2_map_ready will not be published ({MapPath})." );
-		var cacheAfter = Titanfall2ProcessedCache.GetStatistics();
-		Log.Info( $"Titanfall 2 processed model cache: {cacheAfter.ModelHits - cacheBefore.ModelHits} hits, "
-			+ $"{cacheAfter.ModelMisses - cacheBefore.ModelMisses} misses; textures {cacheAfter.TextureHits - cacheBefore.TextureHits} hits/"
-			+ $"{cacheAfter.TextureMisses - cacheBefore.TextureMisses} misses; materials {cacheAfter.MaterialHits - cacheBefore.MaterialHits} hits/"
-			+ $"{cacheAfter.MaterialMisses - cacheBefore.MaterialMisses} misses; {cacheAfter.Writes - cacheBefore.Writes} derived writes; "
-			+ $"{cacheAfter.Rejected} rejected / {cacheAfter.WriteFailures} write failures total; "
-			+ $"mounted prop shadows {(Titanfall2StreamingSettings.PropShadows ? "enabled" : "disabled")}." );
-	}
-
-	protected override void OnUpdate()
-	{
-		if ( !_initialized ) InitializeCells();
-		if ( !_initialized || _cells.Count == 0 ) return;
-
-		var anchor = Scene?.Camera.IsValid() == true
-			? Scene.Camera.WorldPosition
-			: FallbackAnchor;
-		var pvsCellChanged = TryFindPvsCell( anchor, out var pvsCell ) && pvsCell != _pvsCameraCell;
-		// Quantized trigger plus a cached, budgeted PVS round; replaces the unbudgeted 128-unit
-		// full refresh that rebuilt every distance and re-walked all portals on every step.
-		UpdateCellRefresh( anchor, pvsCell, pvsCellChanged );
-
-		PopulateCells( PropsPerFrame, FrameBudgetMilliseconds );
-		ProcessRuntimeClusterQueue();
-		ProcessCollisionQueue();
-		// Independent of the sweep above: recompute when the camera moved far enough, then apply a
-		// bounded number of queued shadow flag changes. No-op when the gate is off.
-		UpdateShadowGate( anchor, pvsCellChanged );
-		// A collision model that failed to load during the loading pass is retried by the
-		// runtime pass; publish readiness once every expected collider exists.
-		if ( KeepAllCollisions && !ResidentCollisionsReady && _failedProps == 0 && _colliderFailures == 0
-			&& _collidersCreated + _collisionFilteredProps == _collidableProps )
-		{
-			ResidentCollisionsReady = true;
-			Titanfall2Log.Info( $"Titanfall 2 resident prop collision became ready after the loading pass: "
-				+ $"{_collidersCreated}/{_collidableProps} colliders ({MapPath})." );
-		}
-		LogCompletion();
-		LogBatchComposition();
-		if ( !_completionLogged && _statusTimer.Elapsed.TotalSeconds >= 5.0 )
-		{
-			var processed = _liveProps + _failedProps;
-			var queued = Math.Max( 0, _totalProps - processed );
-			Log.Info( $"Titanfall 2 prop streaming: {_liveProps} retained, {queued} queued, "
-				+ $"{_activeCells}/{_cells.Count} cells activated, {_failedProps} skipped ({MapPath})." );
-			_statusTimer.Restart();
-		}
-	}
-
 	protected override void OnDestroy()
 	{
+		_runtimePhase = RuntimePhase.Retiring;
+		_gpuScene?.Delete();
+		_gpuScene = null;
+		_mixedGpuInstanceCount = 0;
+		PreparationComplete = false;
 		ResidentCollisionsReady = false;
+		_releasing = true;
 		var releasedProps = _liveProps;
 		var releasedBatches = _batchCount;
 		// A cluster owns its batches because several cells may share one of them. Walking
@@ -388,6 +277,9 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		_workQueue.Clear();
 		_runtimeClusterQueue.Clear();
 		_collisionCellQueue.Clear();
+		_compiledScene = null;
+		_compiledVisibility = null;
+		_renderCensus = null;
 		Log.Info( $"Titanfall 2 static prop scene resources released: {releasedProps} props, "
 			+ $"{releasedBatches} instance batches ({MapPath})." );
 	}
@@ -399,7 +291,14 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 
 		// Collision restarts from the nearest cells on every refresh so colliders follow the
 		// player. It is capped per frame and can no longer affect the pass above.
-		RebuildCollisionQueue();
+		if ( !KeepAllCollisions || HasPendingResidentCollisions ) RebuildCollisionQueue();
+	}
+
+	void OnResidentCollisionDestroyed()
+	{
+		if ( _releasing || !KeepAllCollisions ) return;
+		ResidentCollisionsReady = false;
+		_residentCollisionDirty = true;
 	}
 
 	/// <summary>
@@ -545,6 +444,7 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 				cluster.Batches.Add( staticModel, pendingBatch );
 			}
 			pendingBatch.Add( worldTransform, radius, castShadows, prop.ProbeColor, prop.Probe, prop.PvsCells, prop.FadeDistance );
+			pendingBatch.Sources.Add( prop );
 			pendingBatch.RenderingEnabled |= batchVisible;
 			_instancedProps++;
 			// Count the (cell, model) pair this batch covers. The cluster dictionary already
@@ -635,12 +535,17 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		_batchCompositionLogged = true;
 
 		var batchesIfPerCell = _cellModelGroupCount;
-		var mergedBatches = Math.Max( 0, batchesIfPerCell - _batchCount );
-		var instancesPerBatch = _batchCount > 0 ? (float)_instancedProps / _batchCount : 0f;
+		var logicalBatches = _clusters.Values.Sum( cluster => cluster.Batches.Count );
+		var mergedBatches = Math.Max( 0, batchesIfPerCell - logicalBatches );
+		var gpuInstances = _gpuScene?.InstanceCount ?? 0;
+		var cpuInstances = _instancedProps - FullGpuInstanceCount;
+		var instancesPerBatch = _batchCount > 0 ? (float)cpuInstances / _batchCount : 0f;
 		var individualModels = _individualModels.Count;
 		Log.Info( $"Titanfall 2 prop batch composition: {BatchClusterCells}x{BatchClusterCells} cells per cluster, "
 			+ $"{_cells.Count} cells in {_clusters.Count} clusters; {_batchCount} instanced batches for "
-			+ $"{_instancedProps} props ({instancesPerBatch:0.0} instances/batch); "
+			+ $"{cpuInstances} CPU props ({instancesPerBatch:0.0} instances/batch); "
+			+ $"{gpuInstances} GPU-resident props in {_gpuScene?.MaterialGroups ?? 0} submission groups "
+			+ $"({_mixedGpuInstanceCount} mixed props also retain native special meshes); "
 			+ $"{mergedBatches} batches not created because clustering merged them "
 			+ $"({batchesIfPerCell} if every cell kept its own batch per model); "
 			+ $"{_plainProps} individual objects ({_plainStaticProps} special-material static models, "

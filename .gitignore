@@ -67,6 +67,7 @@ game/core/shadercache/vulkan/shaders.cache
 engine/Sandbox.Compiling/EmbeddedRefs/*.xml
 game/*.xml
 engine/TestResults/
+/reports/
 
 /engine/**/Interop.*.cs
 
@@ -113,12 +114,18 @@ engine/TestResults/
 
 # Local test projects, scripts and logs
 /.tmp/
+/.codex-temp/
 
 # Local scratch output from live-render and probe runs (screenshots, logs, json dumps, throwaway projects)
 /artifacts/
+/arma3-mount-research/
 /engine/Tests/**/*DumpTemp.cs
+
+# Mount runtime install dirs (built addon dll + locally curated data files)
+/game/mount/helldivers2/
 
 # Local runtime config and baked editor cache (machine-specific, never commit)
 /game/core/cfg/machine_convars.json
 /game/core/cfg/user_keys_*.json
 /game/core/maps/editor/_bakeresourcecache/
+userkey*.json

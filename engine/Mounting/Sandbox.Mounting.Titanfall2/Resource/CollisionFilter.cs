@@ -16,7 +16,6 @@ static class Titanfall2CollisionFilter
 		"/fog",
 		"_fog",
 		"smoke",
-		"mist",
 		"steam",
 		"spray",
 		"waterfall",
@@ -51,6 +50,16 @@ static class Titanfall2CollisionFilter
 		{
 			if ( normalized.Contains( term, StringComparison.OrdinalIgnoreCase ) )
 				return true;
+		}
+		// "hanging_plant_misters" is a solid model material, not a mist card. Match
+		// mist as a name token, allowing numbered effect variants such as mist01.
+		var start = 0;
+		while ( (start = normalized.IndexOf( "mist", start, StringComparison.OrdinalIgnoreCase )) >= 0 )
+		{
+			var end = start + 4;
+			if ( (start == 0 || !char.IsLetterOrDigit( normalized[start - 1] ))
+				&& (end == normalized.Length || !char.IsLetter( normalized[end] )) ) return true;
+			start = end;
 		}
 		return false;
 	}

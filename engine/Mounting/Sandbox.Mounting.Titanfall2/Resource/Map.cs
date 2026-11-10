@@ -189,6 +189,11 @@ partial class MapLoader(
 					: Titanfall2StreamingSettings.MapShadows );
 			aggregateIndex++;
 		}
+		if ( worldBuild.WorldMaterialSources is { Length: > 0 } )
+		{
+			var controller = world.AddComponent<Titanfall2WorldMaterialTableController>();
+			controller.SourceKey = worldBuild.WorldMaterialSourceKey;
+		}
 		// Depth-only world shadow casters: same triangles as the forward aggregates, but drawn from
 		// one mesh per spatial cell with a single shared material and never in the camera views.
 		foreach ( var chunk in worldBuild.WorldShadowChunks ?? [] )
@@ -303,11 +308,11 @@ partial class MapLoader(
 		var worldProps = parsed.StaticProps.Where( static prop => !IsVistaModelPath( prop.ModelPath ) ).ToArray();
 		var streamerObject = new GameObject( true, "titanfall2_static_prop_streamer" );
 		var propStreamer = streamerObject.AddComponent<Titanfall2StaticPropStreamer>();
-		propStreamer.KeepAllCollisions = _pureWorld || server;
+		propStreamer.KeepAllCollisions = _pureWorld || server || Titanfall2StreamingSettings.ResidentWorld;
 		propStreamer.Configure( Host.Ident, Path, streamingAnchor, worldProps, parsed.Visibility, ReadBakedSkyColor( parsed ),
 				Titanfall2StreamingSettings.UseBspLightmaps ? parsed.WorldLights : null,
 				server ? null : ResolvePropFadeDistances( worldProps ) );
-		if ( _pureWorld || server )
+		if ( propStreamer.KeepAllCollisions )
 		{
 			var ready = world.AddComponent<Titanfall2WorldReady>();
 			ready.Props = propStreamer;

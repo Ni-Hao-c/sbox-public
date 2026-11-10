@@ -1,6 +1,6 @@
-# Titanfall 2 挂载环境变量
+﻿# Titanfall 2 挂载环境变量
 
-挂载只保留 28 个 `SBOX_TITANFALL2_*` 环境变量。其中 25 个定义在 [Titanfall2StreamingSettings.cs](Titanfall2StreamingSettings.cs)，另外 3 个分别在 [Titanfall2Log.cs](Titanfall2Log.cs)、[Resource/ProcessedCache.cs](Resource/ProcessedCache.cs) 和 [Resource/ModelExporter.cs](Resource/ModelExporter.cs)。流式加载预算、LOD 距离、粒子上限等调优值都是常量，写在使用它们的类里。
+挂载的 `SBOX_TITANFALL2_*` 环境变量集中定义在 [Titanfall2StreamingSettings.cs](Titanfall2StreamingSettings.cs)；内容配置在首次挂载时读取；日志、缓存目录和导出目录分别见 [Titanfall2Log.cs](Titanfall2Log.cs)、[Resource/ProcessedCache.cs](Resource/ProcessedCache.cs) 和 [Resource/ModelExporter.cs](Resource/ModelExporter.cs)。流式加载预算、LOD 距离、粒子上限等调优值都是常量，写在使用它们的类里。
 
 ## 怎么设置
 
@@ -19,13 +19,17 @@
 | `CACHE_MB` | 2048 | 128–8192 | 处理缓存的磁盘预算（MB） |
 | `CACHE_PATH` | `%LOCALAPPDATA%\sbox\mount-cache\titanfall2\processed` | 路径 | 处理缓存目录 |
 | `TEXTURE_MAX` | 1024 | 64–2048 | 贴图最大边长。低显存可设 512 |
-| `LIGHTMAP_16BIT` | 开 | 开/关 | 把 SkyB（RGB565）与 RealTimeB（BGRA4444）两张最大的光照片通道改成 16 位：光照片 17→13 B/px（angel_city 70→54 MiB、sewers1 108→83 MiB），世界 shader 每像素那 2 次采样带宽各减半。实测精度：RealTimeB 93.7–96.7% 的 texel 是二值、误差 ≈0.2%，SkyB 天空可见性误差 ≈1%。设 0 回到 RGBA8888 旧路径 |
-| `LIGHTMAP_MIPS` | 关（120 档为开） | 开/关 | 给 SkyA / SkyB / RealTimeB 生成 L0–L2 mip 链，生成前先按几何覆盖率把图集 chart 向外 dilate 4 步，避免 mip 把 chart 外的空洞混进来。省的是掠射角/远处的采样带宽，代价是远景 chart 边缘略糊，且显存回到 16 位化之前的水平（angel_city 54→70 MiB） |
+| `LIGHTMAP_16BIT` | 开 | 开/关 | 默认单级光照页使用 SkyB（BGR565）与 RealTimeB（BGRA4444）：光照片 17→13 B/px。SkyB 使用原生上传验证过的 BGR565（R 高位、B 低位），不能替换为会返回有效但数据失真的 RGB565。多级 mip 下 RealTimeB 使用 RGBA8888，避开原生 BGRA4444 下级 mip 失真。设 0 全部回到 RGBA8888 |
+| `LIGHTMAP_MIPS` | 关（120 档为开） | 开/关 | 给 SkyA / SkyB / RealTimeB 生成 L0–L2 mip 链，生成前先按几何覆盖率把图集 chart 向外 dilate 4 步，避免 mip 把 chart 外的空洞混进来。按原生 API 要求以最小 mip 在前上传；RealTimeB 多级页使用 RGBA8888。代价是远景 chart 边缘略糊和额外显存占用 |
 
 ## 静态 prop
 
 | 变量 | 默认 | 范围 | 作用 |
 | --- | --- | --- | --- |
+| `RESIDENT_WORLD` | 开 | 开/关 | 普通地图在场景加载期间完成静态道具碰撞准备并常驻，减少移动时创建/释放碰撞体；增加加载时间与内存。设 0 恢复普通地图的距离流式碰撞。纯世界和专用服务器始终常驻。此设置写入构建出的场景，旧场景需重新导入 |
+| `GPU_STATIC_SCENE` | 开 | 开/关 | 尝试挂载内共享几何、GPU 可见性/LOD 和材质表 MDI 路径。只接收支持的静态 default/cutout 模型；不兼容的模型或初始化失败仍使用 CPU 批次。依赖现有托管 CommandList 播放方法；未修改引擎源码 |
+| `GPU_STATIC_SCENE_MB` | 512 | 64–2048 | GPU 场景缓冲预算（MiB），包含共享几何、永久实例/材质表、固定数量的可写视图输出，以及四份只读保守输出；创建前超过预算回退 CPU。该值不包含源模型、绑定纹理、驱动分配与其他引擎资源，不是整个游戏的显存上限 |
+| `GPU_VIEW_SLOTS` | 8 | 1–64 | 加载时预分配的可写视图输出槽数，每帧每次 recording 独占一个。超过数量的视图使用只读保守输出，不再扩容或复用在途 UAV；顶点阶段继续按当前视图判定 LOD、距离和 PVS，保留空远景 LOD、混合子网格归属及投影资格。它不做 compute 视锥剔除，也不执行距离阴影门控，可能增加顶点工作与远处阴影。统计中的 `ConservativeRecordings` 可识别此情况；增加槽数会占用更多预算 |
 | `PROP_RENDER_DISTANCE` | 8192 | 0–65536 | 逐实例距离剔除半径，大型地标不受影响。0 关闭距离剔除 |
 | `PROP_AUTHORED_FADE_SCALE` | 1 | 0.25–16 | 乘到地图为每个 prop 设定的淡出距离上 |
 | `PROP_SHADOWS` | 开 | 开/关 | 让半径不小于 48 的静态 prop 投射动态阴影 |
@@ -37,10 +41,11 @@
 | 变量 | 默认 | 范围 | 作用 |
 | --- | --- | --- | --- |
 | `FPS_PRESET` | 0 | 0–240 | 一档式帧率预设。0 与 60 等于下表默认值；120 改为阴影距离 1024、级联 1、LOD 缩放 0.5、cell 4096、批次簇 8、绘制距离 6144，并关掉接触阴影与 Godray。任何一个变量显式设置时都优先于预设 |
-| `PROP_SHADOW_DISTANCE` | 0 | 0–65536 | 距相机多远之外的 prop 批次不再投射方向光阴影。0 = 关闭门控（默认，批次内任一大型实例就让整批投影，与旧行为一致）。开启后标志变更被限制在每帧 32 次以内，避免走动时整片批次在 shadow pass 进出造成卡顿 |
+| `PROP_SHADOW_DISTANCE` | 0 | 0–65536 | 道具方向光阴影距离。0 关闭距离门控，保留原批次的投影资格。CPU 参照路径按批次门控，每帧最多改 32 次标志；GPU 路径以主相机为锚逐实例门控并保存距离回滞状态，不扫描 CPU 实例、不改原生对象标志 |
 | `PROP_LOD_SCALE` | 1 | 0.1–4 | 乘到静态 prop 的 LOD 切换距离（1536/4096/8192）上。小于 1 更早切到低模，减少前向与深度通道三角形 |
 | `BATCH_CLUSTER` | 4 | 1/2/4/8/16 | 多少个 prop cell（512 单位）合成一个实例批次。越大提交对象越少，但 PVS 和阴影按批次聚合，粒度变粗 |
 | `WORLD_CELL_SIZE` | 2048 | 512–8192 | 世界几何的空间 cell 边长。越大 fragment/draw 越少，视锥剔除越粗 |
+| `WORLD_MATERIAL_TABLE` | 开 | 开/关 | 世界材质表：同一 lightmap 页的兼容不透明材质共享原生 aggregate 提交材质，保留原空间片段、边界和三角形范围。动画、cutout 及其他 shader 走原路径；一个 scene 只支持一个使用材质表的世界。可减少 CPU 提交，材质间接读取可能增加 GPU 成本，不能按 draw 降幅推算 FPS 收益。设为 0 恢复原路径 |
 
 冲 60/120 fps 的推荐组合见 [ARCHITECTURE.md](ARCHITECTURE.md) 第 13 节。比较性能时使用同一进程、固定机位、同一相机，并记录 `draws`/`triangles`/`objects`。
 
@@ -77,3 +82,14 @@
 | --- | --- | --- | --- |
 | `VERBOSE_LOG` | 关 | 开/关 | 输出详细加载日志、全部警告和超出预算的耗时记录（spike） |
 | `EXPORT_ROOT` | 无 | 路径 | `titanfall2_export_model` 命令的默认导出目录 |
+
+## Northstar 内容会话
+
+| 变量 | 默认 | 作用 |
+| --- | --- | --- |
+| `NORTHSTAR_PROFILE` | 原游戏安装下存在的 `R2Northstar`，否则仅原版 | Northstar 配置根，包含 `mods/`、`packages/`、`enabledmods.json`。显式空字符串禁用。不是启动器源码目录。 |
+| `NORTHSTAR_MAP` | 未指定 | 固定会话地图名，例如 `mp_angel_city`。启用匹配的条件 RPAK/VPK；指定后仅发布该地图场景，避免地图专属覆盖泄漏到其他地图。切换需要新进程。 |
+
+例如在启动前设置 `$env:SBOX_TITANFALL2_NORTHSTAR_PROFILE = "D:\northstar"`。源码参考 `D:\northstar\NorthstarLauncher-main`；该目录本身不作为 Mod profile。
+
+诊断命令：`titanfall2_content_stats`；`titanfall2_content_list "models/" 0 100`；`titanfall2_content_explain "models/example.mdl"`。查询 RPAK 材质时使用虚拟资源名并传 `matl`，纹理传 `txtr`。原始目录与引擎目录分离；列出脚本不意味着执行脚本。

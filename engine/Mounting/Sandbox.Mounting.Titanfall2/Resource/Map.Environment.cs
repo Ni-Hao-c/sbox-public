@@ -75,11 +75,10 @@ partial class MapLoader
 		volume.Priority = -100;
 		if ( Titanfall2StreamingSettings.UseBspLightmaps )
 		{
-			var tone = postProcess.AddComponent<Titanfall2Tonemapping>();
 			// Retail display and exposure are distinct from Source 2's Hable.
 			// Defaults come from the original client cvars; script overrides
 			// and local controller volumes still need their own entity/IO path.
-			tone.ExposureCompensation = Titanfall2StreamingSettings.BakedExposureCompensation;
+			Titanfall2Tonemapping.CreateMapDisplay( postProcess, Titanfall2StreamingSettings.BakedExposureCompensation );
 		}
 		// Global enabled correction entities are explicit authored map data.
 		// Local volumes and scripted fades need their own spatial/IO handling.

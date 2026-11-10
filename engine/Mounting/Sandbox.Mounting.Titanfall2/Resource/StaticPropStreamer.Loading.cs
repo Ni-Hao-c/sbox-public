@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using Sandbox.Mounting.PerfKit;
 using Titanfall2;
 
@@ -14,7 +15,11 @@ public sealed partial class Titanfall2StaticPropStreamer
 	/// </summary>
 	void EnsureVisibility()
 	{
-		if ( _visibility is { IsValid: true } ) return;
+		if ( _visibility is { IsValid: true } )
+		{
+			_compiledVisibility ??= Titanfall2CompiledVisibility.Compile( _visibility, PvsPortalDepth );
+			return;
+		}
 
 		if ( string.IsNullOrWhiteSpace( EncodedVisibility ) )
 		{
@@ -24,7 +29,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 
 		try
 		{
-			_visibility = DecodeVisibility( EncodedVisibility );
+			_visibility = ReadVisibility( EncodedVisibility, out _compiledVisibility );
 			_visibilityRestoreFailed = _visibility is null;
 		}
 		catch ( Exception exception )
@@ -71,7 +76,9 @@ public sealed partial class Titanfall2StaticPropStreamer
 					writer.Write( portal.FromCell );
 					writer.Write( portal.ToCell );
 				}
+				Titanfall2CompiledVisibility.Compile( visibility, PvsPortalDepth ).Write( writer );
 			}
+			WriteChecksum( writer, stream );
 		}
 
 		return Convert.ToBase64String( stream.GetBuffer(), 0, checked((int)stream.Length) );
@@ -88,15 +95,42 @@ public sealed partial class Titanfall2StaticPropStreamer
 		return remaining >= 0 && (long)count * elementBytes <= remaining;
 	}
 
-	static Titanfall2BspReader.BspVisibility DecodeVisibility( string encoded )
+	static void WriteChecksum( BinaryWriter writer, MemoryStream stream )
 	{
-		using var stream = new MemoryStream( Convert.FromBase64String( encoded ), false );
+		writer.Flush();
+		writer.Write( SHA256.HashData( stream.GetBuffer().AsSpan( 0, checked((int)stream.Length) ) ) );
+	}
+
+	static void ReadChecksum( BinaryReader reader, byte[] payload )
+	{
+		var position = checked((int)reader.BaseStream.Position);
+		var checksum = reader.ReadBytes( 32 );
+		if ( checksum.Length != 32 ) throw new EndOfStreamException( "Truncated compiled scene checksum." );
+		if ( !CryptographicOperations.FixedTimeEquals( SHA256.HashData( payload.AsSpan( 0, position ) ), checksum ) )
+			throw new InvalidDataException( "Compiled scene checksum mismatch." );
+	}
+
+	static Titanfall2BspReader.BspVisibility DecodeVisibility( string encoded )
+		=> ReadVisibility( encoded, out _ );
+
+	static Titanfall2BspReader.BspVisibility ReadVisibility( string encoded, out Titanfall2CompiledVisibility compiled )
+	{
+		compiled = null;
+		var payload = Convert.FromBase64String( encoded );
+		using var stream = new MemoryStream( payload, false );
 		using var reader = new BinaryReader( stream, System.Text.Encoding.UTF8, false );
 		if ( reader.ReadInt32() != VisibilityMagic ) throw new InvalidDataException( "Visibility data has an invalid signature." );
-		if ( reader.ReadInt32() != VisibilityVersion ) throw new InvalidDataException( "Visibility data has an unsupported version." );
-		if ( !reader.ReadBoolean() ) return null;
+		var version = reader.ReadInt32();
+		if ( version < 1 || version > VisibilityVersion ) throw new InvalidDataException( "Visibility data has an unsupported version." );
+		if ( !reader.ReadBoolean() )
+		{
+			if ( version >= 2 ) ReadChecksum( reader, payload );
+			if ( stream.Position != stream.Length ) throw new InvalidDataException( "Trailing visibility data." );
+			return null;
+		}
 
 		var cellCount = reader.ReadInt32();
+		if ( cellCount <= 0 || cellCount > 128 ) throw new InvalidDataException( "Invalid visibility cell count." );
 		var alwaysVisible = new Titanfall2BspReader.VisibilityCellMask( reader.ReadUInt64(), reader.ReadUInt64() );
 
 		// The element counts are validated against the bytes actually left in the payload
@@ -129,7 +163,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 				reader.ReadInt32(), reader.ReadInt32(), default, default, false );
 		}
 
-		return new Titanfall2BspReader.BspVisibility
+		var visibility = new Titanfall2BspReader.BspVisibility
 		{
 			CellCount = cellCount,
 			AlwaysVisibleCells = alwaysVisible,
@@ -137,6 +171,12 @@ public sealed partial class Titanfall2StaticPropStreamer
 			Nodes = nodes,
 			Portals = portals
 		};
+		if ( !visibility.IsValid ) throw new InvalidDataException( "Invalid visibility tree." );
+		compiled = version >= 2 ? Titanfall2CompiledVisibility.Read( reader, visibility, PvsPortalDepth )
+			: Titanfall2CompiledVisibility.Compile( visibility, PvsPortalDepth );
+		if ( version >= 2 ) ReadChecksum( reader, payload );
+		if ( stream.Position != stream.Length ) throw new InvalidDataException( "Trailing visibility data." );
+		return visibility;
 	}
 
 	void InitializeCells()
@@ -148,28 +188,32 @@ public sealed partial class Titanfall2StaticPropStreamer
 
 		try
 		{
-			_localLights = Titanfall2LocalLightBuffer.Restore( EncodedLocalLights );
 			_propsWithPvsCells = 0;
-			foreach ( var prop in Decode( EncodedProps ) )
+			_compiledScene ??= ReadCompiledScene( EncodedProps );
+			_localLights = Titanfall2LocalLightBuffer.Restore( EncodedLocalLights );
+			foreach ( var compiledCell in _compiledScene.Layout.Cells )
 			{
-				var coordinate = CellCoordinate.FromPosition( prop.Position, CellSize );
-				if ( !_cells.TryGetValue( coordinate, out var cell ) )
+				var coordinate = new CellCoordinate( compiledCell.X, compiledCell.Y );
+				var clusterCoordinate = ClusterCoordinate.FromCell( coordinate, BatchClusterCells );
+				if ( !_clusters.TryGetValue( clusterCoordinate, out var cluster ) )
 				{
-					var clusterCoordinate = ClusterCoordinate.FromCell( coordinate, BatchClusterCells );
-					if ( !_clusters.TryGetValue( clusterCoordinate, out var cluster ) )
-					{
-						cluster = new PropCluster( clusterCoordinate );
-						_clusters.Add( clusterCoordinate, cluster );
-					}
-
-					cell = new PropCell( coordinate, cluster );
-					_cells.Add( coordinate, cell );
-					cluster.Cells.Add( cell );
+					cluster = new PropCluster( clusterCoordinate );
+					_clusters.Add( clusterCoordinate, cluster );
 				}
-				cell.Props.Add( prop );
-				if ( !prop.PvsCells.IsEmpty ) _propsWithPvsCells++;
+				var cell = new PropCell( coordinate, cluster );
+				_cells.Add( coordinate, cell );
+				cluster.Cells.Add( cell );
+				for ( var i = compiledCell.First; i < compiledCell.First + compiledCell.Count; ++i )
+				{
+					var prop = _compiledScene.Props[_compiledScene.Layout.CellInstances[i]];
+					cell.Props.Add( prop );
+					if ( !prop.PvsCells.IsEmpty ) _propsWithPvsCells++;
+				}
 			}
-			_totalProps = _cells.Values.Sum( static cell => cell.Props.Count );
+			_totalProps = _compiledScene.Props.Length;
+			Log.Info( $"Titanfall 2 compiled static scene: {_totalProps} stable instances, "
+				+ $"{_compiledScene.Layout.Models.Length} model/skin groups, {_compiledScene.Layout.Cells.Length} spatial cells "
+				+ $"({(_compiledScene.FromCompiledPayload ? "imported layout" : "legacy layout compiled during load")}; {MapPath})." );
 
 			_refreshTimer.Start();
 			_statusTimer.Start();
@@ -187,6 +231,9 @@ public sealed partial class Titanfall2StaticPropStreamer
 			_cells.Clear();
 			_clusters.Clear();
 			_totalProps = 0;
+			_compiledScene = null;
+			_localLights?.Dispose();
+			_localLights = null;
 			Log.Warning( $"Failed to initialize Titanfall 2 prop streaming for '{MapPath}': {exception.Message}" );
 		}
 	}
@@ -241,6 +288,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 		foreach ( var cell in _cells.Values )
 		{
 			var cluster = cell.Cluster;
+			if ( !cluster.HasCpuRenderWork ) continue;
 			if ( cluster.QueueMarked ) continue;
 			cluster.QueueMarked = true;
 			_runtimeClusterQueue.Add( cluster );
@@ -249,6 +297,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 		_runtimeClusterQueue.Sort( static ( left, right ) => left.DistanceSquared.CompareTo( right.DistanceSquared ) );
 		_runtimeClusterCursor = 0;
 		_runtimeQueueRefreshPending = false;
+		if ( _runtimeClusterQueue.Count == 0 ) _runtimePvsUpdatePending = false;
 	}
 
 	void RebuildCollisionQueue()
@@ -326,13 +375,25 @@ public sealed partial class Titanfall2StaticPropStreamer
 				var fade = fadeDistances is not null && sourceIndex < fadeDistances.Count ? fadeDistances[sourceIndex] : 0f;
 				writer.Write( float.IsFinite( fade ) && fade > 0f ? fade : 0f );
 			}
+			var layout = Titanfall2CompiledPropLayout.Compile( valid.Select( prop => new Titanfall2CompiledPropLayout.Instance(
+				new Vector3( prop.Origin.X, prop.Origin.Y, prop.Origin.Z ), indices[NormalizeModelPath( prop.ModelPath )], prop.Skin ) ).ToArray() );
+			layout.Write( writer );
+			WriteChecksum( writer, stream );
 		}
 		return Convert.ToBase64String( stream.GetBuffer(), 0, checked((int)stream.Length) );
 	}
 
+	sealed record CompiledPropScene( StreamedProp[] Props, Titanfall2CompiledPropLayout Layout, bool FromCompiledPayload );
+
 	static IEnumerable<StreamedProp> Decode( string encoded )
 	{
-		using var stream = new MemoryStream( Convert.FromBase64String( encoded ), false );
+		foreach ( var prop in ReadCompiledScene( encoded ).Props ) yield return prop;
+	}
+
+	static CompiledPropScene ReadCompiledScene( string encoded )
+	{
+		var payload = Convert.FromBase64String( encoded );
+		using var stream = new MemoryStream( payload, false );
 		using var reader = new BinaryReader( stream, System.Text.Encoding.UTF8, false );
 		if ( reader.ReadInt32() != DataMagic ) throw new InvalidDataException( "Static prop data has an invalid signature." );
 		var version = reader.ReadInt32();
@@ -344,6 +405,10 @@ public sealed partial class Titanfall2StaticPropStreamer
 
 		var propCount = reader.ReadInt32();
 		if ( propCount < 0 || propCount > MaximumPropCount ) throw new InvalidDataException( $"Invalid prop count {propCount}." );
+		// Bound allocations by actual bytes as well as format limits. V3 is the smallest record.
+		if ( !HasRoomFor( stream, propCount, 61 ) ) throw new EndOfStreamException( "Truncated static prop records." );
+		var props = new StreamedProp[propCount];
+		var layoutInstances = new Titanfall2CompiledPropLayout.Instance[propCount];
 		for ( var index = 0; index < propCount; index++ )
 		{
 			var modelIndex = reader.ReadInt32();
@@ -351,6 +416,8 @@ public sealed partial class Titanfall2StaticPropStreamer
 			var position = new Vector3( reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle() );
 			var rotation = new Angles( reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle() );
 			var scale = reader.ReadSingle();
+			if ( !float.IsFinite( scale ) || !float.IsFinite( rotation.pitch ) || !float.IsFinite( rotation.yaw ) || !float.IsFinite( rotation.roll ) )
+				throw new InvalidDataException( "Non-finite static prop transform." );
 			var collidable = reader.ReadBoolean();
 			var probeColor = new Vector3( reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle() );
 			var pvsCells = new Titanfall2BspReader.VisibilityCellMask( reader.ReadUInt64(), reader.ReadUInt64() );
@@ -380,10 +447,16 @@ public sealed partial class Titanfall2StaticPropStreamer
 			// Older payloads carry no fade distance: 0 keeps them on the global render distance.
 			var fadeDistance = version >= 8 ? reader.ReadSingle() : 0f;
 			if ( !float.IsFinite( fadeDistance ) || fadeDistance < 0f ) fadeDistance = 0f;
-			yield return new StreamedProp( models[modelIndex], position, rotation, scale, collidable, probeColor, probe, pvsCells,
+			props[index] = new StreamedProp( models[modelIndex], position, rotation, scale, collidable, probeColor, probe, pvsCells,
 				sourceIndex, solidType, reservedCollisionData, collisionFlagsRemove )
-			{ Skin = skin, FadeDistance = fadeDistance };
+			{ InstanceId = index, Skin = skin, FadeDistance = fadeDistance };
+			layoutInstances[index] = new( position, modelIndex, skin );
 		}
+		var layout = version >= 9 ? Titanfall2CompiledPropLayout.Read( reader, layoutInstances )
+			: Titanfall2CompiledPropLayout.Compile( layoutInstances );
+		if ( version >= 9 ) ReadChecksum( reader, payload );
+		if ( stream.Position != stream.Length ) throw new InvalidDataException( "Trailing static scene data." );
+		return new( props, layout, version >= 9 );
 	}
 
 	static string NormalizeModelPath( string path )
@@ -402,9 +475,11 @@ public sealed partial class Titanfall2StaticPropStreamer
 		// and made it look as though culling ran and found nothing to hide.
 		UpdatePvsStatistics();
 		Log.Info( $"Titanfall 2 prop streaming complete: {_liveProps}/{_totalProps} retained in "
-			+ $"{_activeCells}/{_cells.Count} cells, {_instancedProps} GPU-instanced in {_batchCount} batches, "
+			+ $"{_activeCells}/{_cells.Count} cells, {_gpuScene?.InstanceCount ?? 0} GPU-resident, "
+			+ $"{_instancedProps - FullGpuInstanceCount} CPU-instanced in {_batchCount} batches, "
 			+ $"{_skinnedProps} frozen-skinned fallbacks, {_plainProps} individual rigid, "
-			+ $"{_renderingProps} rendering, {_shadowCastingProps} casting shadows, "
+			+ (_gpuScene is null ? $"{_renderingProps} rendering, {_shadowCastingProps} casting shadows, "
+				: "GPU visible/caster counts evaluated per view without readback, ")
 			+ $"{_collidersCreated}/{_collidableProps} colliders active "
 			+ $"({_collidersReleased} released, {_collisionFilteredProps} zero-contents, {_colliderFailures} unavailable, {_collidersDeferred} deferred to runtime, "
 			+ $"{_collisionResumeCount} cell passes resumed), "
@@ -449,6 +524,30 @@ public sealed partial class Titanfall2StaticPropStreamer
 		}
 
 		return model;
+	}
+
+	Titanfall2CollisionModelResult LoadCollisionModelWithRetryCache( string resourcePath, int skin )
+	{
+		var failureKey = $"{resourcePath}|{skin}|True";
+		if ( _modelFailureRetryAfter.TryGetValue( failureKey, out var retryAfter ) )
+		{
+			if ( Titanfall2Log.ElapsedSeconds < retryAfter ) return default;
+			_modelFailureRetryAfter.Remove( failureKey );
+		}
+		Titanfall2CollisionModelResult result;
+		try
+		{
+			result = Sandbox.Mounting.Directory.Get( MountIdent ) is Titanfall2Mount mount
+				? mount.LoadCollisionModelVariant( resourcePath, skin ) : default;
+		}
+		catch ( Exception exception )
+		{
+			Log.Warning( exception, $"Unable to load Titanfall 2 prop collision '{resourcePath}'." );
+			result = default;
+		}
+		if ( result.Status == Titanfall2CollisionModelStatus.Unavailable )
+			_modelFailureRetryAfter[failureKey] = Titanfall2Log.ElapsedSeconds + ModelLoader.FailureRetrySeconds;
+		return result;
 	}
 
 	/// <summary>

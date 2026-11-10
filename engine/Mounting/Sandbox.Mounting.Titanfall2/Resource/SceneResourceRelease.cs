@@ -30,26 +30,44 @@ public partial class Titanfall2Mount
 	// One lease per live map scene, taken by Titanfall2SceneResourceOwner. Reaching zero is
 	// what triggers a release, instead of polling Scene.All on a blind timer.
 	int _mapSceneLeases;
-	bool _sceneReleasePending;
+	readonly Titanfall2SceneReleaseGeneration _sceneReleaseGeneration = new();
+	long? _sceneReleasePendingGeneration;
+	long? _followUpCollectionGeneration;
 	WeakReference<Scene> _mapBuildScene;
 
 	/// <summary>
 	/// Marks the temporary scene a map is being built in. Its destruction right after the
 	/// build is part of loading the map, not leaving it.
 	/// </summary>
-	internal void BeginMapBuild( Scene buildScene ) => _mapBuildScene = buildScene is null ? null : new WeakReference<Scene>( buildScene );
+	internal void BeginMapBuild( Scene buildScene )
+	{
+		InvalidateSceneReleaseWork();
+		_mapBuildScene = buildScene is null ? null : new WeakReference<Scene>( buildScene );
+	}
+
+	void InvalidateSceneReleaseWork()
+	{
+		_sceneReleaseGeneration.Advance();
+		_sceneReleasePendingGeneration = null;
+		_followUpCollectionGeneration = null;
+	}
 
 	/// <summary>Taken while a scene shows a mounted map; see <see cref="_mapSceneLeases"/>.</summary>
-	internal void AddMapSceneLease() => _mapSceneLeases++;
+	internal void AddMapSceneLease()
+	{
+		InvalidateSceneReleaseWork();
+		_mapSceneLeases++;
+	}
 
 	internal void OnSceneOwnerDestroyed( Scene scene )
 	{
 		if ( _mapSceneLeases > 0 ) _mapSceneLeases--;
 		if ( scene is not null && _mapBuildScene is not null && _mapBuildScene.TryGetTarget( out var building ) && ReferenceEquals( scene, building ) ) return;
 		if ( _mapSceneLeases > 0 ) return;
-		if ( !CanReleaseSceneResources() || _sceneReleasePending ) return;
-		_sceneReleasePending = true;
-		_ = ReleaseWhenUnusedAsync();
+		if ( !CanReleaseSceneResources() || _sceneReleasePendingGeneration is not null ) return;
+		var ticket = _sceneReleaseGeneration.Capture();
+		_sceneReleasePendingGeneration = ticket.Generation;
+		_ = ReleaseWhenUnusedAsync( ticket );
 	}
 
 	// The editor keeps its scenes outside Scene.All and reloads them for undo and previews,
@@ -60,7 +78,7 @@ public partial class Titanfall2Mount
 
 	static bool AnyLiveMapScene() => Scene.All.Any( static scene => scene.GetAllComponents<Titanfall2SceneResourceOwner>().Any() );
 
-	async Task ReleaseWhenUnusedAsync()
+	async Task ReleaseWhenUnusedAsync( Titanfall2SceneReleaseGeneration.Ticket ticket )
 	{
 		try
 		{
@@ -68,13 +86,17 @@ public partial class Titanfall2Mount
 			// next map build releases whatever is left anyway.
 			for ( var attempt = 0; attempt < SceneReleaseRetryLimit; attempt++ )
 			{
-				await Task.Delay( SceneReleaseSettleMilliseconds );
+				await Task.Delay( SceneReleaseSettleMilliseconds, ticket.Cancellation );
 				await MainThread.Wait();
-				if ( !IsMounted || _mapSceneLeases > 0 || AnyLiveMapScene() ) return;
+				if ( !CanRunSceneCollection( ticket ) ) return;
 				// A loader still finishing its load cannot be torn down; try again once it
 				// has settled rather than leaving its map cached until the next build.
 				if ( !ReleaseSceneResources( "map scene destroyed" ) ) return;
 			}
+		}
+		catch ( OperationCanceledException ) when ( ticket.Cancellation.IsCancellationRequested )
+		{
+			// A new map/clone or shutdown owns the resources now.
 		}
 		catch ( Exception exception )
 		{
@@ -82,7 +104,7 @@ public partial class Titanfall2Mount
 		}
 		finally
 		{
-			_sceneReleasePending = false;
+			if ( _sceneReleasePendingGeneration == ticket.Generation ) _sceneReleasePendingGeneration = null;
 		}
 	}
 
@@ -134,17 +156,49 @@ public partial class Titanfall2Mount
 		Collect();
 		Log.Info( $"Titanfall 2 scene resources released ({reason}): {textures} textures, {materials} materials, {models} models, "
 			+ $"{maps} map builds, {brushSources} brush model sources; managed heap {before / (1024.0 * 1024.0):0} -> {GC.GetTotalMemory( false ) / (1024.0 * 1024.0):0} MB." );
-		_ = Task.Run( static async () =>
+		ScheduleFollowUpCollections();
+		return deferred > 0;
+	}
+
+	bool CanRunSceneCollection( Titanfall2SceneReleaseGeneration.Ticket ticket ) =>
+		_sceneReleaseGeneration.IsCurrent( ticket ) && IsMounted && CanReleaseSceneResources()
+		&& _mapSceneLeases == 0 && !AnyLiveMapScene();
+
+	void ScheduleFollowUpCollections()
+	{
+		var ticket = _sceneReleaseGeneration.Capture();
+		if ( _followUpCollectionGeneration == ticket.Generation ) return;
+		_followUpCollectionGeneration = ticket.Generation;
+		_ = CollectWhenUnusedAsync( ticket );
+	}
+
+	async Task CollectWhenUnusedAsync( Titanfall2SceneReleaseGeneration.Ticket ticket )
+	{
+		try
 		{
 			var elapsed = 0;
 			foreach ( var delay in FollowUpCollectionDelaysMilliseconds )
 			{
-				await Task.Delay( delay - elapsed );
+				await Task.Delay( delay - elapsed, ticket.Cancellation );
 				elapsed = delay;
+				await MainThread.Wait();
+				// The state check and collection run on the same engine thread. A worker
+				// collection could race a new map taking a lease immediately after the check.
+				if ( !CanRunSceneCollection( ticket ) ) return;
 				Collect();
 			}
-		} );
-		return deferred > 0;
+		}
+		catch ( OperationCanceledException ) when ( ticket.Cancellation.IsCancellationRequested )
+		{
+		}
+		catch ( Exception exception )
+		{
+			Log.Warning( exception, "Titanfall 2 follow-up scene collection failed." );
+		}
+		finally
+		{
+			if ( _followUpCollectionGeneration == ticket.Generation ) _followUpCollectionGeneration = null;
+		}
 	}
 
 	// Finalizers of the released wrappers queue their native handle releases on the main

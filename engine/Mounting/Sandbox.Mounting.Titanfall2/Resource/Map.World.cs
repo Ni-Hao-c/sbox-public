@@ -13,19 +13,17 @@ partial class MapLoader
 	// float4 values, so only precision changes (on retail pages RealTimeB is 93.7-96.7% binary and
 	// loses ~0.2% on average, SkyB loses ~1% of its sky visibility), while the lightmap block drops
 	// from 17 B/px to 13 B/px. SBOX_TITANFALL2_LIGHTMAP_16BIT=0 restores the RGBA8888 upload for A/B
-	// and rollback. See PackRgb565/PackBgra4444 for the byte-order derivation.
+	// and rollback. See PackBgr565/PackBgra4444 for the byte-order derivation.
 	static bool Lightmap16Bit => Titanfall2StreamingSettings.Lightmap16Bit;
 
 	/// <summary>
-	/// Packs an RGBA8888 lightmap page into RGB565. The byte order follows the engine's own DDS
-	/// path: <c>TextureLoader.FromDds</c> hands the file's mip bytes to <c>WithData</c> unchanged and
-	/// maps the DDS masks R=0xF800 / G=0x07E0 / B=0x001F to <see cref="ImageFormat.RGB565"/>
-	/// (Sandbox.Engine/Game/Mount/TextureLoader.DDS.cs:150), so a little-endian 16-bit word is
-	/// <c>R &lt;&lt; 11 | G &lt;&lt; 5 | B</c>: red in the high five bits, blue in the low five.
-	/// Note this is the DDS "RGB565" order and is the opposite of VTF's RGB565 (which keeps red in
-	/// the low bits), so do not reuse the VTF table for this format.
+	/// Packs an RGBA8888 lightmap page for the native <see cref="ImageFormat.BGR565"/> upload:
+	/// <c>R &lt;&lt; 11 | G &lt;&lt; 5 | B</c>, with blue in the low five bits of each little-endian
+	/// word. Native GPU readback and world-shader sampling verify this layout. RGB565 is a different
+	/// engine format: it can return a valid texture whose uploaded directions are corrupt, so the
+	/// DDS loader's format mapping is not evidence that RGB565 works for this runtime upload.
 	/// </summary>
-	static byte[] PackRgb565( byte[] rgba, int pixelCount )
+	static byte[] PackBgr565( byte[] rgba, int pixelCount )
 	{
 		if ( rgba is null || rgba.Length != pixelCount * 4 ) return null;
 		var packed = new byte[pixelCount * 2];
@@ -138,7 +136,7 @@ partial class MapLoader
 	/// texel counts as covered when its centre falls inside a triangle whose vertices carry a
 	/// lightmap UV. UVs outside the page and degenerate triangles are skipped (counted in
 	/// <paramref name="skippedTriangles"/>). Pages with no geometry stay null. The mask is a plain
-	/// <c>bool[]</c>, one byte per texel - about 1 MB per 1024² page.
+	/// <c>bool[]</c>, one byte per texel - about 1 MB per 1024虏 page.
 	/// </summary>
 	internal static bool[][] BuildLightmapCoverage( IEnumerable<Titanfall2BspReader.WorldMesh> meshes,
 		IReadOnlyList<Titanfall2BspReader.BspLightmapPage> pages, out int skippedTriangles )
@@ -354,7 +352,8 @@ partial class MapLoader
 
 	/// <summary>
 	/// Uploads one lightmap channel. With <paramref name="levels"/> above one the complete chain is
-	/// built on the CPU and passed with the base level, so the result does not depend on the
+	/// built on the CPU and uploaded smallest mip first, as required by the native texture API
+	/// (also used by TextureLoader.DDS.GetMipData), so the result does not depend on the
 	/// backend's mip generation (the engine's TSPEC_TEXTURE_GEN_MIP_MAPS flag is documented as
 	/// render-target only). <paramref name="packer"/> converts each level's RGBA bytes to the
 	/// upload format, because packing after filtering is the only correct order for 565/4444.
@@ -375,7 +374,7 @@ partial class MapLoader
 		var total = LightmapChainBytes( width, height, bytesPerPixel, levels );
 		var full = new byte[total];
 		var offset = 0;
-		for ( var level = 0; level < chain.Count; level++ )
+		for ( var level = chain.Count - 1; level >= 0; --level )
 		{
 			var levelWidth = Math.Max( 1, width >> level );
 			var levelHeight = Math.Max( 1, height >> level );
@@ -638,14 +637,39 @@ partial class MapLoader
 		// G4: world shadows can come from a depth-only copy of the opaque world instead of the
 		// forward aggregates; the copy still exists here so this stays independent of SHADOW_CASCADES.
 		var useShadowGeometry = Titanfall2StreamingSettings.MapShadows && Titanfall2StreamingSettings.ShadowGeometry;
-		var worldAggregates = Titanfall2WorldAggregator.Build(
-			groups, parsed.MapName, "world", cellSize, Path, Log,
-			( materialKey, meshIndex ) => CreateWorldLightmappedMaterial(
-				materialKey,
-				meshIndex,
-				lightmaps ),
-			out var worldRenderMeshCount,
-			out var worldAggregateKeys );
+		var useMaterialTable = Titanfall2StreamingSettings.WorldMaterialTable;
+		var resolvedMaterials = new Dictionary<WorldMaterialKey, Material>();
+		Material ResolveMaterial( WorldMaterialKey key, int index )
+		{
+			if ( resolvedMaterials.TryGetValue( key, out var material ) ) return material;
+			material = CreateWorldLightmappedMaterial( key, index, lightmaps );
+			resolvedMaterials.Add( key, material );
+			return material;
+		}
+		List<MountedAggregate> worldAggregates = null;
+		IReadOnlyList<WorldMaterialKey> worldAggregateKeys = [];
+		if ( !useMaterialTable )
+			worldAggregates = Titanfall2WorldAggregator.Build( groups, parsed.MapName, "world", cellSize, Path, Log,
+				ResolveMaterial, out _, out worldAggregateKeys );
+		if ( useMaterialTable )
+		{
+			foreach ( var key in groups.Values.SelectMany( materials => materials.Keys ).Distinct()
+				.OrderBy( key => key.MaterialName, StringComparer.OrdinalIgnoreCase ).ThenBy( key => key.LightmapPage ) )
+				ResolveMaterial( key, resolvedMaterials.Count );
+		}
+		var materialBatch = useMaterialTable ? Titanfall2WorldMaterialBatch.Build( groups, resolvedMaterials,
+			key => !cutoutMaterials.Contains( key.MaterialName )
+				&& !Titanfall2MaterialAnimationRegistry.IsAnimated( LoadWorldMaterial( key.MaterialName ) ),
+			$"titanfall2/map/{parsed.MapName}_world_material_table" ) : null;
+		if ( materialBatch is not null )
+		{
+			worldAggregates = materialBatch.Aggregates.ToList();
+			worldAggregateKeys = materialBatch.Keys;
+			Log.Info( $"Titanfall 2 world material table: {resolvedMaterials.Count} source materials -> {worldAggregates.Count} aggregates, "
+				+ $"{materialBatch.Owned.Tables.Length} shared page materials, {materialBatch.Owned.Sources.Length} table rows, "
+				+ $"{worldAggregates.Sum( aggregate => aggregate.Fragments.Count )} retained fragments ({Path})." );
+		}
+		var worldRenderMeshCount = worldAggregates.Count;
 		// Per-phase timings show whether world geometry, decals or Godrays moved the load time.
 		var worldPhase = renderTimer.Elapsed;
 		var translucentChunks = BuildRenderChunks( translucentGroups, parsed.MapName, "translucent",
@@ -731,8 +755,11 @@ partial class MapLoader
 			collisionModel = collisionBuilder.Create();
 			Log.Info( $"Titanfall 2 fallback render collision submitted: {Path} ({collisionIndices.Count / 3} triangles)" );
 		}
-		return new WorldBuildResult( translucentChunks, decalChunks, godrayChunks, waterChunks, worldAggregates, collisionModel,
-			lightmaps?.OwnedResources ?? Array.Empty<IDisposable>(), shadowOnlyChunks, worldShadowChunks, aggregateCastShadows );
+		var ownedResources = (lightmaps?.OwnedResources ?? Array.Empty<IDisposable>()).ToList();
+		var result = new WorldBuildResult( translucentChunks, decalChunks, godrayChunks, waterChunks, worldAggregates, collisionModel,
+			ownedResources, shadowOnlyChunks, worldShadowChunks, aggregateCastShadows, materialBatch?.Owned.Sources,
+			materialBatch is not null ? Titanfall2WorldMaterialBatch.Register( materialBatch.Owned.Sources ) : null );
+		return result;
 	}
 
 	/// <summary>
@@ -1030,7 +1057,7 @@ partial class MapLoader
 	{
 		string[] textureNames =
 		[
-			"g_tAlbedo", "g_tNormal", "g_tGloss", "g_tSpecular", "g_tAO", "g_tCavity", "g_tOpacity",
+			"g_tAlbedo", "g_tNormal", "g_tDetailNormal", "g_tGloss", "g_tSpecular", "g_tAO", "g_tCavity", "g_tOpacity",
 			"g_tEmissive", "g_tEmissiveMultiply", "g_tDetail", "g_tDistortion", "g_tEnvironment",
 			"g_tAlbedo2", "g_tNormal2", "g_tGloss2", "g_tSpecular2", "g_tLayerBlend"
 		];
@@ -1043,7 +1070,7 @@ partial class MapLoader
 
 		string[] vectorNames =
 		[
-			"g_flT2GlossScale", "g_vT2SpecularTint", "g_flT2EmissiveStrength",
+			"g_vT2DetailNormal", "g_flT2GlossScale", "g_vT2SpecularTint", "g_flT2EmissiveStrength",
 			"g_flT2DetailBlend", "g_vT2UvDistortion", "g_flT2HasEnvironment",
 			"g_flT2EnvironmentIntensity", "g_flT2FresnelStrength", "g_vT2Uv1RotScale",
 			"g_vT2Uv1Translate", "g_vT2AlbedoTint", "g_vT2EmissiveTint",
@@ -1088,7 +1115,7 @@ partial class MapLoader
 				+ $"{pageBytes / (1024.0 * 1024.0):0.00} MB ({Path})." );
 		}
 		Log.Info( $"Titanfall 2 lightmap upload: {pages.Count} pages, {totalBytes / (1024.0 * 1024.0):0.00} MB total, "
-			+ $"{(Lightmap16Bit ? "16-bit SkyB/RealTimeB (RGB565/BGRA4444)" : "RGBA8888 SkyB/RealTimeB")}"
+			+ $"{(Lightmap16Bit ? "16-bit lightmap optimization (BGR565 SkyB, BGRA4444 single-level RealTimeB)" : "RGBA8888 SkyB/RealTimeB")}"
 			+ $"{(mips ? $", mips L0..L{LightmapMipLevelCount - 1} (dilate {LightmapDilationSteps})" : string.Empty)}"
 			+ $" ({Path})." );
 		if ( mipTimer is not null )
@@ -1137,10 +1164,12 @@ partial class MapLoader
 		var runtime = new RuntimeLightmapPage(
 			CreateLightmapChannel( skyA, page.Width, page.Height, ImageFormat.RGBA8888, mipLevels, null ),
 			Lightmap16Bit
-				? CreateLightmapChannel( skyB, page.Width, page.Height, ImageFormat.RGB565, mipLevels, PackRgb565 )
+				? CreateLightmapChannel( skyB, page.Width, page.Height, ImageFormat.BGR565, mipLevels, PackBgr565 )
 				: CreateLightmapChannel( skyB, page.Width, page.Height, ImageFormat.RGBA8888, mipLevels, null ),
 			CreateLightmapTextureRaw( page.RealTimeA, page.Width, page.Height, ImageFormat.RGBA8888, 1 ),
-			Lightmap16Bit
+			// Native BGRA4444 multi-mip uploads can fail or corrupt lower levels. Keep the
+			// single-level optimization, but use the verified RGBA path for filtered mips.
+			Lightmap16Bit && mipLevels == 1
 				? CreateLightmapChannel( realTimeB, page.Width, page.Height, ImageFormat.BGRA4444, mipLevels, PackBgra4444 )
 				: CreateLightmapChannel( realTimeB, page.Width, page.Height, ImageFormat.RGBA8888, mipLevels, null ),
 			sunTexture );

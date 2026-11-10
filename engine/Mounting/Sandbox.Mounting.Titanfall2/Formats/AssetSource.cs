@@ -1,4 +1,4 @@
-/// <summary>Deferred byte source for a mounted Titanfall 2 asset.</summary>
+﻿/// <summary>Deferred byte source for a mounted Titanfall 2 asset.</summary>
 interface ITitanfall2AssetSource
 {
 	string Description { get; }
@@ -31,19 +31,9 @@ interface ITitanfall2TextureSource
 }
 
 /// <summary>
-/// Loose-file asset source: one game-relative file, with the same four contracts the
-/// archive-backed sources implement (whole bytes, sibling files, arbitrary game paths and a
-/// header prefix). It is fully implemented and covered by
-/// <c>Sandbox.Test.Engine</c>'s loose-source tests, but nothing in the mount instantiates it yet;
-/// it exists for loose content and is the intended source for a future Northstar mod layer.
-/// <para>
-/// Wiring contract: register the asset under its virtual VPK path (<c>models/x.mdl</c>,
-/// <c>materials/y.vmt</c>, <c>sound/z.wav</c>) and claim that name in the mount's shared
-/// <c>registered</c> set first. The mount gates every name through <c>registered.Add(...)</c>
-/// (<c>entry.Path</c> for maps, models and sounds; <c>&lt;name&gt;.vmat</c> /
-/// <c>&lt;name&gt;.vtex</c> for legacy materials and textures), so a source keyed on a real
-/// filesystem path would let the base VPK entry claim the same resource name and win.
-/// </para>
+/// Standalone loose-file reader retained for import/export fixtures. Production mounting
+/// uses Titanfall2SnapshotFile and snapshot-bound sources: companion/path resolution
+/// must use the complete immutable content directory, not adjacent physical files.
 /// </summary>
 sealed class LooseAssetSource( string path ) : ITitanfall2AssetSource, ITitanfall2SiblingAssetSource, ITitanfall2PathAssetSource, ITitanfall2PrefixAssetSource
 {

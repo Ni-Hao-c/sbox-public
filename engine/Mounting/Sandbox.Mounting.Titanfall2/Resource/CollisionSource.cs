@@ -16,6 +16,15 @@ public sealed class Titanfall2ModelCollisionData
 [Library, Hide]
 public sealed class Titanfall2CollisionSource : Component
 {
+	// Scene-owned notification, intentionally not serialized or retained by the mount cache.
+	internal Action CollisionDestroyed { get; set; }
+
+	protected override void OnDestroy()
+	{
+		CollisionDestroyed?.Invoke();
+		CollisionDestroyed = null;
+	}
+
 	/// <summary>Retail static-prop initialization (engine.dll 0x1801affc4..0x1801b0007).
 	/// Returns original contents, not Source 2 collision flags or a gameplay query mask.</summary>
 	public static uint StaticPropContents( uint modelContents, uint flagsRemove )

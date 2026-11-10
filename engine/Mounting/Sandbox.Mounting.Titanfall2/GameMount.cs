@@ -1,4 +1,4 @@
-using Titanfall2;
+﻿using Titanfall2;
 
 /// <summary>Runtime mount for the locally installed Steam version of Titanfall 2.</summary>
 public partial class Titanfall2Mount : BaseGameMount
@@ -56,24 +56,6 @@ public partial class Titanfall2Mount : BaseGameMount
 	readonly object _legacyParticleSpriteLock = new();
 	readonly object _shaderReflectionLock = new();
 
-	/// <summary>
-	/// One asset registration layer, applied by <c>Mount()</c> in list order. A layer only
-	/// fills the names earlier layers left free, because every registration path ends in
-	/// <c>registered.Add(...)</c> or a source-table <c>TryAdd</c>. The list order is therefore the
-	/// priority order: the first layer wins a contested resource name. A future Northstar mod
-	/// layer is inserted at the front of this list and must key its entries on the same virtual
-	/// VPK paths the built-in layers use.
-	/// </summary>
-	sealed class AssetRegistrationLayer( string name, int priority, int registeredNames )
-	{
-		internal string Name { get; } = name;
-		internal int Priority { get; } = priority;
-		/// <summary>Names this layer claimed in the shared <c>registered</c> set (diagnostics only).</summary>
-		internal int RegisteredNames { get; } = registeredNames;
-	}
-
-	readonly List<AssetRegistrationLayer> _assetLayers = new();
-
 	public override string Ident => "titanfall2";
 	public override string Title => "Titanfall 2";
 	public override long? SteamAppId => AppId;
@@ -95,31 +77,26 @@ public partial class Titanfall2Mount : BaseGameMount
 
 	protected override Task Mount( MountContext context )
 	{
+		InvalidateSceneReleaseWork();
 		_contentFingerprint = null;
 		EnsureRuntimeTypesRegistered();
 		Titanfall2CollisionDiagnostics.RegisterConsoleCommands();
-		// Reset every registration table once, before any layer runs. The reset used to live at
-		// the top of MountRpakResources/MountVpkResources, which left no room for a layer that
-		// has to register ahead of them (the intended Northstar mod layer). Nothing reads these
-		// tables between the old and the new reset point, so the mounted content is unchanged.
-		ClearRegistrationTables();
-		_assetLayers.Clear();
 		var registered = new HashSet<string>( StringComparer.OrdinalIgnoreCase );
-		// Layers run in registration (= priority) order and a later layer can only fill the names
-		// an earlier one left free: "registered first" is "highest priority". Titanfall 2 resolves
-		// native RPAK MATL/TXTR assets before legacy VMT/VTF search paths, so RPAK is first and the
-		// VPK layer only fills missing names. The sky and Miles layers must stay last: the sky
-		// material inspects the VPK texture table and Miles only registers sounds.
-		var claimed = registered.Count;
-		MountRpakResources( context, registered );
-		claimed = RecordAssetLayer( "rpak", 400, claimed, registered );
-		MountVpkResources( context, registered );
-		claimed = RecordAssetLayer( "vpk", 300, claimed, registered );
+		var profile = Environment.GetEnvironmentVariable( "SBOX_TITANFALL2_NORTHSTAR_PROFILE" );
+		if ( profile is null && System.IO.Directory.Exists( Path.Combine( _root, "R2Northstar" ) ) ) profile = Path.Combine( _root, "R2Northstar" );
+		var snapshot = Titanfall2ContentDiscovery.Build( _root, string.IsNullOrWhiteSpace( profile ) ? null : profile,
+			Environment.GetEnvironmentVariable( "SBOX_TITANFALL2_NORTHSTAR_MAP" ) );
+		if ( _sessionContentRevision is not null && _sessionContentRevision != snapshot.Revision )
+			throw new InvalidOperationException( "Titanfall 2 content changed; restart the engine to apply a new Northstar profile or source revision." );
+		_sessionContentRevision = snapshot.Revision;
+		ClearRegistrationTables();
+		_contentSnapshot = snapshot;
+		_contentFingerprint = Titanfall2ProcessedCache.Key( $"{typeof( Titanfall2Mount ).Assembly.ManifestModule.ModuleVersionId}|{snapshot.Revision}" );
+		MountContentResources( context, registered, snapshot );
 		RegisterSkyMaterial( context, registered );
-		claimed = RecordAssetLayer( "sky", 200, claimed, registered );
 		MountMilesSounds( context, registered );
-		RecordAssetLayer( "miles", 100, claimed, registered );
-		LogAssetLayers( registered );
+		Log.Info( $"Titanfall 2 content snapshot {_contentSnapshot.Revision}: {_contentSnapshot.Entries.Count} entries, {_contentSnapshot.Winners.Count} winners." );
+		foreach ( var diagnostic in _contentSnapshot.Diagnostics ) Log.Warning( diagnostic );
 		IsMounted = true;
 		return Task.CompletedTask;
 	}
@@ -164,25 +141,6 @@ public partial class Titanfall2Mount : BaseGameMount
 	}
 
 	/// <summary>
-	/// Records how many resource names one registration layer claimed and returns the new running
-	/// total. The layer bodies are invoked directly instead of through a delegate: <see cref="MountContext"/>
-	/// is a ref struct, so a lambda that captures it cannot be compiled.
-	/// </summary>
-	int RecordAssetLayer( string name, int priority, int claimedBefore, HashSet<string> registered )
-	{
-		_assetLayers.Add( new AssetRegistrationLayer( name, priority, registered.Count - claimedBefore ) );
-		return registered.Count;
-	}
-
-	/// <summary>Reports the applied layer order, so a future mod layer can be A/B'd from the log.</summary>
-	void LogAssetLayers( HashSet<string> registered )
-	{
-		var order = string.Join( " > ", _assetLayers.Select( static layer => $"{layer.Name}[{layer.Priority}]={layer.RegisteredNames}" ) );
-		Log.Info( $"Titanfall 2 asset layers: {order}; {registered.Count} resource names claimed in total "
-			+ $"(first layer wins a contested name; a Northstar layer would register ahead of these)." );
-	}
-
-	/// <summary>
 	/// Wraps retail's cubemap (which ships without a Source 2 sky material) in the native sky
 	/// shader so both the main view and the 3D skybox use mounted art. Runs after the VPK layer
 	/// because it inspects that layer's texture table.
@@ -195,6 +153,8 @@ public partial class Titanfall2Mount : BaseGameMount
 
 	protected override void Shutdown()
 	{
+		InvalidateSceneReleaseWork();
+		_contentSnapshot = null;
 		ReleaseSoundEventSessions();
 		Titanfall2CollisionDiagnostics.UnregisterConsoleCommands();
 		ReleaseMountCaches();
@@ -338,10 +298,17 @@ public partial class Titanfall2Mount : BaseGameMount
 		// The out argument has to be declared up front: the compiler cannot prove it is assigned
 		// when the lookup result is carried through a bool local instead of an if condition.
 		MilesSoundAsset asset = default;
-		// Bank first, loose .wav second. Keep this order: retail ships every sound in the Miles
-		// bank (no loose .wav entries), and a same-named loose file must never shadow the bank.
-		// A future mod/Northstar layer that wants to override audio therefore has to change this
-		// lookup (or the bank table) rather than only registering a .wav source.
+		// Explicit Mod file replacement wins before bank/event lookup. A broken winner
+		// fails here, rather than playing the original and hiding a failed override.
+		if ( _contentSnapshot?.TryGet( key + ".wav", out var replacement ) == true
+			&& replacement.SourceId.StartsWith( "northstar:", StringComparison.Ordinal ) )
+		{
+			var replacementSource = _contentSnapshot.GetSource( replacement.Path );
+			if ( !replacementSource.TryReadAllBytes( out var wav, out error ) ) return null;
+			var replacementSound = SoundFile.FromWav( key + ".wav", wav, new SoundFile.LoadOptions { Loop = loop } );
+			if ( replacementSound is null ) error = "Mod SoundFile.FromWav returned null";
+			return replacementSound;
+		}
 		var inBank = _milesArchive is not null && TryFindMilesAsset( key, out asset );
 		_soundLookupTicks += System.Diagnostics.Stopwatch.GetTimestamp() - started;
 		if ( inBank )
@@ -652,18 +619,11 @@ public partial class Titanfall2Mount : BaseGameMount
 
 	void MountMilesSounds( MountContext context, HashSet<string> registered )
 	{
-		var bankPath = Path.Combine( _root, "r2", "sound", "general.mbnk" );
-		if ( !File.Exists( bankPath ) ) return;
-		if ( !MilesBankArchive.TryOpen( _root, bankPath, out var archive, out var error ) )
-		{
-			Log.Warning( $"Unable to index Titanfall 2 Miles bank '{Path.GetFileName( bankPath )}': {error}" );
-			return;
-		}
-
+		var entries = _contentSnapshot.Winners.Where( entry => entry.Kind == "miles" ).ToArray();
+		if ( entries.Length == 0 ) return;
+		var archive = entries[0].Bank;
 		_milesArchive = archive;
-		// Sorted table for TryFindMilesAsset's binary search. Only references are stored;
-		// the record names are the strings the asset dictionary already keeps.
-		_milesSoundOrdered = archive.Assets.ToArray();
+		_milesSoundOrdered = entries.Select( entry => entry.Sound ).ToArray();
 		var sounds = 0;
 		foreach ( var asset in _milesSoundOrdered )
 		{
@@ -673,178 +633,6 @@ public partial class Titanfall2Mount : BaseGameMount
 			sounds++;
 		}
 		Log.Info( $"Titanfall 2 Miles bank mounted: {sounds} BCF sounds (localized language index {archive.PreferredLanguage})." );
-	}
-
-	void MountVpkResources( MountContext context, HashSet<string> registered )
-	{
-		var vpkDirectory = Path.Combine( _root, "vpk" );
-		var archives = new List<VpkArchive>();
-		foreach ( var directoryFile in System.IO.Directory.EnumerateFiles( vpkDirectory, "*_dir.vpk", SearchOption.TopDirectoryOnly )
-			.OrderBy( static path => string.Equals( Path.GetFileName( path ), "englishclient_mp_common.bsp.pak000_dir.vpk", StringComparison.OrdinalIgnoreCase ) ? 0 : 1 )
-			.ThenBy( static path => path, StringComparer.OrdinalIgnoreCase ) )
-		{
-			if ( !VpkArchive.TryOpen( directoryFile, out var archive, out var error ) )
-			{
-				Log.Warning( $"Unable to index Titanfall 2 VPK '{Path.GetFileName( directoryFile )}': {error}" );
-				continue;
-			}
-			archives.Add( archive );
-		}
-		var vpkResolver = new VpkPathResolver( archives );
-		var hiddenDepotEntries = 0;
-
-		var spawnEntitySources = new Dictionary<string, ITitanfall2AssetSource>( StringComparer.OrdinalIgnoreCase );
-		var environmentEntitySources = new Dictionary<string, ITitanfall2AssetSource>( StringComparer.OrdinalIgnoreCase );
-		var particleEntitySources = new Dictionary<string, ITitanfall2AssetSource>( StringComparer.OrdinalIgnoreCase );
-		var scriptEntitySources = new Dictionary<string, ITitanfall2AssetSource>( StringComparer.OrdinalIgnoreCase );
-		var soundEntitySources = new Dictionary<string, ITitanfall2AssetSource>( StringComparer.OrdinalIgnoreCase );
-		foreach ( var archive in archives )
-		{
-			foreach ( var entry in archive.Entries )
-			{
-				if ( IsDepotVpkPath( entry.Path ) ) continue;
-				if ( TryGetEntityMapName( entry.Path, "_spawn", out var spawnMapName ) )
-					spawnEntitySources.TryAdd( spawnMapName, new VpkAssetSource( archive, entry, vpkResolver ) );
-				else if ( TryGetEntityMapName( entry.Path, "_env", out var environmentMapName ) )
-					environmentEntitySources.TryAdd( environmentMapName, new VpkAssetSource( archive, entry, vpkResolver ) );
-				else if ( TryGetEntityMapName( entry.Path, "_fx", out var particleMapName ) )
-					particleEntitySources.TryAdd( particleMapName, new VpkAssetSource( archive, entry, vpkResolver ) );
-				else if ( TryGetEntityMapName( entry.Path, "_script", out var scriptMapName ) )
-					scriptEntitySources.TryAdd( scriptMapName, new VpkAssetSource( archive, entry, vpkResolver ) );
-				else if ( TryGetEntityMapName( entry.Path, "_snd", out var soundMapName ) )
-					soundEntitySources.TryAdd( soundMapName, new VpkAssetSource( archive, entry, vpkResolver ) );
-			}
-		}
-
-		var legacyMaterials = 0;
-		var legacyTextures = 0;
-		foreach ( var archive in archives )
-		{
-			foreach ( var entry in archive.Entries )
-			{
-				if ( IsDepotVpkPath( entry.Path ) )
-				{
-					// Depot mirrors contain duplicate maps and supporting assets. Keep
-					// them in VpkPathResolver for explicit dependency reads, but do not
-					// expose the mirrored directory through mount://titanfall2.
-					hiddenDepotEntries++;
-					continue;
-				}
-
-				// The soundscape script is the only definition of a trigger_soundscape's loop.
-				if ( _soundscapeScriptSource is null
-					&& entry.Path.Equals( "scripts/audio/audio_soundscapes.txt", StringComparison.OrdinalIgnoreCase ) )
-				{
-					_soundscapeScriptSource = new VpkAssetSource( archive, entry, vpkResolver );
-				}
-
-				var extension = Path.GetExtension( entry.Path ).ToLowerInvariant();
-				if ( extension == ".vmt" && Titanfall2LegacyPath.TryGetMaterialName( entry.Path, out var materialName ) )
-				{
-					var resourceKey = materialName + ".vmat";
-					var legacyMaterialSource = new VpkAssetSource( archive, entry, vpkResolver );
-					_legacyMaterialSources.TryAdd( materialName, legacyMaterialSource );
-					legacyMaterials++;
-					if ( registered.Add( resourceKey ) )
-					{
-						_materialPaths.TryAdd( materialName, materialName );
-						context.Add( ResourceType.Material, materialName, new LegacyMaterialLoader( materialName ) );
-					}
-					continue;
-				}
-				if ( extension == ".vtf" && Titanfall2LegacyPath.TryGetTextureName( entry.Path, out var textureName ) )
-				{
-					var resourceKey = textureName + ".vtex";
-					var legacyTextureSource = new VpkAssetSource( archive, entry, vpkResolver );
-					_legacyTextureSources.TryAdd( textureName, legacyTextureSource );
-					if ( registered.Add( resourceKey ) )
-						context.Add( ResourceType.Texture, textureName, new Titanfall2TextureLoader( legacyTextureSource ) );
-					var animatedName = Titanfall2LegacyPath.GetAnimatedTextureName( textureName );
-					if ( registered.Add( animatedName + ".vtex" ) )
-					{
-						context.Add( ResourceType.Texture, animatedName, new Titanfall2TextureLoader( legacyTextureSource, animatedVtfAtlas: true ) );
-						_legacyAnimatedTexturePaths.TryAdd( textureName, animatedName );
-					}
-					legacyTextures++;
-					continue;
-				}
-				// Colour-correction tables are mounted as volume textures, keyed on their own
-				// content path, so a map scene references one instead of embedding its samples.
-				if ( extension == ".raw" && entry.Path.StartsWith( "materials/correction/", StringComparison.OrdinalIgnoreCase ) )
-				{
-					if ( registered.Add( entry.Path + ".vtex" ) )
-						context.Add( ResourceType.Texture, entry.Path, new Titanfall2ColorLookupLoader( new VpkAssetSource( archive, entry, vpkResolver ) ) );
-					continue;
-				}
-				if ( extension == ".pcf" )
-				{
-					RegisterParticleFile( entry.Path, new VpkAssetSource( archive, entry, vpkResolver ) );
-					continue;
-				}
-				if ( extension is not (".bsp" or ".mdl" or ".rmdl" or ".wav") ) continue;
-				if ( !registered.Add( entry.Path ) ) continue;
-
-				var source = new VpkAssetSource( archive, entry, vpkResolver );
-				switch ( extension )
-				{
-					case ".bsp":
-						var mapName = Path.GetFileNameWithoutExtension( entry.Path );
-						spawnEntitySources.TryGetValue( mapName, out var spawnEntitySource );
-						environmentEntitySources.TryGetValue( mapName, out var environmentEntitySource );
-						particleEntitySources.TryGetValue( mapName, out var particleEntitySource );
-						scriptEntitySources.TryGetValue( mapName, out var scriptEntitySource );
-						soundEntitySources.TryGetValue( mapName, out var soundEntitySource );
-						context.Add( ResourceType.Scene, entry.Path, new MapLoader(
-							source,
-							spawnEntitySource,
-							environmentEntitySource,
-							particleEntitySource,
-							scriptEntitySource,
-							soundEntitySource ) );
-						// Additive path contract: the legacy preview scene keeps its cameras
-						// and spawns; games can request only mounted world assets.
-						context.Add( ResourceType.Scene, entry.Path + ".world", new MapLoader(
-							source, spawnEntitySource, environmentEntitySource, particleEntitySource,
-							scriptEntitySource, soundEntitySource, pureWorld: true ) );
-						try
-						{
-							var brushCount = Titanfall2BrushModelSource.ReadCount( source );
-							if ( brushCount > 0 )
-							{
-								var brushSource = new Titanfall2BrushModelSource( source, environmentEntitySource );
-								_brushModelSources.Add( brushSource );
-								for ( var index = 1; index <= brushCount; index++ )
-									context.Add( ResourceType.Model, $"{entry.Path}/brush/{index}", new Titanfall2BrushModelLoader( brushSource, index ) );
-							}
-						}
-						catch ( Exception exception )
-						{
-							Log.Warning( $"Cannot register BSP inline models for {entry.Path}: {exception.Message}" );
-						}
-						break;
-					case ".mdl":
-					case ".rmdl":
-						_modelSources.TryAdd( NormalizeModelSourcePath( entry.Path ), source );
-						context.Add( ResourceType.Model, entry.Path, new ModelLoader( source ) );
-						// The static-instance resource is one .t2static model that carries every LOD.
-						var allLodsPath = ModelLoader.GetStaticInstanceAllLodsPath( entry.Path );
-						if ( registered.Add( allLodsPath ) )
-							context.Add( ResourceType.Model, allLodsPath, new ModelLoader( source, staticInstance: true ) );
-						break;
-					case ".wav":
-						// First registration wins, like every other source table. Retail ships no
-						// loose .wav entries at all (every sound lives in the Miles bank), so this
-						// can only matter for repacks and for a mod layer registering ahead of us.
-						_soundFileSources.TryAdd( NormalizeSoundKey( entry.Path ) + ".wav", source );
-						context.Add( ResourceType.Sound, entry.Path, new SoundLoader( source ) );
-						break;
-				}
-			}
-		}
-		Log.Info( $"Titanfall 2 VPK mounted: {archives.Count} archives, {legacyMaterials} fallback VMT materials, "
-			+ $"{legacyTextures} fallback VTF textures and {ParticleFileCount} PCF particle libraries "
-			+ $"({particleEntitySources.Count} map FX, {scriptEntitySources.Count} script and {soundEntitySources.Count} sound partitions; "
-			+ $"{hiddenDepotEntries} depot mirror entries hidden; RPAK names retained at higher priority)." );
 	}
 
 	static bool IsDepotVpkPath( string path )
@@ -869,70 +657,7 @@ public partial class Titanfall2Mount : BaseGameMount
 		return !string.IsNullOrWhiteSpace( mapName );
 	}
 
-	void MountRpakResources( MountContext context, HashSet<string> registered )
-	{
-		var rpakDirectory = Path.Combine( _root, "r2", "paks", "Win64" );
-		var packagePaths = System.IO.Directory.EnumerateFiles( rpakDirectory, "*.rpak", SearchOption.TopDirectoryOnly )
-			.OrderByDescending( GetPatchRank )
-			.ThenBy( static path => string.Equals( Path.GetFileName( path ), "common.rpak", StringComparison.OrdinalIgnoreCase ) ? 0 : 1 )
-			.ThenBy( static path => path, StringComparer.OrdinalIgnoreCase )
-			.ToArray();
-
-		var archives = new List<RpakArchive>( packagePaths.Length );
-		var failures = 0;
-		foreach ( var path in packagePaths )
-		{
-			if ( RpakArchive.TryOpen( path, out var archive, out var error ) ) archives.Add( archive );
-			else
-			{
-				failures++;
-				Log.Warning( $"Unable to index Titanfall 2 RPAK '{Path.GetFileName( path )}': {error}" );
-			}
-		}
-
-		foreach ( var archive in archives )
-		{
-			foreach ( var asset in archive.Assets )
-			{
-				if ( asset.Type == "txtr" ) _texturePaths.TryAdd( asset.Guid, asset.Name );
-				else if ( asset.Type == "shds" )
-				{
-					_shaderSetNames.TryAdd( asset.Guid, asset.Name );
-					_shaderSetSources.TryAdd( asset.Guid, new MountedAssetSource( archive, asset ) );
-				}
-				else if ( asset.Type == "shdr" ) _shaderSources.TryAdd( asset.Guid, new MountedAssetSource( archive, asset ) );
-				else if ( asset.Type == "matl" && _materialPaths.TryAdd( asset.Name, asset.Name ) )
-					_materialSources.TryAdd( asset.Name, new MountedAssetSource( archive, asset ) );
-			}
-		}
-
-		var textures = 0;
-		var materials = 0;
-		foreach ( var archive in archives )
-		{
-			foreach ( var asset in archive.Assets )
-			{
-				if ( asset.Type == "txtr" && registered.Add( asset.Name + ".vtex" ) )
-				{
-					context.Add( ResourceType.Texture, asset.Name, new Titanfall2TextureLoader( new RpakTextureAssetSource( archive, asset ) ) );
-					textures++;
-				}
-				else if ( asset.Type == "matl" && registered.Add( asset.Name + ".vmat" ) )
-				{
-					context.Add( ResourceType.Material, asset.Name, new MaterialLoader( archive, asset ) );
-					materials++;
-				}
-			}
-		}
-
-		var cache = RpakArchive.GetCacheStatistics();
-		Log.Info( $"Titanfall 2 RPAK mounted: {archives.Count}/{packagePaths.Length} packages, {textures} textures, {materials} materials, "
-			+ $"{_shaderSetNames.Count} shader sets, {_shaderSources.Count} shaders, {failures} failures; "
-			+ $"index cache {cache.IndexHits} hits/{cache.IndexMisses} rebuilds, decompressed-buffer budget "
-			+ $"{cache.StrongBufferLimit / (1024 * 1024)} MB (patch packages contribute self-contained changed pages)." );
-	}
-
-	static int GetPatchRank( string path )
+	internal static int GetPatchRank( string path )
 	{
 		var match = System.Text.RegularExpressions.Regex.Match( Path.GetFileNameWithoutExtension( path ), @"\((\d\d)\)$" );
 		return match.Success && int.TryParse( match.Groups[1].Value, out var rank ) ? rank : 0;

@@ -139,7 +139,9 @@ sealed record WorldBuildResult(
 	IReadOnlyList<IDisposable> OwnedResources,
 	IReadOnlyList<WorldRenderChunk> ShadowOnlyChunks = null,
 	IReadOnlyList<WorldRenderChunk> WorldShadowChunks = null,
-	IReadOnlyList<bool> WorldAggregateCastShadows = null ) : IDisposable
+	IReadOnlyList<bool> WorldAggregateCastShadows = null,
+	Material[] WorldMaterialSources = null,
+	string WorldMaterialSourceKey = null ) : IDisposable
 {
 	bool _disposed;
 
@@ -153,6 +155,7 @@ sealed record WorldBuildResult(
 	{
 		if ( _disposed ) return;
 		_disposed = true;
+		Titanfall2WorldMaterialBatch.Release( WorldMaterialSourceKey );
 		foreach ( var resource in OwnedResources ?? [] ) resource?.Dispose();
 	}
 }

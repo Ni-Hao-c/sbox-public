@@ -151,68 +151,19 @@ partial class MapLoader
 
 	int CreateParticleSystems( Titanfall2BspReader.ParsedBsp parsed, Vector3 streamingAnchor )
 	{
-		var entities = new List<Titanfall2ParticleMapEntity>();
-		var sourceEntities = ReadEntities( _particleEntitySource ).ToArray();
-		var namedPoints = new Dictionary<string, Vector3>( StringComparer.OrdinalIgnoreCase );
-		var pointEntities = parsed.Entities.Concat( sourceEntities )
-			.Concat( ReadEntities( _scriptEntitySource ) ).Concat( ReadEntities( _spawnEntitySource ) )
-			.Concat( ReadEntities( _environmentEntitySource ) );
-		foreach ( var values in pointEntities )
-		{
-			if ( values.TryGetValue( "targetname", out var name ) && !string.IsNullOrWhiteSpace( name )
-				&& values.TryGetValue( "origin", out var text ) && TryParseVector3( text, out var point ) )
-				namedPoints.TryAdd( name, point );
-		}
-		var skyboxEffects = 0;
-		foreach ( var values in sourceEntities )
-		{
-			if ( !values.TryGetValue( "classname", out var className )
-				|| !className.Equals( "info_particle_system", StringComparison.OrdinalIgnoreCase ) ) continue;
-			if ( values.TryGetValue( "start_active", out var startActive )
-				&& (startActive.Equals( "0", StringComparison.OrdinalIgnoreCase )
-					|| startActive.Equals( "false", StringComparison.OrdinalIgnoreCase )) ) continue;
-			if ( !values.TryGetValue( "effect_name", out var effectName ) || string.IsNullOrWhiteSpace( effectName ) ) continue;
-			if ( !values.TryGetValue( "origin", out var originText ) || !TryParseVector3( originText, out var origin ) ) continue;
-			// 3D-skybox particles must be submitted to the isolated skybox SceneWorld.
-			// A regular scene component would render them at their authored sky-camera
-			// coordinates in the main world, so defer these few systems until the
-			// skybox bridge gains a native particle path.
-			if ( values.TryGetValue( "in_skybox", out var inSkybox ) && inSkybox == "1" )
-			{
-				skyboxEffects++;
-				continue;
-			}
-
-			var rotation = Angles.Zero;
-			if ( values.TryGetValue( "angles", out var anglesText ) && TryParseVector3( anglesText, out var angles ) )
-				rotation = new Angles( angles.x, angles.y, angles.z );
-			// info_particle_system's model/scale describe its editor effect-node
-			// icon. PCFs already author world-space radii and emitter extents.
-			// Applying the icon scale again makes Beacon's 6000-unit cover 20x
-			// larger and moves its mist thousands of units above the valley.
-			var scale = 1f;
-			var controlPoints = new List<Titanfall2ParticleMapControlPoint>();
-			for ( var point = 1; point < 64; ++point )
-			{
-				if ( values.TryGetValue( $"cpoint{point}", out var target ) && namedPoints.TryGetValue( target, out var position ) )
-					controlPoints.Add( new( point, position ) );
-			}
-			entities.Add( new Titanfall2ParticleMapEntity(
-				effectName.Trim(),
-				values.GetValueOrDefault( "targetname", string.Empty ),
-				origin,
-				rotation,
-				scale,
-				controlPoints ) );
-		}
-
-		if ( skyboxEffects > 0 )
-			Log.Info( $"Titanfall 2 map FX deferred {skyboxEffects} 3D-skybox particle systems: {Path}." );
-		if ( entities.Count == 0 ) return 0;
+		var result = Titanfall2ParticleMapEntities.Read( ReadEntities( _particleEntitySource ), parsed.Entities,
+			ReadEntities( _scriptEntitySource ), ReadEntities( _spawnEntitySource ),
+			ReadEntities( _environmentEntitySource ), ReadEntities( _soundEntitySource ) );
+		if ( result.SkyboxCount > 0 )
+			Log.Info( $"Titanfall 2 map FX deferred {result.SkyboxCount} 3D-skybox particle systems: {Path}." );
+		if ( result.UnresolvedControlPoints > 0 || result.UnresolvedParents > 0 )
+			Log.Warning( $"Titanfall 2 map FX has {result.UnresolvedControlPoints} unresolved control points and "
+				+ $"{result.UnresolvedParents} unresolved brush parents: {Path}." );
+		if ( result.Entities.Count == 0 ) return 0;
 		var streamerObject = new GameObject( true, "titanfall2_particle_streamer" );
 		streamerObject.AddComponent<Titanfall2ParticleStreamer>()
-			.Configure( Host.Ident, Path, streamingAnchor, entities );
-		return entities.Count;
+			.Configure( Host.Ident, Path, streamingAnchor, result.Entities );
+		return result.Entities.Count;
 	}
 
 	// Hearing radius for ambient emitters that author none, and how many play at once.

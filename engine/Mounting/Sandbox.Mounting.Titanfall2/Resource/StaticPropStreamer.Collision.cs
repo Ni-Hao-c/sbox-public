@@ -120,8 +120,25 @@ public sealed partial class Titanfall2StaticPropStreamer
 		var prop = instance.Source;
 		_collisionProbe.Restart();
 		var resourcePath = $"mount://{MountIdent}/{prop.ModelPath}.vmdl";
-		var collisionModel = LoadModelWithRetryCache( resourcePath, prop.Skin, collisionOnly: true );
-		var resolvedModel = ModelLoader.IsUsableModel( collisionModel ) ? collisionModel : fallbackModel;
+		var collision = LoadCollisionModelWithRetryCache( resourcePath, prop.Skin );
+		if ( collision.Status == Titanfall2CollisionModelStatus.Filtered )
+		{
+			instance.CollisionFiltered = true;
+			_collisionFilteredProps++;
+			return true;
+		}
+		if ( collision.Status == Titanfall2CollisionModelStatus.Empty )
+		{
+			instance.CollisionUnavailable = true;
+			_colliderFailures++;
+			if ( _failureLogs++ < 16 )
+				Titanfall2Log.Warning( $"Titanfall 2 static prop imported without usable collision geometry: '{prop.ModelPath}' ({MapPath})." );
+			return true;
+		}
+		// An already loaded full model may recover a transient collision-only load failure,
+		// but a model without physics must not turn a retryable failure into a terminal one.
+		var resolvedModel = ModelLoader.IsUsableModel( collision.Model ) ? collision.Model
+			: ModelLoader.IsUsableModel( fallbackModel ) && fallbackModel.Physics is { Parts.Count: > 0 } ? fallbackModel : null;
 		if ( !ModelLoader.IsUsableModel( resolvedModel ) )
 		{
 			// A read/parse failure is transient, not proof that the prop has no collision.
@@ -174,6 +191,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 			&& collider.Model.Physics is { Parts.Count: > 0 } )
 		{
 			instance.CollisionObject = collisionObject;
+			source.CollisionDestroyed = OnResidentCollisionDestroyed;
 			_collidersCreated++;
 			ReportSpike( _collisionProbe, "collision body for '{0}'", prop.ModelPath );
 			return true;

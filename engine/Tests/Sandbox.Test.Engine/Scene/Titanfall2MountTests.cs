@@ -84,6 +84,8 @@ public class Titanfall2MountTests : SceneTest
 		// The clone runs OnLoad. An empty prop list has no collision work to wait for;
 		// world collision is independently required by Titanfall2WorldReady.
 		Assert.IsTrue( clone.ResidentCollisionsReady );
+		Assert.IsTrue( clone.PreparationComplete );
+		Assert.IsTrue( clone.ResourcesPrepared );
 		Assert.AreEqual( 0, clone.ResidentCollisionCount );
 	}
 
@@ -115,6 +117,7 @@ public class Titanfall2MountTests : SceneTest
 		template.EncodedProps = corruption == "base64" ? "invalid!" : Convert.ToBase64String( bytes );
 		var clone = template.GameObject.Clone().Components.Get<Titanfall2StaticPropStreamer>();
 		Assert.IsFalse( clone.ResidentCollisionsReady, "A rejected prop payload must not be treated as an empty successful preload." );
+		Assert.IsFalse( clone.ResourcesPrepared );
 	}
 
 	[TestMethod]
@@ -226,7 +229,7 @@ public class Titanfall2MountTests : SceneTest
 		var encoded = (string)typeof( Titanfall2StaticPropStreamer ).GetMethod( "Encode", PrivateStatic )
 			.Invoke( null, [source, new Titanfall2BspReader.BspVisibility()] );
 		var bytes = Convert.FromBase64String( encoded );
-		Assert.AreEqual( 8, BitConverter.ToInt32( bytes, 4 ) );
+		Assert.AreEqual( 9, BitConverter.ToInt32( bytes, 4 ) );
 		var decoded = Decode( bytes );
 		Assert.AreEqual( source.Length, decoded.Length );
 		for ( var i = 0; i < source.Length; i++ )

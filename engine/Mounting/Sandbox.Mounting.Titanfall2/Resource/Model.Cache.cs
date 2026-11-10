@@ -2,8 +2,12 @@ using static Titanfall2ProcessedCache;
 
 partial class ModelLoader
 {
-	sealed record StaticMeshGeometry( int Index, string MaterialName, TitanfallVertex[] Vertices, int[] Indices, BBox Bounds );
-	sealed record StaticLodGeometry( StaticMeshGeometry[] Meshes, float Radius );
+	internal sealed record StaticMeshGeometry( int Index, string MaterialName, TitanfallVertex[] Vertices, int[] Indices, BBox Bounds )
+	{
+		public Material RuntimeMaterial { get; set; }
+		public bool GpuCompatible { get; set; }
+	}
+	internal sealed record StaticLodGeometry( StaticMeshGeometry[] Meshes, float Radius );
 
 	bool TryReadStaticCache( string identity, out StaticLodGeometry[] levels )
 	{

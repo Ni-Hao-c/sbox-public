@@ -22,6 +22,8 @@ public sealed partial class Titanfall2StaticPropStreamer
 		uint ReservedCollisionData,
 		uint CollisionFlagsRemove )
 	{
+		/// <summary>Dense, stable ID in the compiled scene; independent of BSP SourceIndex.</summary>
+		public int InstanceId { get; init; }
 		public int Skin { get; init; }
 		/// <summary>Original fade distance (sprp value, else MDL default); 0 means it never fades.</summary>
 		public float FadeDistance { get; init; }
@@ -50,6 +52,8 @@ public sealed partial class Titanfall2StaticPropStreamer
 	sealed class PendingBatch( Model model, bool renderingEnabled )
 	{
 		public Model Model { get; } = model;
+		public List<StreamedProp> Sources { get; } = new();
+		public bool GpuRendered { get; set; }
 		public bool RenderingEnabled { get; set; } = renderingEnabled;
 		public Titanfall2BspReader.VisibilityCellMask PvsCells { get; private set; }
 		public List<Transform> Transforms { get; } = new();
@@ -126,6 +130,8 @@ public sealed partial class Titanfall2StaticPropStreamer
 		public float DistanceSquared { get; set; }
 		/// <summary>Transient scratch flag used to build the runtime queue in cell order.</summary>
 		public bool QueueMarked { get; set; }
+		/// <summary>Cached after backend ownership changes, never discovered by a per-frame scan.</summary>
+		public bool HasCpuRenderWork { get; set; } = true;
 	}
 
 	readonly record struct ClusterCoordinate( int X, int Y )

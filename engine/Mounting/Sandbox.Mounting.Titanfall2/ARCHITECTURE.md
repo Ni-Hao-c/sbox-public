@@ -1,14 +1,16 @@
-# Titanfall 2 挂载：技术参考
+﻿# Titanfall 2 挂载：技术参考
 
 本文记录挂载的数据流、零售版文件格式中确认过的结论、对象所有权规则和流式加载预算。功能概览和使用方法见 [README.md](README.md)，环境变量见 [ENVIRONMENT_SWITCHES.md](ENVIRONMENT_SWITCHES.md)。
 
 文中"零售版"指 Steam 上发行的 Titanfall 2 客户端及其资源文件。
 
+本轮性能工作的最终实现、保留结论与 A/B 代码清理范围见 [2026-11-07 收尾记录](../docs/TITANFALL2_PERFORMANCE_CLOSEOUT_2026-11-07.zh-CN.md)。
+
 ## 1. 分层和线程
 
 代码分三层，依赖方向只能从上到下：
 
-1. **Formats**（[Formats/](Formats)）：纯二进制解析，输入字节，输出普通 .NET 对象。这一层不创建任何引擎资源，可以在后台线程运行，也可以在单元测试中直接调用。
+1. **Formats**（[Formats/](Formats)）：容器与二进制格式读取。大部分解析输出普通 .NET 数据；当前 RPAK/VTF 纹理文件仍同时包含引擎纹理创建方法，调用方必须区分 CPU 读取与主线程创建入口。
 2. **Resource**（[Resource/](Resource)）：资源加载器和场景组件。这一层把解析结果转换成 `Texture`、`Material`、`Model`、`SoundFile` 和场景对象。
 3. **场景**：`MapLoader.BuildScene` 把组件装配成可序列化的场景。
 
@@ -41,14 +43,15 @@
 | [Resource/Model.cs](Resource/Model.cs)、[Resource/Material.cs](Resource/Material.cs)、[Resource/Texture.cs](Resource/Texture.cs) | 资源加载器。 |
 | [Resource/ProcessedCache.cs](Resource/ProcessedCache.cs) | 磁盘处理缓存。 |
 
-## 3. 资源注册和归档
+## 3. 内容上下文、资源注册和归档
 
-`Mount` 按以下顺序注册，先注册的名字优先：
+2026-11-08 起，挂载先通过 `Content/ContentDiscovery.cs` 建立 `Titanfall2ContentSnapshot`，再由 `Content/ContentMount.cs` 生成并注册资源目录。运行期间不重新扫描包或 Mod。全部 VPK 成员、loose 文件、没有独立 loader 的依赖以及 RPAK/Miles 逻辑资源保留在虚拟目录；引擎目录只发布可转换资产。
 
-1. RPAK 资源。文件名以 `(NN)` 结尾的补丁包按序号从大到小排在最前，同一序号内 `common.rpak` 优先，其余按文件名排序。
-2. VPK 资源。只注册 RPAK 没有提供的名字。
-3. `skies/skycube.vmat`（挂载生成）。
-4. `r2/sound/general.mbnk` 中的 Miles 声音。
+同一路径按固定层顺序 first-wins，候选来源保留用于 explain。基础顺序为全部启用 Northstar Mod 的 loose 覆盖（LoadPriority 降序；同级按绝对目录 ordinal 排序），再按同样 Mod 顺序处理 RPAK → VPK，然后 retail RPAK → retail VPK → 生成天空材质 → Miles。loose 优先于所有 VPK，符合 Northstar 文件替换 hook。旧原版路径保持兼容。
+
+路径、BSP 分区、模型伴随文件、动画 include 和材质源从同一个固定快照读取。bound source 持有创建它的快照，不回查当前 mount。loose 文件有 SHA-256 身份；源内容改变后旧读取失败。包以大小/mtime/既有包格式校验管理版本，不能声称它等同于强内容哈希。RPAK/STARPAK 位置与版本在发布前固定；VPK 检查目录及实际引用的分卷。读取时使用独立文件流，没有跨卸载持有的共享 Stream.Position。
+
+变更 Mod 集合、文件或地图配置需要新进程会话；同一个 mount 对象拒绝发布不同修订。派生缓存键包含模块 MVID 与内容修订。Northstar 配置只读，不修改 enabledmods.json、不写入原游戏或 Mod 文件。配置、支持范围和验证见 [内容上下文实施记录](../docs/TITANFALL2_CONTENT_CONTEXT_2026-11-08.zh-CN.md)。
 
 ### VPK
 
@@ -90,7 +93,19 @@
    - 3D 天空盒
 7. 完整场景创建出生点和 `Titanfall2MapCamera`。纯世界场景不创建。
 8. 创建粒子、地图音频（专用服务器除外）和动态道具（纯世界场景除外）。
-9. 创建 `Titanfall2StaticPropStreamer`。纯世界场景和专用服务器上 `KeepAllCollisions = true`，并添加 `Titanfall2WorldReady`。
+9. 创建 `Titanfall2StaticPropStreamer`。普通地图默认也使用常驻碰撞；纯世界与专用服务器始终常驻。所有常驻模式添加 `Titanfall2WorldReady`，验证真实物理资源后才发布就绪标签。
+
+### 编译式静态场景数据
+
+新导入使用 TSP2 v9，保留原有实例、探针、skin、淡出和碰撞来源字段，附加编译好的空间分区、模型/skin 分组及 SHA256 校验。布局用稠密 InstanceId 引用实例；它与可能稀疏或缺失的 BSP SourceIndex 分开。实际场景直接恢复分组，旧 v3–v8 载荷在加载时编译一次。
+
+TSV2 v2 保存定位树、门户与预计算的逐区域可达 mask，并带 SHA256 校验。运行期间只做区域定位和查表；旧 v1 在加载时编译可达表。深度限制、单向门户、AlwaysVisibleCells 与空 mask 的可见策略保持原语义。
+
+`GetCompiledSceneStatistics()` 显式生成统计快照，包含场景代际、实例/模型/skin/空间分区数量、PVS 表大小、真实批次直方图、材质身份数和每模型 LOD 几何字节数。统计不在逐帧执行，也不保留 CPU 顶点数组或延长 native Model 生命周期。材质身份数不等于最终可合并的 GPU pipeline 组数。
+
+粒子库索引和地图系统创建在组件 OnLoad 的分段预算内完成，OnUpdate 只处理已有系统的激活与模拟恢复。`ResourcesPrepared`、`PendingSystemCount` 和 `FailedSystemCount` 提供准备结果；坏载荷或缺失资源不会被记录为完整准备成功。
+
+当前源码默认开启 GPU 静态道具与世界材质表。兼容道具进入共享几何、逐视图 GPU 剔除与 MDI 后端；不兼容内容和初始化失败保留 CPU 路径。混合材质模型只移交兼容子网格，特殊残余继续原生绘制。默认开关不证明当前进程加载了相应 DLL/shader。
 
 坐标直接沿用 Source 约定：XYZ 不变换，1 单位 = 1 英寸。实体角度按 `new Angles( pitch, yaw, roll )` 转换为旋转。
 
@@ -397,11 +412,15 @@ solid 类型不为 0 时，有效 contents 由 `Titanfall2CollisionSource.Static
 | 碰撞流式 | 每帧最多创建或释放 2 个碰撞体、1 ms；1536 单位内启用，2560 单位外释放 |
 | 距离保留带 | 道具进入绘制距离后，再多保留 512 单位 |
 | 大型道具 | 半径不小于 256 的道具不做距离剔除 |
-| 阴影 | 开启道具阴影时，半径小于 48 的道具不投射阴影；批次整体离开 `SBOX_TITANFALL2_PROP_SHADOW_DISTANCE`（默认 2048，回归 1843）后整批退出 shadow pass |
+| 阴影 | 道具阴影资格沿用半径 48 的门槛及原批次聚合。`PROP_SHADOW_DISTANCE` 默认 0（距离门控关闭）；开启后 CPU 按批次门控、GPU 按实例门控，恢复阈值约为关闭距离的一半并量化到 256 单位桶 |
 
-预加载阶段没有创建完的道具碰撞，留给运行时的碰撞流式处理。纯世界场景要求全部常驻碰撞都创建完成后才发布就绪标签。
+普通地图默认在加载期准备并常驻静态道具碰撞（`RESIDENT_WORLD=1`）；设 0 才采用上表的距离流式碰撞。纯世界和专用服务器始终常驻。已稳定的常驻场景不因相机移动重建碰撞扫描队列；拥有的碰撞体丢失时触发恢复。缺失碰撞资源仍保留失败状态，不能发布就绪标签。
+
+地图粒子目录索引和系统创建也在 `OnLoad` 的有界循环中完成，运行时保留激活/休眠及模拟。`PreparationComplete` 表示道具准备流程结束，`ResourcesPrepared` 表示渲染资源没有加载失败，`ResidentCollisionsReady` 则要求实际常驻碰撞完整；三者不互相替代。粒子组件独立报告 pending/failed 数量。
 
 ### 帧率预算
+
+下面的对象数和 CPU 批次成本来自历史 CPU 路径测量；新 GPU 路径的对应实例不创建这些批次，当前验证见下节及 GPU 报告。
 
 每帧的成本主要不是这些预算，而是**一次性创建、之后每帧被渲染线程提交的对象数**：`mp_angel_city` 实测 2,840 个渲染对象、3,044 draw、3.2M 三角形，其中 2,717 个是静态道具实例批次。C# 每帧回调（`Titanfall2StaticPropStreamer` 的三条流式通道合计 5.5 ms 预算）只占 `Update` 的 1.5 ms 量级。
 
@@ -417,6 +436,18 @@ solid 类型不为 0 时，有效 contents 由 `Titanfall2CollisionSource.Static
 阴影门控不在可见性 sweep 里，而是独立 pass：只在相机移动 512 单位或换 PVS cell 时重算，重算只把差异排队，`ApplyPendingShadowChanges` 每帧最多写 32 次 `Flags.CastShadows`。一次 sweep 内批量翻转一百多个批次的标志会让整片实例在 shadow pass 进出，走动时表现为一顿一顿；这个上限是为此加的。阈值按 256 单位粗桶比较，关闭距离 D 与恢复距离 D×0.5 之间留足回滞。`Flags.CastShadows` 的切换走引擎原生的 `ChangeFlags` + `NotifyChanged(Flags)`，与 `LineRenderer`、`MeshComponent` 的运行时切换同一条路径。
 
 LOD 判定使用 32 单位量化的相机位置：探针批次的逐实例 LOD 分组一变就要重传索引缓冲，量化把走动时的重排从每帧降到每跨一格。
+
+### 挂载内 GPU 静态道具路径
+
+`GPU_STATIC_SCENE=1` 时，支持的静态 default/cutout 模型由 `StaticPropGpuScene` 接管。上述 CPU 批次距离扫描、阴影标志队列和逐实例 LOD 分组只适用于保留的 CPU 路径；已接管的实例跳过这些循环。碰撞、动态模型和特殊 shader 沿用各自路径。
+
+加载阶段捕获实际 skin/material 对应的所有 LOD 几何，建立共享 VB/IB、永久变换与探针表。每个顶点保存可见列表地址和材质 ID；44 字节顶点和 704 字节材质记录有 ABI 回归覆盖。相同 shader 与纹理过滤特性的静态 2D 材质共享 MDI 组，像素阶段通过材质表读取各自参数和 bindless 贴图。动画代理和原生环境立方体绑定保留材质身份，避免捕获一次后失去更新或绑定错误。
+
+每个视图/pass 使用独占 GPU 输出：reset、PVS/球体视锥/距离剔除与 LOD、生成 indirect args，再按兼容组 MDI。CPU 设置少量视图常量，不读回可见计数，不按 LOD 重组实例，不上传变换。深度、forward、阴影分别录制；阴影不使用主视图 PVS，以主相机为距离/LOD 锚，GPU 保存逐实例距离回滞状态。关闭阴影距离门控时保留原批次资格，开启后逐实例门控与 CPU 批次门控的边界画面可能不同。
+
+视图输出预热八组，后续视图按需扩容；同帧不复用输出，后续帧在有序 graphics queue 和显式资源转换下复用。初始化预算包含八组输出，但额外视图仍会增加显存。所有场景缓冲由 SceneCustomObject 生命周期释放。
+
+命令播放依赖现有的内部托管 `CommandList.ExecuteOnRenderThread`，启动时绑定委托，运行时不反射。该方法不兼容、模型不支持或场景超预算时保留原 CPU renderer。生产修改限于挂载项目及其 shader；测试在现有测试工程。实现与实测边界见仓库 `reports/tf2-v3/gpu-renderer.md`，对象数减少本身不代表 FPS 提升。
 
 比较帧率时必须固定机位、同一相机、同一分辨率，并同时记录 `draws` / `triangles` / `objects`：局部视角的差异主要来自 PVS 与视锥，不能当成整图结论。
 
@@ -434,3 +465,23 @@ LOD 判定使用 32 单位量化的相机位置：探针批次的逐实例 LOD �
 - 命中时更新文件修改时间，每个文件每次会话只更新一次，供 LRU 淘汰使用。
 - 淘汰在每 64 次写入时检查一次，删除最旧的文件，直到总大小不超过 `SBOX_TITANFALL2_CACHE_MB`。
 - 缓存只保存派生数据，从不保存引擎或 GPU 对象。
+
+## 15. 运行期边界重构（2026-11-06）
+
+- `StaticPropStreamer.Preparation.cs` 负责加载阶段，`StaticPropStreamer.Runtime.cs` 负责运行协调；保留组件身份和已有序列化字段。状态为 Uninitialized / Preparing / Ready / Retiring。
+- 后端建立或诊断切换时缓存每个 cluster 的 CPU 渲染需求。GPU 完全接管的批次不进入 CPU 可见性队列；混合模型的原生残余仍参与。所有内容均由 GPU 接管且常驻碰撞准备完成时，不再刷新无消费者的 CPU 空间队列。
+- `GpuViewPool.cs` 在加载时建立固定容量，运行期只获取空闲槽位，不增长。额外 recording 使用四份预建只读输出之一，按 mixed 开关和 shadow pass 分开。它保留源实例 ID、子网格归属及投影资格；顶点阶段执行同一视图的 LOD、距离和 PVS 规则（含空远景 LOD），不做 compute 视锥剔除或距离阴影门控，故超额情况可能增加顶点工作或远处投影。
+- `StaticPropGpuScene.Budget.cs` 统一计算永久缓冲、配置槽位及四份只读输出的 payload 字节，布局编译和创建时均检查预算。源模型、纹理、驱动分配等不在该缓冲预算中。
+- 输出绘制命令也在准备阶段记录。所有视图输出在同一帧保持独占；只读保守输出可跨 recording 共享，不再被 compute 改写。
+- 地图构建、场景 lease 和 mount/shutdown 会推进 `SceneReleaseGeneration` 并取消旧的延迟释放/GC。延迟回收在主线程重新验证代次、挂载、编辑器、lease 与活场景；同代任务合并，旧任务的 finally 不会清掉新代状态。首次加载/退出阶段的既有资源回收仍保留。
+- `GetCompiledSceneStatistics()` 增加实际模块/引擎 MVID、质量与后端设置、运行状态、CPU cluster、视图槽位高水位、保守 recording 数及缓冲预算。配置快照只在显式诊断和加载日志中生成。
+
+这批改造不代表 VFS/Mod、按地图精确资源所有权表或通用框架迁移已经完成。运行期视觉、多相机、连续切图和整图性能需另行验收。
+
+## 16. GPU 像素路径与计时（2026-11-06）
+
+- default/cutout 共用可选 distortion/detail 路径，零强度可跳过采样；不可变且可材质表化的简单材质按 `D_T2_SIMPLE_SURFACE` 分组，预处理时排除这两种采样。动态代理继续使用通用路径，不冻结其初值。
+- 完整颜色与 depth-normal 共用几何表面输入读取器。保留双层法线、cutout 裁切及双面语义，没有法线图时直接使用几何法线。原有编译器已经削除了部分深度路径工作，不以源码拆分宣称毫秒收益。
+- `StaticPropGpuScene.Commands.cs` 在固定槽位加载时预录制 compute、barrier、draw 的 GPU scope，标注 pass 类别及 recording slot。私有 compute 属性与既有同步顺序保留，不新增跨视图可见集共享。
+- `GpuSceneCompatibility` 一次性绑定现有托管 playback 与 action recorder，统一检查兼容性；不兼容时保留 CPU 路径。
+- 曝光、Bloom 与显示变换增加 GPU marker。具体实现、SPIR-V 对照与验收范围见 `../docs/TITANFALL2_GPU_PIXEL_REFACTOR_2026-11-06.zh-CN.md`。

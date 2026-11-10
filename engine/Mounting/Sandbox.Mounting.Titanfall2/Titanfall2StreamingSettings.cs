@@ -5,16 +5,27 @@
 /// </summary>
 static class Titanfall2StreamingSettings
 {
+	// Share compatible world materials by lightmap page; 0 selects the compatibility backend.
+	public static bool WorldMaterialTable { get; } = GetBool( "SBOX_TITANFALL2_WORLD_MATERIAL_TABLE", true );
+	// 0 uses the CPU renderer for compatibility.
+	public static bool GpuStaticScene { get; } = GetBool( "SBOX_TITANFALL2_GPU_STATIC_SCENE", true );
+	public static bool GpuMixedProps { get; } = GetBool( "SBOX_TITANFALL2_GPU_MIXED_PROPS", true );
+	public static int GpuStaticSceneBudgetMb { get; } = GetInt( "SBOX_TITANFALL2_GPU_STATIC_SCENE_MB", 512, 64, 2048 );
+	public static int GpuStaticSceneViewSlots { get; } = GetInt( "SBOX_TITANFALL2_GPU_VIEW_SLOTS", 8, 1, 64 );
 	public static bool ProcessedCache { get; } = GetBool( "SBOX_TITANFALL2_PROCESSED_CACHE", true );
 	public static int ProcessedCacheBudgetMb { get; } = GetInt( "SBOX_TITANFALL2_CACHE_MB", 2048, 128, 8192 );
+	// Prefer load-time preparation to walking-time body/resource creation. Explicitly disable
+	// on memory-constrained clients; dedicated servers and pure-world maps always stay resident.
+	public static bool ResidentWorld { get; } = GetBool( "SBOX_TITANFALL2_RESIDENT_WORLD", true );
 	// 1K keeps the first useful mip of most 1K/2K materials. 512 suits low-VRAM machines,
 	// 2048 is for inspecting a few models up close.
 	public static int TextureMaxDimension { get; } = GetInt( "SBOX_TITANFALL2_TEXTURE_MAX", 1024, 64, 2048 );
 
-	// Upload the two largest lightmap channels as 16-bit textures: SkyB as RGB565 and RealTimeB as
+	// Upload the two largest lightmap channels as 16-bit textures: SkyB as BGR565 and RealTimeB as
 	// BGRA4444. The shader keeps sampling float4, so only precision changes (retail RealTimeB is
 	// 93.7-96.7% binary, SkyB loses ~1% of sky visibility) while the lightmap block drops from 17 to
 	// 13 bytes per texel - the bandwidth the world shader reads every pixel. 0 restores RGBA8888.
+	// With lightmap mips enabled, RealTimeB stays RGBA8888: native BGRA4444 lower mips are unreliable.
 	public static bool Lightmap16Bit { get; } = GetBool( "SBOX_TITANFALL2_LIGHTMAP_16BIT", true );
 
 	// Frame-rate preset: one switch for the knobs that trade distant detail for submitted work.

@@ -1,4 +1,4 @@
-using System.Buffers.Binary;
+﻿using System.Buffers.Binary;
 using System.Text;
 
 /// <summary>A lazily decompressed Titanfall 2 RPAK v7 package.</summary>
@@ -8,7 +8,7 @@ sealed class RpakArchive
 	const ushort PakFileCompressed = 1 << 8;
 	const int HeaderSize = 0x58;
 	const int AssetSize = 0x48;
-	const int CacheVersion = 3;
+	const int CacheVersion = 4;
 	const uint CacheMagic = 0x58493254; // T2IX
 	static readonly object StrongBufferCacheLock = new();
 	static readonly Dictionary<RpakArchive, StrongBufferEntry> StrongBuffers = new();
@@ -29,6 +29,8 @@ sealed class RpakArchive
 	readonly RpakPage[] _pages;
 	readonly string[] _streamingFiles;
 	readonly string[] _resolvedStreamingFiles;
+	string _snapshotFileIdentity;
+	string[] _snapshotStreamingIdentities;
 
 	public string FilePath { get; }
 	public IReadOnlyList<RpakAsset> Assets { get; }
@@ -146,8 +148,14 @@ sealed class RpakArchive
 				var headerStructSize = U32( bytes, assetOffset + 0x3C );
 				var version = I32( bytes, assetOffset + 0x40 );
 				var typeValue = U32( bytes, assetOffset + 0x44 );
-				var type = FourCc( typeValue );
-				if ( type is not ("txtr" or "matl" or "shds" or "shdr") ) continue;
+				var type = FourCc( typeValue ).TrimEnd( '\0' ).ToLowerInvariant();
+				if ( type is not ("txtr" or "matl" or "shds" or "shdr") )
+				{
+					// The virtual directory retains logical resources even when there is no
+					// decoder. Their GUID identity does not depend on a guessed name layout.
+					assets.Add( new RpakAsset( guid, type, $"_guid/{guid:x16}", version, headerStructSize, head, data, starpakOffset ) );
+					continue;
+				}
 
 				if ( !TryResolve( pages, head, bytes.Length, out var headerOffset ) ) continue;
 				// TXTR and SHDS headers store their asset-name pointer at +0x08,
@@ -159,11 +167,16 @@ sealed class RpakArchive
 					"txtr" or "shds" => headerOffset + 8,
 					_ => headerOffset + 24
 				};
-				if ( namePointerOffset + 8 > bytes.Length ) continue;
-				var namePointer = ReadPagePointer( bytes, namePointerOffset );
-				if ( !TryResolve( pages, namePointer, bytes.Length, out var nameOffset ) ) continue;
-				var name = ReadCString( bytes, nameOffset );
-				if ( string.IsNullOrWhiteSpace( name ) ) continue;
+				var name = $"_guid/{guid:x16}";
+				if ( namePointerOffset + 8 <= bytes.Length )
+				{
+					var namePointer = ReadPagePointer( bytes, namePointerOffset );
+					if ( TryResolve( pages, namePointer, bytes.Length, out var nameOffset ) )
+					{
+						var storedName = ReadCString( bytes, nameOffset );
+						if ( !string.IsNullOrWhiteSpace( storedName ) ) name = storedName;
+					}
+				}
 
 				assets.Add( new RpakAsset( guid, type, NormalizeAssetPath( name ), version, headerStructSize, head, data, starpakOffset ) );
 			}
@@ -248,6 +261,14 @@ sealed class RpakArchive
 	public string GetStreamingFilePath( int index )
 	{
 		if ( index < 0 || index >= _streamingFiles.Length ) return null;
+		if ( _snapshotStreamingIdentities is not null )
+		{
+			var path = _resolvedStreamingFiles[index];
+			if ( string.IsNullOrEmpty( path ) ) return null;
+			if ( Titanfall2SourceIdentity.Stamp( path ) != _snapshotStreamingIdentities[index] )
+				throw new InvalidDataException( "STARPAK changed; start a new mount session." );
+			return path;
+		}
 		// Every streamed texture resolves its STARPAK; cache the probe result instead
 		// of repeating three GetFullPath/File.Exists probes per texture.
 		var resolved = System.Threading.Volatile.Read( ref _resolvedStreamingFiles[index] );
@@ -255,6 +276,23 @@ sealed class RpakArchive
 		resolved = ResolveStreamingFilePath( index );
 		if ( resolved is not null ) System.Threading.Volatile.Write( ref _resolvedStreamingFiles[index], resolved );
 		return resolved;
+	}
+
+	/// <summary>Pin source locations and versions before publishing the content directory.</summary>
+	internal void FreezeSources()
+	{
+		_snapshotFileIdentity = Titanfall2SourceIdentity.Stamp( FilePath );
+		_snapshotStreamingIdentities = new string[_streamingFiles.Length];
+		for ( var index = 0; index < _streamingFiles.Length; ++index )
+		{
+			var path = ResolveStreamingFilePath( index );
+			_resolvedStreamingFiles[index] = path ?? string.Empty;
+			if ( path is not null )
+			{
+				Titanfall2SourceIdentity.RejectReparse( path );
+				_snapshotStreamingIdentities[index] = Titanfall2SourceIdentity.Stamp( path );
+			}
+		}
 	}
 
 	string ResolveStreamingFilePath( int index )
@@ -280,6 +318,14 @@ sealed class RpakArchive
 
 	bool TryGetBuffer( out byte[] bytes, out string error )
 	{
+		if ( _snapshotFileIdentity is not null )
+		{
+			try
+			{
+				if ( Titanfall2SourceIdentity.Stamp( FilePath ) != _snapshotFileIdentity ) throw new InvalidDataException( "RPAK changed; start a new mount session." );
+			}
+			catch ( Exception exception ) { bytes = null; error = exception.Message; return false; }
+		}
 		if ( TryGetStrongBuffer( this, out bytes ) )
 		{
 			error = null;
@@ -433,7 +479,7 @@ sealed class RpakArchive
 			for ( var index = 0; index < assetCount; index++ )
 			{
 				assets.Add( new RpakAsset(
-					reader.ReadUInt64(), reader.ReadString(), reader.ReadString(), reader.ReadInt32(), reader.ReadUInt32(),
+					reader.ReadUInt64(), reader.ReadString().TrimEnd( '\0' ).ToLowerInvariant(), reader.ReadString(), reader.ReadInt32(), reader.ReadUInt32(),
 					new RpakPagePointer( reader.ReadInt32(), reader.ReadInt32() ),
 					new RpakPagePointer( reader.ReadInt32(), reader.ReadInt32() ), reader.ReadInt64() ) );
 			}

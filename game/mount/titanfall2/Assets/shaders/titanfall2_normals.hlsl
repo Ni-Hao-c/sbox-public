@@ -1,10 +1,28 @@
-float g_flHasNormalMap < Default( 0 ); >;
-float g_flHasNormalMap2 < Default( 0 ); >;
-float g_flT2NormalSlope < Default( 0 ); >;
-float g_flT2NormalSlope2 < Default( 0 ); >;
-float g_flT2NormalTwoChannel < Default( 0 ); >;
-float g_flT2NormalTwoChannel2 < Default( 0 ); >;
+// T2_MATERIAL_DECLARATIONS: ordinary and GPU-table paths share the same shading functions.
 
+#if !D_T2_MATERIAL_TABLE
+float g_flHasNormalMap < Default( 0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+float g_flHasNormalMap2 < Default( 0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+float g_flT2NormalSlope < Default( 0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+float g_flT2NormalSlope2 < Default( 0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+float g_flT2NormalTwoChannel < Default( 0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
+float g_flT2NormalTwoChannel2 < Default( 0 ); >;
+#endif
 float3 T2DecodeSurfaceNormal( float3 encoded, float slope, float twoChannel )
 {
 	// Retail uberLyr shaders decode BC5 as tangent slopes, not a unit XY normal.

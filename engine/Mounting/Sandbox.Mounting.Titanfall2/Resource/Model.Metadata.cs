@@ -187,16 +187,28 @@ partial class ModelLoader
 		AddModelMetadata( builder, parsed, skeleton );
 		var vertices = new List<Vector3>();
 		var indices = new List<int>();
+		var filteredMeshes = 0;
 		foreach ( var mesh in lod.Meshes )
 		{
 			var name = NormalizeMaterialName( mesh.MaterialName );
-			if ( !Titanfall2CollisionFilter.ShouldIncludeMaterial( name, GetMaterialMetadata( name ) ) ) continue;
+			if ( !Titanfall2CollisionFilter.ShouldIncludeMaterial( name, GetMaterialMetadata( name ) ) )
+			{
+				filteredMeshes++;
+				continue;
+			}
 			var offset = vertices.Count;
 			vertices.AddRange( mesh.Vertices.Select( vertex => ToSandbox( vertex.Position ) ) );
 			indices.AddRange( ReverseWinding( mesh.Indices ).Select( index => index + offset ) );
 		}
 		var collision = AddCollision( builder, parsed, skeleton, bytes, vertices, indices );
-		if ( collision.HullCount == 0 ) return null;
+		if ( collision.HullCount == 0 )
+		{
+			if ( _collisionImportFailed ) return null;
+			var filtered = lod.Meshes.Length > 0 && filteredMeshes == lod.Meshes.Length;
+			_collisionResult = new( filtered ? Titanfall2CollisionModelStatus.Filtered : Titanfall2CollisionModelStatus.Empty,
+				null, unchecked((uint)parsed.Header.Contents), filtered ? "material-filtered" : collision.Description );
+			return null;
+		}
 		builder.WithData( new Titanfall2ModelCollisionData
 		{
 			SourcePath = ImportPath,
@@ -204,12 +216,23 @@ partial class ModelLoader
 			HullCount = collision.HullCount,
 			ModelContents = unchecked((uint)parsed.Header.Contents)
 		} );
-		return builder.Create();
+		var model = builder.Create();
+		if ( IsUsableModel( model ) ) _collisionResult = new( Titanfall2CollisionModelStatus.Loaded,
+			model, unchecked((uint)parsed.Header.Contents), collision.Description );
+		return model;
 	}
 }
 
 public partial class Titanfall2Mount
 {
+	internal Titanfall2CollisionModelResult LoadCollisionModelVariant( string path, int skin = 0, int body = 0 )
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace( path );
+		var resourcePath = path.StartsWith( "mount://", StringComparison.OrdinalIgnoreCase ) ? path : $"mount://{Ident}/{path.TrimStart( '/' )}";
+		if ( !resourcePath.EndsWith( ".vmdl", StringComparison.OrdinalIgnoreCase ) ) resourcePath += ".vmdl";
+		return GetByPath( resourcePath ) is ModelLoader loader ? loader.GetCollisionVariant( skin, body ) : default;
+	}
+
 	/// <summary>Loads an MDL skin/body variant. Physics-only variants never construct materials or GPU meshes.</summary>
 	public Model LoadModelVariant( string path, int skin = 0, int body = 0, bool collisionOnly = false )
 	{

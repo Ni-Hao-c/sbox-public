@@ -2,8 +2,8 @@ using System.Diagnostics;
 using Titanfall2;
 
 /// <summary>
-/// Incrementally indexes PCF libraries and creates the particle systems referenced
-/// by a map's *_fx.ent partition. Instances are retained; distant systems are
+/// Prepares the particle systems referenced by a map's *_fx.ent partition during
+/// scene loading. Instances are retained; distant systems are
 /// suspended instead of destroyed so moving through a map does not reveal gaps.
 /// </summary>
 [Library, Hide]
@@ -11,7 +11,7 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 {
 	static readonly Sandbox.Diagnostics.Logger Log = new( "Titanfall2Particles" );
 	const int DataMagic = 0x58465054; // TPFX
-	const int DataVersion = 3;
+	const int DataVersion = 4;
 	const int MaximumEntityCount = 100_000;
 	// PCF libraries and map effects are created in two bounded stages so hundreds of
 	// small effects never become one long loading or movement stall.
@@ -38,7 +38,7 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 
 	readonly List<RuntimeEntity> _pending = [];
 	readonly List<SpawnedEntity> _spawned = [];
-	readonly Stopwatch _statusTimer = new();
+	readonly List<InitialWarmup> _initialWarmups = [];
 	// Reusable budget/probe timers: this path runs every frame and Stopwatch.StartNew()
 	// allocates, so they are created once and restarted in place.
 	readonly Stopwatch _spawnTimer = new();
@@ -51,10 +51,14 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 	// Milliseconds spent warming woken effects in the current frame.
 	double _warmupMilliseconds;
 	bool _initialized;
-	bool _completionLogged;
 	bool _catalogResolved;
+	bool _preparing;
 	int _failed;
 	int _failureLogs;
+	/// <summary>All requested particle resources were prepared successfully during scene load.</summary>
+	public bool ResourcesPrepared { get; private set; }
+	public int PendingSystemCount => _pending.Count;
+	public int FailedSystemCount => _failed;
 
 	internal void Configure( string mountIdent, string mapPath, Vector3 fallbackAnchor,
 		IReadOnlyList<Titanfall2ParticleMapEntity> entities )
@@ -75,22 +79,44 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 			if ( entity.GameObject.IsValid() ) entity.GameObject.Enabled = false;
 	}
 
-	protected override void OnUpdate()
+	protected override async Task OnLoad( LoadingContext context )
 	{
+		ResourcesPrepared = false;
+		if ( string.IsNullOrWhiteSpace( EncodedEntities ) )
+		{
+			ResourcesPrepared = true;
+			return;
+		}
 		if ( !_initialized ) InitializeEntities();
 		if ( !_initialized ) return;
-
-		var mount = Sandbox.Mounting.Directory.Get( MountIdent ) as Titanfall2Mount;
-		if ( mount is null || !mount.IsMounted ) return;
-
-		if ( _pending.Count > 0 && !mount.IsParticleCatalogComplete )
+		_preparing = true;
+		try
 		{
-			mount.IndexParticleFiles(
-				LibrariesPerFrame,
-				LibraryFrameBudgetMilliseconds );
+			while ( _pending.Count > 0 || _initialWarmups.Count > 0 )
+			{
+				if ( !this.IsValid() || !GameObject.IsValid() || GameObject.IsDestroyed ) return;
+				var mount = Sandbox.Mounting.Directory.Get( MountIdent ) as Titanfall2Mount;
+				if ( mount is null || !mount.IsMounted ) return;
+				// Catalog and creation have separate bounds. A yield never publishes readiness.
+				if ( !mount.IsParticleCatalogComplete ) mount.IndexParticleFiles( LibrariesPerFrame, LibraryFrameBudgetMilliseconds );
+				// Child definitions can live in a later PCF. Creating a parent against a partial
+				// catalog silently loses those children for the lifetime of the map.
+				if ( !mount.IsParticleCatalogComplete ) { await Task.Yield(); continue; }
+				SpawnAvailable( mount );
+				ResolveMissingDefinitions( mount );
+				AdvanceInitialWarmups();
+				context.Title = $"Preparing Titanfall 2 particles ({_spawned.Count} created, {_pending.Count} pending, {_initialWarmups.Count} warming)";
+				if ( _pending.Count > 0 || _initialWarmups.Count > 0 ) await Task.Yield();
+			}
+			ResourcesPrepared = _failed == 0;
+			Log.Info( $"Titanfall 2 particle preparation complete during scene loading: {_spawned.Count} map FX retained, "
+				+ $"{_failed} skipped ({MapPath})." );
 		}
+		finally { _preparing = false; }
+	}
 
-		SpawnAvailable( mount );
+	void ResolveMissingDefinitions( Titanfall2Mount mount )
+	{
 		if ( _pending.Count > 0 && mount.IsParticleCatalogComplete && !_catalogResolved )
 		{
 			_catalogResolved = true;
@@ -106,32 +132,25 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 					Titanfall2Log.Warning( $"Titanfall 2 particle definition '{entity.EffectName}' was not found for '{MapPath}'." );
 			}
 		}
+	}
 
+	protected override void OnUpdate()
+	{
+		if ( !_initialized || _preparing ) return;
 		// Every frame: a woken effect must be enabled before it reaches the screen, and
 		// the pass is one distance and one frustum test per retained system.
 		RefreshActivation();
-		if ( !_completionLogged && _pending.Count == 0 )
-		{
-			_completionLogged = true;
-			Log.Info( $"Titanfall 2 particle streaming complete: {_spawned.Count} map FX retained, {_failed} skipped; "
-				+ $"{mount.ParticleDefinitionCount} definitions indexed from {mount.IndexedParticleFileCount}/{mount.ParticleFileCount} PCFs"
-				+ $"{(mount.IsParticleCatalogComplete ? string.Empty : " (catalog stopped after all requested effects resolved)")} ({MapPath})." );
-		}
-		else if ( !_completionLogged && _statusTimer.Elapsed.TotalSeconds >= 5.0 )
-		{
-			Log.Info( $"Titanfall 2 particle streaming: {_spawned.Count} spawned, {_pending.Count} pending, {_failed} skipped; "
-				+ $"{mount.IndexedParticleFileCount}/{mount.ParticleFileCount} PCFs, {mount.ParticleDefinitionCount} definitions ({MapPath})." );
-			_statusTimer.Restart();
-		}
 	}
 
 	protected override void OnDestroy()
 	{
+		ResourcesPrepared = false;
 		var released = _spawned.Count;
 		foreach ( var entity in _spawned )
 			if ( entity.GameObject.IsValid() && !entity.GameObject.IsDestroyed ) entity.GameObject.Destroy();
 		_spawned.Clear();
 		_pending.Clear();
+		_initialWarmups.Clear();
 		Log.Info( $"Titanfall 2 particle scene resources released: {released} systems ({MapPath})." );
 	}
 
@@ -144,7 +163,6 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 			_pending.AddRange( Decode( EncodedEntities ) );
 			var anchor = GetAnchor();
 			_pending.Sort( ( left, right ) => left.Position.DistanceSquared( anchor ).CompareTo( right.Position.DistanceSquared( anchor ) ) );
-			_statusTimer.Start();
 			Log.Info( $"Titanfall 2 particle streamer ready: {_pending.Count} active map FX; "
 				+ $"{LibrariesPerFrame} PCFs/frame, "
 				+ $"{InstancesPerFrame} systems/frame ({MapPath})." );
@@ -152,6 +170,7 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 		catch ( Exception exception )
 		{
 			_pending.Clear();
+			_failed++;
 			Log.Warning( $"Failed to initialize Titanfall 2 particle streaming for '{MapPath}': {exception.Message}" );
 		}
 	}
@@ -215,7 +234,7 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 			return false;
 		}
 
-		var alwaysActive = IsGlobalEffect( entity.EffectName );
+		var alwaysActive = IsGlobalEffect( entity.EffectName ) || entity.WarmupAndPause;
 		var influenceRadius = Titanfall2ParticleFactory.GetInfluenceRadius( definition ) * entity.Scale;
 		// A system tree is drawn while any of its systems is, so the tree keeps the largest
 		// draw distance and sleep time of its members.
@@ -235,9 +254,22 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 		var spawned = new SpawnedEntity( gameObject, entity.Position, alwaysActive, createdSystems, influenceRadius,
 			drawDistance + influenceRadius, sleepTime, warmup.ToArray() );
 		_spawned.Add( spawned );
-		// A new system was just warmed by the factory; it only needs its initial state.
-		ApplyActivation( spawned, GetAnchor(), GetViewFrustum(), Time.Now, false );
+		// Entity-level pre-roll is separate from the PCF default. Retail Beacon authors
+		// 40 seconds on one smoke plume, so spread this work across loading frames.
+		var initial = new Titanfall2ParticleWarmup( systems.Select( system => (system.Effect, system.Definition.WarmupTime) ),
+			entity.WarmupTime, entity.WarmupAndPause );
+		if ( !initial.Complete ) _initialWarmups.Add( new( spawned, initial ) );
+		else ApplyActivation( spawned, GetAnchor(), GetViewFrustum(), Time.Now, false );
 		return true;
+	}
+
+	void AdvanceInitialWarmups()
+	{
+		if ( _initialWarmups.Count == 0 ) return;
+		var warmup = _initialWarmups[0];
+		if ( !warmup.Work.Advance( 64, WakeWarmupBudgetMilliseconds ) ) return;
+		_initialWarmups.RemoveAt( 0 );
+		ApplyActivation( warmup.Entity, GetAnchor(), GetViewFrustum(), Time.Now, false );
 	}
 
 	void RefreshActivation()
@@ -313,7 +345,7 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 			|| name.Contains( "weather", StringComparison.OrdinalIgnoreCase );
 	}
 
-	static string Encode( IReadOnlyList<Titanfall2ParticleMapEntity> entities )
+	internal static string Encode( IReadOnlyList<Titanfall2ParticleMapEntity> entities )
 	{
 		var valid = entities?.Where( static entity => !string.IsNullOrWhiteSpace( entity.EffectName ) ).ToArray()
 			?? Array.Empty<Titanfall2ParticleMapEntity>();
@@ -341,12 +373,14 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 					writer.Write( point.Index );
 					writer.Write( point.Position.x ); writer.Write( point.Position.y ); writer.Write( point.Position.z );
 				}
+				writer.Write( entity.WarmupTime );
+				writer.Write( entity.WarmupAndPause );
 			}
 		}
 		return Convert.ToBase64String( stream.GetBuffer(), 0, checked((int)stream.Length) );
 	}
 
-	static IEnumerable<RuntimeEntity> Decode( string encoded )
+	internal static IEnumerable<RuntimeEntity> Decode( string encoded )
 	{
 		using var stream = new MemoryStream( Convert.FromBase64String( encoded ), false );
 		using var reader = new BinaryReader( stream, System.Text.Encoding.UTF8, false );
@@ -377,12 +411,18 @@ public sealed class Titanfall2ParticleStreamer : Component, Component.DontExecut
 					points[point] = new( id, location );
 				}
 			}
-			yield return new RuntimeEntity( effectName, targetName, position, rotation, scale, points );
+			var warmup = version >= 4 ? reader.ReadSingle() : 0f;
+			var pause = version >= 4 && reader.ReadBoolean();
+			if ( !float.IsFinite( warmup ) || !Titanfall2ParticleControlPoints.IsFinite( position )
+				|| !float.IsFinite( rotation.pitch ) || !float.IsFinite( rotation.yaw ) || !float.IsFinite( rotation.roll ) || !float.IsFinite( scale ) )
+				throw new InvalidDataException( "Particle entity transform or warmup is invalid." );
+			yield return new RuntimeEntity( effectName, targetName, position, rotation, scale, points, Math.Clamp( warmup, 0f, 60f ), pause );
 		}
 	}
 
-	readonly record struct RuntimeEntity( string EffectName, string TargetName, Vector3 Position, Angles Rotation, float Scale,
-		IReadOnlyList<Titanfall2ParticleMapControlPoint> ControlPoints );
+	internal readonly record struct RuntimeEntity( string EffectName, string TargetName, Vector3 Position, Angles Rotation, float Scale,
+		IReadOnlyList<Titanfall2ParticleMapControlPoint> ControlPoints, float WarmupTime, bool WarmupAndPause );
+	sealed record InitialWarmup( SpawnedEntity Entity, Titanfall2ParticleWarmup Work );
 	sealed class SpawnedEntity( GameObject gameObject, Vector3 position, bool alwaysActive, int systemCount, float influenceRadius,
 		float drawDistance, float sleepTime, (ParticleEffect Effect, float Seconds)[] warmup )
 	{
@@ -464,18 +504,8 @@ static class Titanfall2ParticleFactory
 		gameObject.LocalTransform = Transform.Zero;
 		var controlPoints = gameObject.AddComponent<Titanfall2ParticleControlPoints>();
 		controlPoints.Configure( parent.Components.GetInAncestorsOrSelf<Titanfall2ParticleControlPoints>(), definition.ControlPoints );
-		var effect = gameObject.AddComponent<ParticleEffect>();
-		ConfigureEffect( effect, definition );
-		Titanfall2ParticleGeometry geometry = null;
-		if ( definition.OrientationType == 2 || definition.Path.HasValue || definition.Visibility.HasValue || definition.EndCapLifetime || definition.DistanceRemaps.Count > 0
-			|| definition.ColorRemaps.Count > 0 || definition.ScalarRemaps.Count > 0 || definition.RandomFadeIn.HasValue || definition.RandomFadeOut.HasValue || definition.PositionWarpMinimum != Vector3.One
-			|| definition.PositionWarpMaximum != Vector3.One || (definition.Renderer & Titanfall2ParticleRenderer.Trail) != 0
-			|| definition.Oscillations.Count > 0 )
-		{
-			geometry = gameObject.AddComponent<Titanfall2ParticleGeometry>();
-			geometry.Configure( definition, controlPoints, CreateStretch( definition ) );
-		}
-		ConfigureEmitter( gameObject, definition, controlPoints );
+		var geometry = ConfigureSimulation( gameObject, definition, controlPoints );
+		var effect = gameObject.Components.Get<ParticleEffect>();
 		var hasRenderer = ConfigureRenderer( gameObject, mount, definition, geometry );
 		var hasChildren = false;
 
@@ -499,6 +529,28 @@ static class Titanfall2ParticleFactory
 		gameObject.Destroy();
 		error = $"Particle '{definition.Name}' has no supported renderer or child system.";
 		return false;
+	}
+
+	internal static bool HasShapePositionOffset( Titanfall2ParticleDefinition definition ) =>
+		definition.Shape is Titanfall2ParticleShape.Sphere or Titanfall2ParticleShape.Ring
+		&& (definition.PositionMinimum != Vector3.Zero || definition.PositionMaximum != Vector3.Zero);
+
+	internal static Titanfall2ParticleGeometry ConfigureSimulation( GameObject gameObject, Titanfall2ParticleDefinition definition,
+		Titanfall2ParticleControlPoints controlPoints )
+	{
+		var effect = gameObject.AddComponent<ParticleEffect>();
+		ConfigureEffect( effect, definition );
+		Titanfall2ParticleGeometry geometry = null;
+		if ( definition.OrientationType == 2 || definition.Path.HasValue || definition.Visibility.HasValue || definition.EndCapLifetime || definition.DistanceRemaps.Count > 0
+			|| definition.ColorRemaps.Count > 0 || definition.ScalarRemaps.Count > 0 || definition.RandomFadeIn.HasValue || definition.RandomFadeOut.HasValue || definition.PositionWarpMinimum != Vector3.One
+			|| definition.PositionWarpMaximum != Vector3.One || (definition.Renderer & Titanfall2ParticleRenderer.Trail) != 0
+			|| definition.Oscillations.Count > 0 || HasShapePositionOffset( definition ) )
+		{
+			geometry = gameObject.AddComponent<Titanfall2ParticleGeometry>();
+			geometry.Configure( definition, controlPoints, CreateStretch( definition ) );
+		}
+		ConfigureEmitter( gameObject, definition, controlPoints );
+		return geometry;
 	}
 
 	static void ConfigureEffect( ParticleEffect effect, Titanfall2ParticleDefinition definition )
@@ -673,6 +725,15 @@ static class Titanfall2ParticleFactory
 					tint.x * brightness, tint.y * brightness, tint.z * brightness,
 					Math.Clamp( materialDefinition.GetFloat( "$alpha", 1f ), 0f, 1f ) );
 				var renderer = gameObject.AddComponent<ParticleSpriteRenderer>();
+				if ( materialDefinition.GetString( "$startfadesize" ) is not null || materialDefinition.GetString( "$endfadesize" ) is not null )
+				{
+					if ( geometry is null )
+					{
+						geometry = gameObject.AddComponent<Titanfall2ParticleGeometry>();
+						geometry.Configure( definition, gameObject.Components.Get<Titanfall2ParticleControlPoints>(), CreateStretch( definition ) );
+					}
+					geometry.ConfigureSizeFade( materialDefinition.GetFloat( "$startfadesize", 10f ), materialDefinition.GetFloat( "$endfadesize", 20f ) );
+				}
 				var trail = (definition.Renderer & Titanfall2ParticleRenderer.Trail) != 0;
 				if ( trail )
 				{
@@ -1039,4 +1100,4 @@ static class Titanfall2ParticleFactory
 
 readonly record struct Titanfall2ParticleMapControlPoint( int Index, Vector3 Position );
 readonly record struct Titanfall2ParticleMapEntity( string EffectName, string TargetName, Vector3 Position, Angles Rotation, float Scale,
-	IReadOnlyList<Titanfall2ParticleMapControlPoint> ControlPoints = null );
+	IReadOnlyList<Titanfall2ParticleMapControlPoint> ControlPoints = null, float WarmupTime = 0f, bool WarmupAndPause = false );

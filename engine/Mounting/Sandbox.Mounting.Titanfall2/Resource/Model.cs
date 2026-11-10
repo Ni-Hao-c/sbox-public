@@ -61,9 +61,13 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 	Titanfall2Mount ImportHost => variantHost ?? Host;
 	string ImportPath => variantPath ?? Path;
 	readonly Dictionary<(int Skin, int Body, bool Collision), WeakReference<Model>> _variants = new();
+	readonly Dictionary<(int Skin, int Body), Titanfall2CollisionModelResult> _emptyCollisionVariants = new();
+	Titanfall2CollisionModelResult _collisionResult;
+	bool _collisionImportFailed;
 
 	internal Model GetVariant( int requestedSkin, int requestedBody, bool onlyCollision = false )
 	{
+		if ( onlyCollision ) return GetCollisionVariant( requestedSkin, requestedBody ).Model;
 		ArgumentOutOfRangeException.ThrowIfNegative( requestedSkin );
 		ArgumentOutOfRangeException.ThrowIfNegative( requestedBody );
 		var key = (requestedSkin, requestedBody, onlyCollision);
@@ -79,8 +83,33 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 		}
 	}
 
+	internal Titanfall2CollisionModelResult GetCollisionVariant( int requestedSkin, int requestedBody )
+	{
+		ArgumentOutOfRangeException.ThrowIfNegative( requestedSkin );
+		ArgumentOutOfRangeException.ThrowIfNegative( requestedBody );
+		var key = (requestedSkin, requestedBody, true);
+		lock ( _variants )
+		{
+			if ( _emptyCollisionVariants.TryGetValue( (requestedSkin, requestedBody), out var empty ) ) return empty;
+			if ( _variants.TryGetValue( key, out var weak ) && weak.TryGetTarget( out var cached ) && IsUsableModel( cached ) )
+			{
+				var data = cached.GetData<Titanfall2ModelCollisionData>();
+				return new( Titanfall2CollisionModelStatus.Loaded, cached, data.ModelContents, data.GeometrySource );
+			}
+			var loader = new ModelLoader( _source, false, ImportHost,
+				$"{ImportPath}/skin{requestedSkin}_body{requestedBody}_physics", requestedSkin, requestedBody, true );
+			loader.Load();
+			var result = loader._collisionResult;
+			if ( result.Status == Titanfall2CollisionModelStatus.Loaded ) _variants[key] = new( result.Model );
+			else if ( result.Status is Titanfall2CollisionModelStatus.Filtered or Titanfall2CollisionModelStatus.Empty )
+				_emptyCollisionVariants[(requestedSkin, requestedBody)] = result;
+			foreach ( var expired in _variants.Where( pair => !pair.Value.TryGetTarget( out _ ) ).Select( pair => pair.Key ).ToArray() ) _variants.Remove( expired );
+			return result;
+		}
+	}
+
 	[StructLayout( LayoutKind.Sequential )]
-	struct TitanfallVertex
+	internal struct TitanfallVertex
 	{
 		[VertexLayout.Position] public Vector3 Position;
 		[VertexLayout.Normal] public Vector3 Normal;
@@ -287,6 +316,9 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 				?? (isVista ? MaterialLoader.CreateVistaMaterial( $"{ImportPath}/fallback_{source.Index}", source.MaterialName, metadata )
 					: metadata.IsDecal ? MaterialLoader.CreateDecalMaterial( $"{ImportPath}/decal_fallback_{source.Index}", metadata )
 						: MaterialLoader.CreateRuntimeMaterial( $"{ImportPath}/fallback_{source.Index}", metadata ));
+			source.RuntimeMaterial = material;
+			source.GpuCompatible = !isVista && !metadata.IsTranslucent && !metadata.IsDecal && !metadata.IsWater
+				&& !MaterialLoader.IsGodrayMaterial( source.MaterialName ) && IsGpuSceneMaterial( material );
 			var mesh = new Mesh( $"{ImportPath}_{source.Index}", material );
 			mesh.CreateVertexBuffer( source.Vertices.Length, source.Vertices );
 			mesh.CreateIndexBuffer( source.Indices.Length, source.Indices );
@@ -329,6 +361,9 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 			Titanfall2Log.Warning( $"Titanfall 2 static instance model contains no LOD0 geometry: {ImportPath}" );
 			return null;
 		}
+		var allMeshes = levelLods.SelectMany( level => level.Meshes ).ToArray();
+		var mixed = !canInstance && Titanfall2StreamingSettings.GpuStaticScene && Titanfall2StreamingSettings.GpuMixedProps
+			&& allMeshes.Any( mesh => mesh.GpuCompatible ) && allMeshes.Any( mesh => !mesh.GpuCompatible );
 
 		// The deepest band this model actually resolved. Bands 4..7 alias it, and it must be the
 		// coarsest band that exists rather than band 3 or a hard zero: a model that ships only
@@ -350,8 +385,9 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 		for ( var level = 0; level < StaticInstanceBandCount; ++level )
 		{
 			if ( levelMeshes[level].Count > 0 ) coarsestSoFar = level;
-			foreach ( var mesh in levelMeshes[coarsestSoFar] )
-				builder.AddMesh( mesh, level );
+			for ( var mesh = 0; mesh < levelMeshes[coarsestSoFar].Count; ++mesh )
+				AddStaticRenderMesh( builder, levelMeshes[coarsestSoFar][mesh], level,
+					levelLods[coarsestSoFar].Meshes[mesh].GpuCompatible, mixed );
 		}
 
 		// Bands 4..7 have no band of their own to map to, so they alias the deepest band this
@@ -368,8 +404,9 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 		// duplicated.
 		for ( var level = StaticInstanceBandCount; level < StaticInstanceLodCount; ++level )
 		{
-			foreach ( var mesh in levelMeshes[deepestBand] )
-				builder.AddMesh( mesh, level );
+			for ( var mesh = 0; mesh < levelMeshes[deepestBand].Count; ++mesh )
+				AddStaticRenderMesh( builder, levelMeshes[deepestBand][mesh], level,
+					levelLods[deepestBand].Meshes[mesh].GpuCompatible, mixed );
 		}
 
 		// The engine's LOD walk does NOT compare these thresholds against world distance. It builds
@@ -391,6 +428,8 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 
 		var model = builder.Create();
 		StaticInstanceEligibility.Add( model, new StaticInstanceEligibilityValue( canInstance ) );
+		GeometryStatistics.Add( model, CompileGeometryStatistics( levelLods ) );
+		RegisterGpuGeometry( model, levelLods );
 		var levelCount = levelMeshes.Count( static meshes => meshes.Count > 0 );
 		Titanfall2Log.Trace( $"Titanfall 2 static instance all-LOD model loaded: {ImportPath} "
 			+ $"({levelCount}/{StaticInstanceBandCount} LOD bands with geometry of their own, "
@@ -803,6 +842,7 @@ partial class ModelLoader( ITitanfall2AssetSource source, bool staticInstance = 
 		}
 		catch ( Exception exception )
 		{
+			_collisionImportFailed = true;
 			Titanfall2Log.Warning( $"Embedded Titanfall 2 VPHY collision for '{ImportPath}' was skipped: {exception.Message}" );
 		}
 

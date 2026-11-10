@@ -44,9 +44,11 @@ public sealed class Titanfall2LightProbeLookup
 	/// <summary>
 	/// Node layout: <c>uint tag; uint value</c>. <c>tag &amp; 3</c> is the split axis, or 3 for a
 	/// leaf. Interior nodes keep their children at <c>tag &gt;&gt; 2</c> (below the split) and the
-	/// next index (at or above it), with <c>value</c> as the float split. Leaves reference
-	/// <c>tag &gt;&gt; 2</c> records from <c>value</c>. Verified against sp_timeshift_spoke02: every
-	/// sampled reference origin descends to the leaf that lists it.
+	/// next index (at or above it), with <c>value</c> as the float split. Leaves start at
+	/// reference <c>tag &gt;&gt; 2</c> and contain <c>value</c> records. Retail TF2 leaves contain
+	/// at most four references; community builders can use larger leaves. Checking that
+	/// reference origins belong to a leaf alone cannot detect a swapped first/count:
+	/// the resulting oversized ranges overlap and can still contain those origins.
 	/// </summary>
 	public Titanfall2LightProbe Find( NumericsVector3 position )
 	{
@@ -57,7 +59,7 @@ public sealed class Titanfall2LightProbeLookup
 			var tag = BinaryPrimitives.ReadUInt32LittleEndian( span );
 			var axis = (int)(tag & 3);
 			var value = BinaryPrimitives.ReadUInt32LittleEndian( span[4..] );
-			if ( axis == 3 ) return FindNearest( position, value, tag >> 2 );
+			if ( axis == 3 ) return FindNearest( position, tag >> 2, value );
 			var split = BitConverter.UInt32BitsToSingle( value );
 			var coordinate = axis == 0 ? position.X : axis == 1 ? position.Y : position.Z;
 			var child = (long)(tag >> 2) + (coordinate < split ? 0 : 1);

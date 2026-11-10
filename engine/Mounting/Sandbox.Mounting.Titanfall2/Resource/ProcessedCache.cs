@@ -1,4 +1,4 @@
-using System.IO.Compression;
+﻿using System.IO.Compression;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -221,7 +221,7 @@ public partial class Titanfall2Mount
 	string BuildContentFingerprint()
 	{
 		var identity = new StringBuilder( typeof( Titanfall2Mount ).Assembly.ManifestModule.ModuleVersionId.ToString() );
-		identity.Append( _root );
+		identity.Append( _root ).Append( _contentSnapshot?.Revision );
 		try
 		{
 			if ( !string.IsNullOrEmpty( _root ) )

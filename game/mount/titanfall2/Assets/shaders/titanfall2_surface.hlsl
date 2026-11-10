@@ -1,18 +1,51 @@
+// T2_MATERIAL_DECLARATIONS: ordinary and GPU-table paths share the same shading functions.
 // Shared material inputs for the imported lit surfaces. These are material
 // parameters; per-object RenderAttributes cannot be populated by Material.Set.
 #include "titanfall2_normals.hlsl"
+
+#if !D_T2_MATERIAL_TABLE
 float g_flT2Layered < Default( 0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
 float g_flT2LayeredOpacity < Default( 0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
 float g_flT2LayerBlendRamp < Default( 0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
 float g_flT2Unlit < Default( 0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
 float g_flT2SpecularWorkflow < Default( 0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
 float g_flT2HasCavity < Default( 0 ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
 float g_flT2CavityUvChannel < Default( -1 ); >;
+#endif
 #include "titanfall2_uv.hlsl"
 #include "titanfall2_emission.hlsl"
-CreateInputTexture2D( Cavity, Linear, 8, "None", "_cavity", "Reflection", Default4( 1, 1, 1, 1 ) );
-Texture2D g_tCavity < Channel( RGBA, Box( Cavity ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
+// x: present, y: slope encoding, z: two-channel encoding, w: material UV selector.
+#if !D_T2_MATERIAL_TABLE
+float4 g_vT2DetailNormal < Default4( 0, 0, 0, -1 ); >;
+#endif
+CreateInputTexture2D( DetailNormal, Linear, 8, "None", "_normal", "Detail", Default4( 0.5, 0.5, 1, 1 ) );
+#if !D_T2_MATERIAL_TABLE
+Texture2D g_tDetailNormal < Channel( RGBA, Box( DetailNormal ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
+#endif
 
+CreateInputTexture2D( Cavity, Linear, 8, "None", "_cavity", "Reflection", Default4( 1, 1, 1, 1 ) );
+
+#if !D_T2_MATERIAL_TABLE
+Texture2D g_tCavity < Channel( RGBA, Box( Cavity ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
+#endif
 float T2ReadCavity( PixelInput i, Material m )
 {
 	if ( g_flT2HasCavity < 0.5 ) return 1;
@@ -24,51 +57,98 @@ CreateInputTexture2D( Normal2, Linear, 8, "None", "_normal", "Layer 2", Default4
 CreateInputTexture2D( Gloss2, Linear, 8, "None", "_gloss", "Layer 2", Default4( 0, 0, 0, 1 ) );
 CreateInputTexture2D( Specular2, Linear, 8, "None", "_specular", "Layer 2", Default4( 0, 0, 0, 1 ) );
 CreateInputTexture2D( LayerBlend, Linear, 8, "None", "_mask", "Layer 2", Default4( 0, 0, 0, 1 ) );
+
+#if !D_T2_MATERIAL_TABLE
 Texture2D g_tAlbedo2 < Channel( RGBA, Box( Albedo2 ), Srgb ); OutputFormat( DXT5 ); SrgbRead( true ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
 Texture2D g_tNormal2 < Channel( RGBA, Box( Normal2 ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
 Texture2D g_tGloss2 < Channel( RGBA, Box( Gloss2 ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
 Texture2D g_tSpecular2 < Channel( RGBA, Box( Specular2 ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
+#endif
+
+#if !D_T2_MATERIAL_TABLE
 Texture2D g_tLayerBlend < Channel( RGBA, Box( LayerBlend ), Linear ); OutputFormat( DXT5 ); SrgbRead( false ); >;
+#endif
+float T2LayerWeight( PixelInput i, float2 uv )
+{
+	float2 maskUv = T2SurfaceUv( i.vTextureCoords.xy, uv, g_flT2LayerBlendUvChannel );
+	float mask = Tex2DS( g_tLayerBlend, g_sAniso, maskUv ).r;
+	// Retail Vcolt/Ao/Lyr programs use vertex alpha even without Vcola.
+	return saturate( (g_flT2LayerBlendRamp + 1.0) * i.vVertexColor.a
+		+ g_flT2LayerBlendRamp * (mask - 1.0) );
+}
 
 float T2SurfaceCoverage( PixelInput i, float2 uv, float vertexAlpha )
 {
 	if ( g_flT2LayeredOpacity < 0.5 ) return vertexAlpha;
-	float2 maskUv = T2SurfaceUv( i.vTextureCoords.xy, uv, g_flT2LayerBlendUvChannel );
-	float mask = Tex2DS( g_tLayerBlend, g_sAniso, maskUv ).r;
-	float weight = saturate( (g_flT2LayerBlendRamp + 1.0) * i.vVertexColor.a
-		+ g_flT2LayerBlendRamp * (mask - 1.0) );
-	return 1.0 - weight;
+	return 1.0 - T2LayerWeight( i, uv );
+}
+
+// Shared by colour and depth-normal paths. No albedo, specular, AO, emission or
+// environment samples here; both paths retain the same layer weight and UV rules.
+void T2ReadSurfaceGeometry( PixelInput i, float2 uv, float layerWeight,
+	out float gloss, out float3 normalWs )
+{
+	float2 rawUv = i.vTextureCoords.xy;
+	float2 normalUv = T2SurfaceUv( rawUv, uv, g_vT2SurfaceUvChannels.y );
+	gloss = Tex2DS( g_tGloss, g_sAniso, T2SurfaceUv( rawUv, uv, g_vT2SurfaceUvChannels.z ) ).r;
+	float3 normal = float3( 0, 0, 1 );
+	if ( g_flHasNormalMap > 0.5 )
+		normal = T2DecodeSurfaceNormal( Tex2DS( g_tNormal, g_sAniso, normalUv ).rgb, g_flT2NormalSlope, g_flT2NormalTwoChannel );
+	if ( g_flT2Layered > 0.5 )
+	{
+		gloss = lerp( gloss, Tex2DS( g_tGloss2, g_sAniso, T2SurfaceUv( rawUv, uv, g_vT2SurfaceUvChannels2.z ) ).r, layerWeight );
+		if ( g_flHasNormalMap2 > 0.5 )
+		{
+			float3 normal2 = T2DecodeSurfaceNormal( Tex2DS( g_tNormal2, g_sAniso, T2SurfaceUv( rawUv, uv, g_vT2SurfaceUvChannels2.y ) ).rgb, g_flT2NormalSlope2, g_flT2NormalTwoChannel2 );
+			normal = lerp( normal, normal2, layerWeight );
+		}
+	}
+	if ( g_vT2DetailNormal.x > 0.5 )
+	{
+		float2 detailUv = T2SurfaceUv( rawUv, uv, g_vT2DetailNormal.w );
+		float3 detail = T2DecodeSurfaceNormal( Tex2DS( g_tDetailNormal, g_sAniso, detailUv ).rgb,
+			g_vT2DetailNormal.y, g_vT2DetailNormal.z );
+		// Retail uberDetDtn adds decoded tangent slopes before building the world normal.
+		normal.xy += detail.xy;
+	}
+	// Flat materials do not need the derivative-built tangent frame. Material-table
+	// flags are constant over a primitive, as are the ordinary material parameters.
+	[branch] if ( g_flHasNormalMap <= 0.5 && (g_flT2Layered <= 0.5 || g_flHasNormalMap2 <= 0.5) && g_vT2DetailNormal.x <= 0.5 )
+		normalWs = T2GeometricNormalWs( i );
+	else
+		normalWs = T2SurfaceNormalWs( i, normalUv, normal );
+}
+
+void T2ReadDepthSurface( PixelInput i, float2 uv, out float gloss, out float3 normalWs )
+{
+	float weight = 0;
+	if ( g_flT2Layered > 0.5 ) weight = T2LayerWeight( i, uv );
+	T2ReadSurfaceGeometry( i, uv, weight, gloss, normalWs );
 }
 
 void T2ReadSurface( PixelInput i, float2 uv, out float4 albedo, out float gloss,
 	out float3 specular, out float3 normalWs )
 {
 	float2 rawUv = i.vTextureCoords.xy;
-	float2 normalUv = T2SurfaceUv( rawUv, uv, g_vT2SurfaceUvChannels.y );
 	albedo = Tex2DS( g_tAlbedo, g_sAniso, T2SurfaceUv( rawUv, uv, g_vT2SurfaceUvChannels.x ) );
-	gloss = Tex2DS( g_tGloss, g_sAniso, T2SurfaceUv( rawUv, uv, g_vT2SurfaceUvChannels.z ) ).r;
 	specular = Tex2DS( g_tSpecular, g_sAniso, T2SurfaceUv( rawUv, uv, g_vT2SurfaceUvChannels.w ) ).rgb;
-	float3 normal = float3( 0, 0, 1 );
-	if ( g_flHasNormalMap > 0.5 )
-		normal = T2DecodeSurfaceNormal( Tex2DS( g_tNormal, g_sAniso, normalUv ).rgb, g_flT2NormalSlope, g_flT2NormalTwoChannel );
+	float weight = 0;
 	if ( g_flT2Layered > 0.5 )
 	{
-		float mask = Tex2DS( g_tLayerBlend, g_sAniso, T2SurfaceUv( rawUv, uv, g_flT2LayerBlendUvChannel ) ).r;
-		// Verified against the retail pixel programs for Vcolt, Ao and base Lyr:
-		// mad r.y, ramp, vertex.a, vertex.a; mad r.x, ramp, mask, -ramp;
-		// add_sat weight, r.x, r.y. The vertex alpha is used even without Vcola.
-		float weight = saturate( (g_flT2LayerBlendRamp + 1.0) * i.vVertexColor.a
-			+ g_flT2LayerBlendRamp * (mask - 1.0) );
+		weight = T2LayerWeight( i, uv );
 		albedo.rgb = lerp( albedo.rgb, Tex2DS( g_tAlbedo2, g_sAniso, T2SurfaceUv( rawUv, uv, g_vT2SurfaceUvChannels2.x ) ).rgb, weight );
-		gloss = lerp( gloss, Tex2DS( g_tGloss2, g_sAniso, T2SurfaceUv( rawUv, uv, g_vT2SurfaceUvChannels2.z ) ).r, weight );
 		specular = lerp( specular, Tex2DS( g_tSpecular2, g_sAniso, T2SurfaceUv( rawUv, uv, g_vT2SurfaceUvChannels2.w ) ).rgb, weight );
-		if ( g_flHasNormalMap2 > 0.5 )
-		{
-			float3 normal2 = T2DecodeSurfaceNormal( Tex2DS( g_tNormal2, g_sAniso, T2SurfaceUv( rawUv, uv, g_vT2SurfaceUvChannels2.y ) ).rgb, g_flT2NormalSlope2, g_flT2NormalTwoChannel2 );
-			normal = lerp( normal, normal2, weight );
-		}
 	}
-	normalWs = T2SurfaceNormalWs( i, normalUv, normal );
+	T2ReadSurfaceGeometry( i, uv, weight, gloss, normalWs );
 }
 
 #include "titanfall2_probe_lighting.hlsl"
