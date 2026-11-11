@@ -12,6 +12,12 @@ public static partial class MenuUtility
 	public static bool PlatformMenu { get; set; }
 
 	/// <summary>
+	/// The part of the screen that's the game's (<see cref="Screen.SafeArea"/>) - what the platform menu leaves clear,
+	/// its dock over a game's own menu. Null gives it the whole screen again.
+	/// </summary>
+	public static void SetSafeArea( Rect? area ) => Screen.SafeAreaOverride = area;
+
+	/// <summary>
 	/// Add a game project from disk (its .sbproj) and compile it here, against this engine - so a game can be tried in
 	/// the menu without publishing it. Its local package, or null if it didn't load.
 	/// </summary>
@@ -78,21 +84,44 @@ public static partial class MenuUtility
 			query.WithTag( tag );
 
 		if ( sort is { } order )
-		{
-			query.WithSort( order switch
-			{
-				Sandbox.Storage.SortOrder.RankedByTrend => Workshop.SortOrder.Trending,
-				Sandbox.Storage.SortOrder.RankedByPublicationDate => Workshop.SortOrder.Newest,
-				Sandbox.Storage.SortOrder.RankedByLastUpdatedDate => Workshop.SortOrder.Updated,
-				Sandbox.Storage.SortOrder.RankedByVotesUp => Workshop.SortOrder.Votes,
-				Sandbox.Storage.SortOrder.RankedByTotalUniqueSubscriptions => Workshop.SortOrder.Subscriptions,
-				Sandbox.Storage.SortOrder.RankedByTotalPlaytime => Workshop.SortOrder.Playtime,
-				_ => Workshop.SortOrder.Popular
-			} );
-		}
+			query.WithSort( WorkshopSort( order ) );
 
 		return new WorkshopGameSearch( query );
 	}
+
+	static Workshop.SortOrder WorkshopSort( Sandbox.Storage.SortOrder sort ) => sort switch
+	{
+		Sandbox.Storage.SortOrder.RankedByTrend => Workshop.SortOrder.Trending,
+		Sandbox.Storage.SortOrder.RankedByPublicationDate => Workshop.SortOrder.Newest,
+		Sandbox.Storage.SortOrder.RankedByLastUpdatedDate => Workshop.SortOrder.Updated,
+		Sandbox.Storage.SortOrder.RankedByVotesUp => Workshop.SortOrder.Votes,
+		Sandbox.Storage.SortOrder.RankedByTotalUniqueSubscriptions => Workshop.SortOrder.Subscriptions,
+		Sandbox.Storage.SortOrder.RankedByTotalPlaytime => Workshop.SortOrder.Playtime,
+		_ => Workshop.SortOrder.Popular
+	};
+
+	/// <summary>
+	/// Maps on the Workshop, a page at a time - for a list that loads more as it's scrolled. With
+	/// <paramref name="subscribed"/>, just the ones you're subscribed to.
+	/// </summary>
+	public static WorkshopGameSearch SearchWorkshopMaps( string search = null, Sandbox.Storage.SortOrder? sort = null, bool subscribed = false )
+	{
+		var query = new Workshop.Query( search ).WithType( Workshop.ItemType.Map );
+
+		if ( subscribed )
+			query.WithSubscribed();
+
+		if ( sort is { } order )
+			query.WithSort( WorkshopSort( order ) );
+
+		return new WorkshopGameSearch( query );
+	}
+
+	/// <summary>
+	/// What a game's loaded with to start on this Workshop map (<see cref="LaunchArguments.Map"/>). Null if it can't
+	/// be.
+	/// </summary>
+	public static string LaunchMapOf( WorkshopItemDetails map ) => map?.KeyValues.GetValueOrDefault( "package" );
 
 	/// <summary>
 	/// The tags a game can be found by - what it is, as its publisher picked
