@@ -44,18 +44,11 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 	[Property, Hide]
 	public string EncodedModels { get; set; }
 
-	// Distance the vista content is scaled to sit at from the sky camera.
-	const float TargetDistance = 25000f;
-
 	readonly List<SceneModel> _sceneModels = new();
 	SceneWorld _skyboxWorld;
 	SceneDirectionalLight _skyLight;
 	object _skyboxBridge;
 	Type _skyboxBridgeType;
-	PropertyInfo _bridgeOrigin;
-	Action _updateBridge;
-	float _drawScale;
-	Vector3? _lastViewPosition;
 
 	internal void Configure(
 		string mountIdent,
@@ -98,7 +91,7 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 
 	protected override void OnPreRender()
 	{
-		if ( _skyboxBridge is null || _updateBridge is null ) return;
+		if ( _skyboxBridge is null ) return;
 		// SetData allocates a dynamic constant buffer. Refresh it even when the
 		// camera is stationary; a buffer from scene creation is not frame history.
 		var fog = new Titanfall2FogParameters( FogDensity, FogBaseColor, FogDirectionalColor, FogDirection, FogHeight );
@@ -118,28 +111,9 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 			}
 		}
 		foreach ( var model in _sceneModels ) fog.Apply( model.Attributes );
-		var camera = Scene?.Camera;
-		if ( !camera.IsValid() ) return;
-		// Camera modifiers compose before PreRender. Match the view that is actually
-		// rendered, including third-person offsets and camera effects.
-		var viewPosition = camera.View.Position;
-		if ( !viewPosition.IsFinite || _lastViewPosition == viewPosition ) return;
-
-		try
-		{
-			// The retail vista is a painted panorama, including cards close to its origin.
-			// Native 3D skyboxes add mainCamera / Scale. Cancel that translation so walking
-			// cannot move the sky camera through those cards or bring the skyline forward.
-			_bridgeOrigin.SetValue( _skyboxBridge, CameraOrigin - viewPosition / _drawScale );
-			_updateBridge();
-			_lastViewPosition = viewPosition;
-		}
-		catch ( Exception exception )
-		{
-			// Never let a failed native bridge callback throw every frame.
-			Log.Warning( exception, $"Unable to update Titanfall 2 skybox for '{MapPath}'." );
-			DestroySkybox();
-		}
+		// The native bridge uses the final render view for each camera, including
+		// transient weapon effects. Keep its authored origin fixed: cancelling a
+		// different camera snapshot here introduces shaking and removes height parallax.
 	}
 
 	void CreateSkybox()
@@ -153,9 +127,7 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 			var definitions = Decode( EncodedModels ).ToArray();
 			if ( definitions.Length == 0 ) return;
 
-			// Vista models are loaded before the bridge exists: their bounds decide the draw
-			// scale, because scale 1 puts a giant model in the playable world while a huge
-			// scale pushes the content past the camera's far plane and the sky disappears.
+			// Load every selected vista before attaching its world to the main scene.
 			var loadedModels = new List<(Titanfall2SkyboxModel Definition, Model Model)>( definitions.Length );
 			var failures = 0;
 			foreach ( var definition in definitions )
@@ -197,15 +169,12 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 				AmbientLightColor = new Color( 0.85f, 0.9f, 1.0f )
 			};
 
-			var scale = ResolveScale( loadedModels );
+			var scale = float.IsFinite( SkyScale ) ? Math.Clamp( SkyScale, 1f, 100000f ) : 1000f;
 			_skyboxBridge = constructor.Invoke( [parentWorld, _skyboxWorld] );
 			SetBridgeProperty( "CameraOrigin", CameraOrigin );
 			SetBridgeProperty( "Origin", CameraOrigin );
 			SetBridgeProperty( "Angles", CameraAngles );
 			SetBridgeProperty( "Scale", scale );
-			_drawScale = scale;
-			_bridgeOrigin = _skyboxBridgeType.GetProperty( "Origin" );
-			_updateBridge = _skyboxBridgeType.GetMethod( "Update" ).CreateDelegate<Action>( _skyboxBridge );
 			InvokeBridge( "Update" );
 			OnPreRender();
 
@@ -252,24 +221,6 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 		}
 	}
 
-	/// <summary>
-	/// Pushes the authored vista content to a believable distance. Titanfall stores skyscale=1000,
-	/// which the engine would use verbatim - putting its skybox camera inside the sector - so the
-	/// value is derived from the content extent.
-	/// </summary>
-	float ResolveScale( List<(Titanfall2SkyboxModel Definition, Model Model)> models )
-	{
-		var extent = 1f;
-		foreach ( var (definition, model) in models )
-		{
-			var offset = (definition.Position - CameraOrigin).Length;
-			var radius = model.Bounds.Size.Length * MathF.Abs( MathF.Max( definition.Scale, 0.001f ) );
-			extent = MathF.Max( extent, offset + radius );
-		}
-
-		return Math.Clamp( TargetDistance / extent, 0.001f, 4096f );
-	}
-
 	void DestroySkybox()
 	{
 		foreach ( var sceneModel in _sceneModels )
@@ -291,9 +242,6 @@ public sealed class Titanfall2Skybox3D : Component, Component.DontExecuteOnServe
 		}
 		_skyboxBridge = null;
 		_skyboxBridgeType = null;
-		_bridgeOrigin = null;
-		_updateBridge = null;
-		_lastViewPosition = null;
 		_skyboxWorld?.Delete();
 		_skyboxWorld = null;
 	}

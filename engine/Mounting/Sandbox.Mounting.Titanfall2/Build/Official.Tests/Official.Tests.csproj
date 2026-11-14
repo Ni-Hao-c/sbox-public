@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsTestProject>true</IsTestProject>
+    <IsPackable>false</IsPackable>
+    <AssemblyName>Sandbox.Mounting.Titanfall2.Refactor.Tests</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Official/Official.csproj" />
+    <None Include="../../../../../game/mount/titanfall2/titanfall2_lzham.dll" Link="titanfall2_lzham.dll" CopyToOutputDirectory="PreserveNewest" />
+    <Reference Include="$(SboxEngineRoot)/bin/managed/*.dll" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="MSTest.TestAdapter" Version="3.6.4" />
+    <PackageReference Include="MSTest.TestFramework" Version="3.6.4" />
+  </ItemGroup>
+</Project>

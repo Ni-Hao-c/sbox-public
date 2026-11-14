@@ -2,14 +2,13 @@ using Titanfall2;
 
 public sealed partial class Titanfall2StaticPropStreamer
 {
-	Titanfall2StaticPropGpuScene _gpuScene;
 	int _mixedGpuInstanceCount;
 	sealed record MixedGpuInstance( PropInstance Instance, Model Model, ulong OriginalMask, ulong ResidualMask );
 	int FullGpuInstanceCount => Math.Max( 0, (_gpuScene?.InstanceCount ?? 0) - _mixedGpuInstanceCount );
 
 	void BuildGpuStaticScene()
 	{
-		if ( Application.IsDedicatedServer || !Graphics.IsAvailable || !Titanfall2StreamingSettings.GpuStaticScene
+		if ( _runtimePhase != RuntimePhase.Preparing || Application.IsDedicatedServer || !Graphics.IsAvailable || !Titanfall2StreamingSettings.GpuStaticScene
 			|| !Titanfall2GpuSceneCompatibility.Available ) return;
 		var eligible = _clusters.Values.SelectMany( cluster => cluster.Batches.Values )
 			.Where( batch => ModelLoader.TryGetGpuGeometry( batch.Model, out var geometry ) && !geometry.IsMixed ).ToArray();
@@ -49,9 +48,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 					instance.CastShadows, source.Probe, source.PvsCells ) );
 			}
 			var layout = Titanfall2StaticPropGpuScene.Compile( instances, _compiledScene.Props.Length );
-			_gpuScene = new( Scene.SceneWorld, layout, BakedSkyColor, _localLights, ResolveGpuPvs );
-			_gpuScene.RenderingEnabled = false;
-			_gpuScene.UpdatePolicyCamera( FallbackAnchor );
+			_renderResources.CreateGpuScene( Scene.SceneWorld, layout, BakedSkyColor, ResolveGpuPvs, FallbackAnchor );
 			foreach ( var part in mixed ) part.Instance.RenderObject.MeshGroupMask = part.ResidualMask;
 			_gpuScene.RenderingEnabled = Active;
 			foreach ( var batch in eligible ) batch.GpuRendered = true;
@@ -66,7 +63,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 			foreach ( var part in mixed )
 				if ( part.Instance.RenderObject.IsValid() ) part.Instance.RenderObject.MeshGroupMask = part.OriginalMask;
 			_mixedGpuInstanceCount = 0;
-			_gpuScene?.Delete(); _gpuScene = null;
+			_renderResources.ReleaseGpuScene();
 			Log.Warning( exception, "Titanfall 2 GPU static scene preparation failed; retaining CPU renderer." );
 		}
 	}

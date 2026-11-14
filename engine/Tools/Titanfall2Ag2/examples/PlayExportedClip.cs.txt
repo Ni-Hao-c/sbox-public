@@ -1,0 +1,42 @@
+using Sandbox;
+using Sandbox.Animation;
+
+// Copy into the next project's Code directory as PlayExportedClip.cs.
+public sealed class PlayExportedClip : Component
+{
+	[Property] public SkinnedModelRenderer Renderer { get; set; }
+	[Property] public Clip Clip { get; set; }
+	[Property] public bool Looping { get; set; } = true;
+	Graph graph;
+	Graph previousGraph;
+	bool previousUseAnimGraph;
+
+	protected override void OnEnabled()
+	{
+		if ( !Renderer.IsValid() || Clip is not { IsValid: true, IsError: false, IsBound: true } )
+			return;
+		previousGraph = Renderer.Animation.Graph;
+		previousUseAnimGraph = Renderer.UseAnimGraph;
+		var builder = Graph.Builder;
+		builder.Skeleton = Clip.SkeletonName;
+		graph = builder.Create( builder.Clip( Clip, new GraphBuilder.ClipSettings
+		{
+			Looping = Looping,
+			SampleRootMotion = false
+		} ), "exported_tf2_clip" );
+		Renderer.UseAnimGraph = true;
+		Renderer.Animation.Graph = graph;
+	}
+
+	protected override void OnDisabled()
+	{
+		if ( Renderer.IsValid() && graph is not null && Renderer.Animation.Graph == graph )
+		{
+			Renderer.Animation.Graph = previousGraph;
+			Renderer.UseAnimGraph = previousUseAnimGraph;
+		}
+		graph?.Dispose();
+		graph = null;
+		previousGraph = null;
+	}
+}

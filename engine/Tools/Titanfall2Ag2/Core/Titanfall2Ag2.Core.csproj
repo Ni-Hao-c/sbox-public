@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <SboxTf2FormatsRoot Condition="'$(SboxTf2FormatsRoot)' == ''">../../../Mounting/Sandbox.Mounting.Titanfall2/Formats</SboxTf2FormatsRoot>
+    <SboxTf2LzhamBridge Condition="'$(SboxTf2LzhamBridge)' == ''">../../../../game/mount/titanfall2/titanfall2_lzham.dll</SboxTf2LzhamBridge>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Share the mount's decoders without loading engine assemblies or copying their implementation. -->
+    <Compile Include="$(SboxTf2FormatsRoot)/Mdl/*.cs" Exclude="$(SboxTf2FormatsRoot)/Mdl/*PhysicsReader.cs" Link="Decoders/%(Filename)%(Extension)" />
+    <Compile Include="$(SboxTf2FormatsRoot)/Vpk/VpkArchive.cs" Link="Decoders/VpkArchive.cs" />
+    <Compile Include="$(SboxTf2FormatsRoot)/Rpak/LzhamDecoder.cs" Link="Decoders/LzhamDecoder.cs" />
+    <None Include="$(SboxTf2LzhamBridge)" Link="titanfall2_lzham.dll" CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(SboxTf2LzhamBridge)')" />
+  </ItemGroup>
+</Project>

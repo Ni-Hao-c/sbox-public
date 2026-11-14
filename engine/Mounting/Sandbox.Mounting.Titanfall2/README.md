@@ -175,6 +175,24 @@ dotnet run --project engine/Tools/SboxBuild/SboxBuild.csproj -- test --no-build 
 dotnet run --project engine/Tools/SboxBuild/SboxBuild.csproj -- build-shaders
 ```
 
+### 使用官方 Steam 版引擎
+
+通过下面的命令，用指定安装自带的程序集构建独立挂载包；输出目录必须是一个新目录。
+
+```powershell
+dotnet run --project engine/Tools/SboxBuild/SboxBuild.csproj -- build-titanfall2 --engine "D:\Game\steams\steamapps\common\sbox" --output ".tmp/titanfall2-official-package"
+```
+
+该入口只构建挂载模块，不构建引擎。输出包含 `titanfall2.dll`、两个原生桥接 DLL、生产着色器源码和记录引擎程序集 SHA-256 的 `compatibility.json`。部署前须使用目标版本的 ShaderCompiler 编译这些着色器，不能复用开发版引擎生成的 `.shader_c`。部署位置为目标安装的 `mount/titanfall2/`。
+
+官方构建通过 [LoaderCompatibility.cs](Resource/LoaderCompatibility.cs) 保留场景缓存与资源释放语义。当前官方版缺少本地源码引擎的三个释放辅助接口，因此兼容层使用经过类型检查的加载器缓存字段与同一把锁。Steam 更新改变这些内部结构时需要重新构建并检查兼容性。默认源码工程继续使用引擎的原有接口。
+
+官方缓存回归可独立运行：
+
+```powershell
+dotnet test engine/Mounting/Sandbox.Mounting.Titanfall2/Build/Official.Tests/Official.Tests.csproj -c Release -p:SboxEngineRoot="D:\Game\steams\steamapps\common\sbox"
+```
+
 ### 正式回归入口
 
 下表列出已有测试源码，表示覆盖入口，不代表当前工作区已经运行通过。

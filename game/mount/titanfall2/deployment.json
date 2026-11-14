@@ -1,0 +1,30 @@
+{
+  "deployedAt": "2026-11-11T16:47:18.4336749+08:00",
+  "engineRoot": "D:/sbox/sbox-public/game",
+  "source": "D:\\sbox\\sbox-public\\.tmp\\tf2-sky-20261111\\local-package-ready",
+  "backup": "D:\\sbox\\sbox-public\\.tmp\\tf2-sky-20261111\\deploy-backup-20261111-164718\\Repository",
+  "previous": {
+    "Path": "D:\\sbox\\sbox-public\\game\\mount\\titanfall2\\titanfall2.dll",
+    "SHA256": "EE06DD96DD14B9608E71D7AC3C5EE18B7F6B6A8D473A7E80307F8D5F4DB23220",
+    "MVID": "05303d69-65f6-425b-8790-ecd8b8000f2b"
+  },
+  "deployed": {
+    "Path": "D:\\sbox\\sbox-public\\.tmp\\tf2-sky-20261111\\local-package-ready\\titanfall2.dll",
+    "SHA256": "D197FE69DF3B83E3B7511787B8B94D4CD6CB978122AE56661726CBF8E632424E",
+    "MVID": "c56218e5-30a3-4b44-8170-d5ae694aa969"
+  },
+  "shaderChanges": false,
+  "bridgeChanges": false,
+  "shaderSourcesVerified": 48,
+  "files": [
+    {
+      "sha256": "D197FE69DF3B83E3B7511787B8B94D4CD6CB978122AE56661726CBF8E632424E",
+      "path": "titanfall2.dll"
+    }
+  ],
+  "validation": {
+    "nativeGraphics": false,
+    "runtimeLoadedAfterDeployment": false,
+    "focusedTests": 8
+  }
+}

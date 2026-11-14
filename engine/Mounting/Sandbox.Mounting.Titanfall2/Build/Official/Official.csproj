@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <VersionPrefix>1.0.1</VersionPrefix>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>14</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>Sandbox.Mounting.Titanfall2</AssemblyName>
+    <DefineConstants>$(DefineConstants);SBOX_OFFICIAL_ENGINE</DefineConstants>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../**/*.cs" Exclude="../../Build/**;../../obj/**;../../bin/**" />
+    <Reference Include="Sandbox.Engine;Sandbox.System;Sandbox.Filesystem;Sandbox.Mounting;Sandbox.Reflection">
+      <HintPath>$(SboxEngineRoot)/bin/managed/%(Identity).dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+  <Target Name="ValidateOfficialEngine" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="'$(SboxEngineRoot)' == ''" Text="Set SboxEngineRoot to the official s&amp;box installation containing sbox.exe." />
+    <Error Condition="!Exists('$(SboxEngineRoot)/bin/managed/Sandbox.Engine.dll')" Text="Sandbox.Engine.dll was not found under $(SboxEngineRoot)/bin/managed." />
+  </Target>
+</Project>

@@ -31,12 +31,12 @@ partial class MapLoader
 		return 1;
 	}
 
-	int CreateSkybox( Titanfall2BspReader.ParsedBsp parsed )
+	internal static SkyboxCandidate SelectSkybox( Titanfall2BspReader.ParsedBsp parsed,
+		IReadOnlyList<Dictionary<string, string>> environmentEntities )
 	{
 		var vistaProps = parsed.StaticProps.Where( static prop => IsVistaModelPath( prop.ModelPath ) ).ToArray();
-		if ( vistaProps.Length == 0 ) return 0;
+		if ( vistaProps.Length == 0 ) return null;
 
-		var environmentEntities = ReadEnvironmentEntities( parsed );
 		var candidates = new List<SkyboxCandidate>();
 		foreach ( var values in environmentEntities )
 		{
@@ -49,30 +49,31 @@ partial class MapLoader
 			if ( values.TryGetValue( "angles", out var anglesText ) && TryParseVector3( anglesText, out var angleVector ) )
 				rotation = new Angles( angleVector.x, angleVector.y, angleVector.z );
 
-			// Retail authors both: "scale" (usually 1) and "skyscale" (1000). The engine uses the
-			// value as the skybox draw scale; using "scale" drops the camera inside the panorama
-			// (vista models read as giant geometry in the playable world), so prefer skyscale.
+			// Keep the authored miniature-world scale. Model extents do not determine
+			// camera parallax, and "scale" is not the same field as "skyscale".
 			var skyScale = 16f;
 			if ( values.TryGetValue( "skyscale", out var skyScaleText ) && TryParseFloat( skyScaleText, out var parsedSkyScale ) && parsedSkyScale > 0f )
 				skyScale = parsedSkyScale;
 			else if ( values.TryGetValue( "scale", out var scaleText ) && TryParseFloat( scaleText, out var parsedScale ) && parsedScale > 0f )
 				skyScale = parsedScale;
 
-			var matchingProps = vistaProps.Where( prop => DistanceSquared( prop.Origin, origin ) <= 16f * 16f ).ToArray();
-			if ( matchingProps.Length == 0 ) continue;
 			candidates.Add( new SkyboxCandidate(
 				values.GetValueOrDefault( "targetname", "sky_camera" ),
 				origin,
 				rotation,
 				Math.Clamp( skyScale, 1f, 100000f ),
 				ResolveSkyboxFog( values, environmentEntities ),
-				matchingProps ) );
+				[] ) );
 		}
 
 		SkyboxCandidate selected;
 		if ( candidates.Count > 0 )
 		{
-			selected = candidates
+			// A vista need not share the camera's pivot: Eden's level vista is 152
+			// units below it. Assign each vista to its nearest authored camera before
+			// choosing the level group, keeping the distant intro panorama separate.
+			selected = vistaProps.GroupBy( prop => candidates.MinBy( candidate => DistanceSquared( prop.Origin, candidate.Origin ) ) )
+				.Select( group => group.Key with { Models = group.ToArray() } )
 				.OrderByDescending( static candidate => candidate.Name.Contains( "level", StringComparison.OrdinalIgnoreCase ) )
 				.ThenByDescending( static candidate => candidate.Models.Count( prop => !IsPlanetVista( prop.ModelPath ) ) )
 				.ThenBy( static candidate => candidate.Name.Contains( "intro", StringComparison.OrdinalIgnoreCase ) )
@@ -97,6 +98,13 @@ partial class MapLoader
 				Titanfall2SkyboxFog.Disabled,
 				models );
 		}
+		return selected;
+	}
+
+	int CreateSkybox( Titanfall2BspReader.ParsedBsp parsed )
+	{
+		var selected = SelectSkybox( parsed, ReadEnvironmentEntities( parsed ) );
+		if ( selected is null ) return 0;
 
 		var skyboxModels = selected.Models.Select( static prop => new Titanfall2SkyboxModel(
 			prop.ModelPath,
@@ -115,7 +123,7 @@ partial class MapLoader
 			skyboxModels );
 
 		Log.Info( $"Titanfall 2 3D skybox selected: {Path} ({selected.Name}, origin {selected.Origin}, "
-			+ $"scale {selected.Scale:0.##}, {skyboxModels.Length}/{vistaProps.Length} vista models)" );
+			+ $"scale {selected.Scale:0.##}, {skyboxModels.Length} vista models)" );
 		return skyboxModels.Length;
 	}
 

@@ -1,3 +1,4 @@
+using static Titanfall2StaticPropSceneData;
 using System.Diagnostics;
 using Sandbox.Mounting.PerfKit;
 using Titanfall2;
@@ -11,18 +12,8 @@ using Titanfall2;
 public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.Internal.IUpdateSubscriber
 {
 	static readonly Sandbox.Diagnostics.Logger Log = new( "Titanfall2Props" );
-	const int DataMagic = 0x32505354; // TSP2
-	const int DataVersion = 9;
-	const int MaximumModelCount = 65536;
-	const int MaximumPropCount = 1_000_000;
-	const int VisibilityMagic = 0x32565354; // TSV2
-	const int VisibilityVersion = 2;
-	// Encoded size of one element, used to bound a decoded count by the bytes that are
-	// actually present instead of by a guessed maximum.
-	const int PlaneBytes = 16;  // normal xyz + distance
-	const int NodeBytes = 8;    // plane index + child
-	const int PortalBytes = 8;  // from cell + to cell
-
+	const int DataVersion = Titanfall2StaticPropSceneData.DataVersion;
+	const int PvsPortalDepth = Titanfall2StaticPropSceneData.PvsPortalDepth;
 	// Edge length of one BSP prop streaming cell, in world units.
 	const float CellSize = Titanfall2CompiledPropLayout.CellSize;
 	// Cells within this distance of the camera are populated first.
@@ -36,7 +27,6 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	// Extra retention band past a prop's render distance once it is visible.
 	const float RenderDistanceHysteresis = 512f;
 	// Maximum portal hops walked from the camera's PVS cell.
-	const int PvsPortalDepth = 16;
 	// Runtime visibility pass: cells visited and time spent per frame.
 	const int RuntimeCellsPerFrame = 16;
 	const float RuntimeCellBudgetMilliseconds = 1.5f;
@@ -90,9 +80,9 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	public bool PreparationComplete { get; private set; }
 	public bool ResourcesPrepared => PreparationComplete && !_initializationFailed && _failedProps == 0;
 	/// <summary>True only after the resident collision preload finishes without missing props/bodies.</summary>
-	public bool ResidentCollisionsReady { get; private set; }
+	public bool ResidentCollisionsReady => Collisions.ResidentReady;
 	/// <summary>Number of resident prop colliders expected in the native physics world.</summary>
-	public int ResidentCollisionCount => _collidersCreated;
+	public int ResidentCollisionCount => Collisions.Created;
 
 	[Property, Hide]
 	public Vector3 FallbackAnchor { get; set; }
@@ -103,7 +93,9 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	[Property, Hide]
 	public Color BakedSkyColor { get; set; }
 	[Property, Hide] public string EncodedLocalLights { get; set; }
-	Titanfall2LocalLightBuffer _localLights;
+	readonly Titanfall2StaticPropRenderResources _renderResources = new();
+	Titanfall2LocalLightBuffer _localLights => _renderResources.Lights;
+	Titanfall2StaticPropGpuScene _gpuScene => _renderResources.GpuScene;
 
 	/// <summary>
 	/// The CellBSP tree and its portals, encoded so they survive the component being
@@ -121,9 +113,6 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	// The runtime pass walks clusters, not cells: a batch belongs to a cluster and can be
 	// shared by every cell in it, so visiting cells would process one batch repeatedly.
 	readonly List<PropCluster> _runtimeClusterQueue = new();
-	// Collision activation has its own list, cursor and budgets. It is the one pass that is
-	// allowed to stop early, so it must not share a loop with the state pass.
-	readonly List<PropCell> _collisionCellQueue = new();
 	readonly Stopwatch _refreshTimer = new();
 	readonly Stopwatch _statusTimer = new();
 	Vector3 _lastAnchor;
@@ -131,13 +120,13 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	bool _initialized;
 	bool _initializationFailed;
 	bool _releasing;
-	bool _residentCollisionDirty;
+	CollisionRuntime _collisions;
+	CollisionRuntime Collisions => _collisions ??= new( this );
 	bool _completionLogged;
 	bool _batchesBuilt;
 	bool _runtimePvsUpdatePending;
 	int _runtimeClusterCursor;
 	bool _runtimeQueueRefreshPending;
-	int _collisionCellCursor;
 	int _totalProps;
 	int _activeCells;
 	int _liveProps;
@@ -149,11 +138,6 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	int _batchCount;
 	int _renderingProps;
 	int _shadowCastingProps;
-	int _collidableProps;
-	int _collidersCreated;
-	int _colliderFailures;
-	int _collisionFilteredProps;
-	int _collidersReleased;
 	int _pvsCameraCell = -1;
 	int _pvsVisibleProps;
 	int _pvsCulledProps;
@@ -161,23 +145,11 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	Titanfall2BspReader.VisibilityCellMask _visiblePvsCells;
 	Titanfall2BspReader.BspVisibility _visibility;
 
-	// Diagnostics. The engine overlay reports one hitch number for the whole frame,
-	// so each expensive unit of work reports itself with its own path and duration.
-	readonly Stopwatch _collisionProbe = new();
 	// Reusable budget timers. These paths run every frame, and Stopwatch.StartNew()
 	// allocates, so the timers are created once and restarted in place.
 	readonly Stopwatch _runtimeClusterTimer = new();
-	readonly Stopwatch _collisionQueueTimer = new();
 	readonly Stopwatch _populateTimer = new();
 	readonly Dictionary<string, double> _modelFailureRetryAfter = new( StringComparer.OrdinalIgnoreCase );
-	int _collisionInstancesThisFrame;
-	int _collisionBodiesThisYield;
-	int _collidersDeferred;
-	int _collisionResumeCount;
-	// The loading pass that must finish before readiness uses the load-time budgets instead of
-	// the runtime churn caps: 2 colliders per yield would need collidableProps/2 frames.
-	int _collisionInstanceLimitOverride;
-	float _collisionBudgetOverrideMilliseconds;
 	/// <summary>Budget of the populate pass currently running; SpawnProp needs it to decide whether starting another collider fits.</summary>
 	float _populateBudgetMilliseconds;
 	bool _pvsDiagnosticsLogged;
@@ -202,22 +174,28 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		Titanfall2BspReader.BspVisibility visibility, Color bakedSkyColor = default, IReadOnlyList<Titanfall2WorldLight> localLights = null,
 		IReadOnlyList<float> fadeDistances = null )
 	{
-		// AddComponent can awaken with no data before this first configuration.
-		// Keep empty legacy scenes valid, but decode the newly supplied payload.
-		if ( string.IsNullOrWhiteSpace( EncodedProps ) )
-		{
-			_initialized = false;
-			_visibilityRestoreFailed = false;
-		}
+		ConfigureCompiled( mountIdent, mapPath, fallbackAnchor,
+			Titanfall2StaticPropSceneData.Compile( props, visibility, localLights, fadeDistances ), bakedSkyColor );
+	}
+
+	internal void ConfigureCompiled( string mountIdent, string mapPath, Vector3 fallbackAnchor,
+		Titanfall2StaticPropSceneData.Payload payload, Color bakedSkyColor )
+	{
+		// Configuration is data-only; OnLoad owns all resource creation for each scene clone.
+		if ( _totalProps > 0 || _renderResources.IsPrepared )
+			throw new InvalidOperationException( "Cannot reconfigure a prepared static prop scene." );
+		_initialized = false;
+		_initializationFailed = false;
+		_visibilityRestoreFailed = false;
 		MountIdent = mountIdent;
 		MapPath = mapPath;
 		FallbackAnchor = fallbackAnchor;
-		_visibility = visibility;
-		_compiledVisibility = null;
-		EncodedProps = EncodeWithFade( props, visibility, fadeDistances );
+		EncodedProps = payload.Props;
+		EncodedVisibility = payload.Visibility;
+		EncodedLocalLights = payload.LocalLights;
 		BakedSkyColor = bakedSkyColor;
-		EncodedLocalLights = Titanfall2LocalLightBuffer.Encode( localLights );
-		EncodedVisibility = EncodeVisibility( visibility );
+		_visibility = null;
+		_compiledVisibility = null;
 		_compiledScene = null;
 	}
 
@@ -239,7 +217,7 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 			foreach ( var instance in cell.Instances )
 			{
 				if ( instance.RenderObject.IsValid() ) instance.RenderObject.RenderingEnabled = enabled && instance.RenderingEnabled;
-				if ( instance.CollisionObject.IsValid() ) instance.CollisionObject.Enabled = enabled;
+				Collisions.SetEnabled( instance, enabled );
 			}
 		}
 		foreach ( var cluster in _clusters.Values )
@@ -253,30 +231,29 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		}
 	}
 
-	protected override void OnDestroy()
+	protected override void OnDestroy() => ReleaseResources();
+
+	void ReleaseResources()
 	{
+		if ( _releasing ) return;
 		_runtimePhase = RuntimePhase.Retiring;
-		_gpuScene?.Delete();
-		_gpuScene = null;
+		_releasing = true;
+		_renderResources.ReleaseGpuScene();
 		_mixedGpuInstanceCount = 0;
 		PreparationComplete = false;
-		ResidentCollisionsReady = false;
-		_releasing = true;
+		Collisions.ResidentReady = false;
 		var releasedProps = _liveProps;
 		var releasedBatches = _batchCount;
-		// A cluster owns its batches because several cells may share one of them. Walking
-		// cells here would delete a shared batch on its first member cell and leave every
-		// other member pointing at a deleted object, so the cluster is visited once and is
-		// the only thing that ever deletes a batch.
+		// Detach each cluster once: cells share its batch references. The render owner
+		// then deletes native batches/objects before releasing their light buffers.
 		foreach ( var cluster in _clusters.Values )
 			DestroyClusterInstances( cluster );
-		_localLights?.Dispose();
-		_localLights = null;
+		_renderResources.Dispose();
 		_clusters.Clear();
 		_cells.Clear();
 		_workQueue.Clear();
 		_runtimeClusterQueue.Clear();
-		_collisionCellQueue.Clear();
+		Collisions.Clear();
 		_compiledScene = null;
 		_compiledVisibility = null;
 		_renderCensus = null;
@@ -291,14 +268,7 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 
 		// Collision restarts from the nearest cells on every refresh so colliders follow the
 		// player. It is capped per frame and can no longer affect the pass above.
-		if ( !KeepAllCollisions || HasPendingResidentCollisions ) RebuildCollisionQueue();
-	}
-
-	void OnResidentCollisionDestroyed()
-	{
-		if ( _releasing || !KeepAllCollisions ) return;
-		ResidentCollisionsReady = false;
-		_residentCollisionDirty = true;
+		Collisions.Refresh();
 	}
 
 	/// <summary>
@@ -356,7 +326,7 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 	{
 		if ( _workQueue.Count == 0 ) return;
 		_populateTimer.Restart();
-		_collisionBodiesThisYield = 0;
+		Collisions.BeginPopulate();
 		_populateBudgetMilliseconds = budgetMilliseconds;
 		var attempted = 0;
 		while ( attempted < maximumProps && _workQueue.Count > 0 )
@@ -398,7 +368,7 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		{
 			var serverProp = new PropInstance( prop, null, 0f, false, false, true );
 			cell.Instances.Add( serverProp );
-			if ( prop.Collidable ) _collidableProps++;
+			Collisions.Register( serverProp, null, _populateTimer, _populateBudgetMilliseconds );
 			return true;
 		}
 		var resourcePath = $"mount://{MountIdent}/{prop.ModelPath}.vmdl";
@@ -487,6 +457,7 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		}
 		if ( renderObject.IsValid() )
 		{
+			_renderResources.Track( renderObject );
 			renderObject.Flags.IsStatic = true;
 			renderObject.Flags.CastShadows = castShadows;
 			renderObject.ColorTint = new Color( prop.ProbeColor.x, prop.ProbeColor.y, prop.ProbeColor.z, 1f );
@@ -498,25 +469,7 @@ public sealed partial class Titanfall2StaticPropStreamer : Component, Sandbox.In
 		if ( instanceVisible ) _renderingProps++;
 		if ( castShadows ) _shadowCastingProps++;
 		var instance = new PropInstance( prop, renderObject, radius, instanceVisible, castShadows, isBatched );
-		if ( prop.Collidable )
-		{
-			_collidableProps++;
-			// A collider costs 2-22 ms, so the loading pass is not allowed to start an
-			// unbounded number of them inside one yield. Anything skipped keeps a null
-			// CollisionObject and is created by the runtime cell pass as the player
-			// approaches, which is where the distance-based activation already lives.
-			var withinYieldCap = _collisionBodiesThisYield < PreloadCollisionBodiesPerYield;
-			var withinYieldBudget = _populateTimer.Elapsed.TotalMilliseconds < _populateBudgetMilliseconds;
-			if ( withinYieldCap && withinYieldBudget )
-			{
-				_collisionBodiesThisYield++;
-				EnsureCollisionState( instance, anchor: _lastAnchor, fallbackModel: model );
-			}
-			else
-			{
-				_collidersDeferred++;
-			}
-		}
+		Collisions.Register( instance, model, _populateTimer, _populateBudgetMilliseconds );
 		cell.Instances.Add( instance );
 		return true;
 	}

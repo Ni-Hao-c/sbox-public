@@ -9,7 +9,7 @@ partial class MapLoader(
 	ITitanfall2AssetSource particleEntitySource = null,
 	ITitanfall2AssetSource scriptEntitySource = null,
 	ITitanfall2AssetSource soundEntitySource = null,
-	bool pureWorld = false ) : SceneLoader<Titanfall2Mount>, ITitanfall2SceneResource
+	bool pureWorld = false ) : Titanfall2SceneLoader, ITitanfall2SceneResource
 {
 	const float DecalNormalOffset = 0.25f;
 	// Seconds after load before the deferred navmesh build starts.
@@ -34,13 +34,13 @@ partial class MapLoader(
 	{
 		// A load may still be producing the scene. The owner retries later instead of
 		// tearing down something that is being built.
-		if ( IsLoading ) return false;
-		var releasedCache = ReleaseCachedResult();
+		if ( IsLoaderBusy ) return false;
+		var releasedCache = ReleaseLoaderResult();
 		// Destroying the cached SceneFile is what makes a later reopen rebuild the map:
 		// SceneFile.Load checks the resource library first, so otherwise it would return
 		// the stale serialized scene whose generated models and lightmaps we are about to
 		// drop (see the field comment above).
-		var releasedScene = ReleaseCachedScene();
+		var releasedScene = ReleaseLoaderScene();
 		var releasedWorldBuild = _cachedWorldBuild is not null;
 		if ( !releasedCache && !releasedScene && !releasedWorldBuild ) return false;
 		DiscardWorldBuild();
@@ -48,7 +48,7 @@ partial class MapLoader(
 	}
 
 	/// <summary>True while a load is in flight, so a release has to wait instead of tearing it down.</summary>
-	public bool IsReleaseDeferred => IsLoading;
+	public bool IsReleaseDeferred => IsLoaderBusy;
 
 	/// <summary>
 	/// Drops this loader's own build state. Lightmap pages and probe atlases are this build's
@@ -309,12 +309,15 @@ partial class MapLoader(
 		var audioCount = server ? 0 : CreateMapAudio( parsed, streamingAnchor );
 		var dynamicPropCount = _pureWorld ? 0 : CreateDynamicProps( world, parsed );
 		var worldProps = parsed.StaticProps.Where( static prop => !IsVistaModelPath( prop.ModelPath ) ).ToArray();
+		// Compile only source data into the map resource. Scene clones create their own
+		// render/physics resources during OnLoad, never while configuring the template.
+		var propPayload = Titanfall2StaticPropSceneData.Compile( worldProps, parsed.Visibility,
+			Titanfall2StreamingSettings.UseBspLightmaps ? parsed.WorldLights : null,
+			server ? null : ResolvePropFadeDistances( worldProps ) );
 		var streamerObject = new GameObject( true, "titanfall2_static_prop_streamer" );
 		var propStreamer = streamerObject.AddComponent<Titanfall2StaticPropStreamer>();
 		propStreamer.KeepAllCollisions = _pureWorld || server || Titanfall2StreamingSettings.ResidentWorld;
-		propStreamer.Configure( Host.Ident, Path, streamingAnchor, worldProps, parsed.Visibility, ReadBakedSkyColor( parsed ),
-				Titanfall2StreamingSettings.UseBspLightmaps ? parsed.WorldLights : null,
-				server ? null : ResolvePropFadeDistances( worldProps ) );
+		propStreamer.ConfigureCompiled( Host.Ident, Path, streamingAnchor, propPayload, ReadBakedSkyColor( parsed ) );
 		if ( propStreamer.KeepAllCollisions )
 		{
 			var ready = world.AddComponent<Titanfall2WorldReady>();

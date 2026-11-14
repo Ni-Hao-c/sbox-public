@@ -17,6 +17,14 @@ internal class Program
 
 		// Compound commands (handle multiple related steps with flags)
 		AddBuildCommand( rootCommand );
+		AddBuildTitanfall2Command( rootCommand );
+		var ag2Converter = new Command( "build-titanfall2-ag2", "Build, test and check formatting of the standalone model/AG2 exporter" );
+		var formatAg2 = new Option<bool>( "--format", "Format the converter's own source files before verification" );
+		var packageAg2 = new Option<string>( "--output", "Optional new directory for the portable tool and independent source snapshot" );
+		ag2Converter.AddOption( formatAg2 );
+		ag2Converter.AddOption( packageAg2 );
+		ag2Converter.SetHandler( ( bool format, string output ) => Environment.ExitCode = (int)new BuildTitanfall2Ag2( format, output ).Run(), formatAg2, packageAg2 );
+		rootCommand.Add( ag2Converter );
 		AddBootstrapCommand( rootCommand );
 		AddFormatCommand( rootCommand );
 
@@ -61,6 +69,20 @@ internal class Program
 	}
 
 	// ── Compound commands ─────────────────────────────────────────────────────
+
+	private static void AddBuildTitanfall2Command( RootCommand rootCommand )
+	{
+		var cmd = new Command( "build-titanfall2", "Build a Titanfall 2 mount package against an installed official engine (does not deploy)" );
+		var engineOption = new Option<string>( "--engine", "s&box installation containing sbox.exe" ) { IsRequired = true };
+		var outputOption = new Option<string>( "--output", "New directory for the mount package" ) { IsRequired = true };
+		cmd.AddOption( engineOption );
+		cmd.AddOption( outputOption );
+		cmd.SetHandler( ( string engine, string output ) =>
+		{
+			Environment.ExitCode = (int)new BuildTitanfall2( engine, output ).Run();
+		}, engineOption, outputOption );
+		rootCommand.Add( cmd );
+	}
 
 	private static void AddBuildCommand( RootCommand rootCommand )
 	{

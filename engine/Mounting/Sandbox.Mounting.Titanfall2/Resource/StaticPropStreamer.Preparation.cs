@@ -6,28 +6,34 @@ public sealed partial class Titanfall2StaticPropStreamer
 	{
 		_runtimePhase = RuntimePhase.Preparing;
 		try { await PrepareResources( context ); }
+		catch
+		{
+			// A failed/cancelled load must not leave native resources attached to a
+			// partially loaded component while the caller handles the exception.
+			ReleaseResources();
+			throw;
+		}
 		finally
 		{
 			if ( !_releasing ) _runtimePhase = PreparationComplete ? RuntimePhase.Ready : RuntimePhase.Uninitialized;
 		}
 	}
 
-	bool HasPendingResidentCollisions => _collidersCreated + _collisionFilteredProps + _colliderFailures < _collidableProps;
-
 	async Task PrepareResources( LoadingContext context )
 	{
 		PreparationComplete = false;
-		ResidentCollisionsReady = false;
+		Collisions.ResidentReady = false;
 		if ( Application.IsDedicatedServer ) KeepAllCollisions = true;
 		if ( !_initialized ) InitializeCells();
 		if ( !_initialized || _initializationFailed ) return;
 		if ( _cells.Count == 0 || _totalProps == 0 )
 		{
-			ResidentCollisionsReady = KeepAllCollisions;
+			Collisions.ResidentReady = KeepAllCollisions;
 			PreparationComplete = true;
 			return;
 		}
 
+		_renderResources.Prepare( EncodedLocalLights );
 		var loadTimer = Stopwatch.StartNew();
 		var cacheBefore = Titanfall2ProcessedCache.GetStatistics();
 		Log.Info( $"Titanfall 2 effective configuration: {System.Text.Json.JsonSerializer.Serialize( Titanfall2EffectiveConfiguration.Capture() )}" );
@@ -45,44 +51,8 @@ public sealed partial class Titanfall2StaticPropStreamer
 			if ( processed < _totalProps ) await Task.Yield();
 		}
 
-		if ( KeepAllCollisions )
-		{
-			// Readiness must arrive in a bounded number of yields. At the runtime churn cap
-			// (2 colliders per frame) a map with thousands of solid props would take
-			// thousands of frames after the prop pass, so the load pass uses the preload
-			// count/budget instead.
-			_collisionInstanceLimitOverride = PreloadCollisionBodiesPerYield;
-			_collisionBudgetOverrideMilliseconds = PreloadBudgetMilliseconds;
-			try
-			{
-				foreach ( var cell in _cells.Values )
-				{
-					cell.CollisionCursor = 0;
-					bool complete;
-					do
-					{
-						if ( !this.IsValid() || !GameObject.IsValid() ) return;
-						_collisionQueueTimer.Restart();
-						_collisionInstancesThisFrame = 0;
-						complete = UpdateCellCollisionState( cell, FallbackAnchor, _collisionQueueTimer );
-						context.Title = $"Loading Titanfall 2 prop collision ({_collidersCreated}/{_collidableProps})";
-						if ( !complete ) await Task.Yield();
-					} while ( !complete );
-				}
-			}
-			finally
-			{
-				_collisionInstanceLimitOverride = 0;
-				_collisionBudgetOverrideMilliseconds = 0f;
-			}
-			ResidentCollisionsReady = _failedProps == 0 && _colliderFailures == 0
-				&& _collidersCreated + _collisionFilteredProps == _collidableProps;
-			if ( !HasPendingResidentCollisions )
-			{
-				_collisionCellQueue.Clear();
-				_collisionCellCursor = 0;
-			}
-		}
+		if ( KeepAllCollisions ) await Collisions.Preload( context );
+		if ( _releasing || !this.IsValid() ) return;
 
 		LogCompletion();
 		LogBatchComposition();
@@ -91,7 +61,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 			+ $"{loadTimer.Elapsed.TotalSeconds:0.00}s ({MapPath})." );
 		if ( KeepAllCollisions && !ResidentCollisionsReady )
 			Log.Warning( $"Titanfall 2 resident prop collision is incomplete: {_failedProps} missing props, "
-				+ $"{_colliderFailures} missing collision models, {_collidersCreated}/{_collidableProps} colliders; "
+				+ $"{Collisions.Failures} missing collision models, {Collisions.Created}/{Collisions.Expected} colliders; "
 				+ $"ttf2_map_ready will not be published ({MapPath})." );
 		var cacheAfter = Titanfall2ProcessedCache.GetStatistics();
 		Log.Info( $"Titanfall 2 processed model cache: {cacheAfter.ModelHits - cacheBefore.ModelHits} hits, "

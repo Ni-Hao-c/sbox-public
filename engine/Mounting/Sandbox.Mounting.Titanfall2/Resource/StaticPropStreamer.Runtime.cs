@@ -33,7 +33,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 			: FallbackAnchor;
 		_gpuScene?.UpdatePolicyCamera( anchor );
 		var needsSpatialWork = _cpuRenderClusters != 0 || !PreparationComplete
-			|| !KeepAllCollisions || HasPendingResidentCollisions || _residentCollisionDirty;
+			|| Collisions.NeedsSpatialWork;
 		var pvsCellChanged = false;
 		if ( needsSpatialWork )
 		{
@@ -44,24 +44,10 @@ public sealed partial class Titanfall2StaticPropStreamer
 
 		if ( !PreparationComplete && _workQueue.Count > 0 ) PopulateCells( PropsPerFrame, FrameBudgetMilliseconds );
 		if ( _runtimeClusterQueue.Count > 0 ) ProcessRuntimeClusterQueue();
-		if ( _residentCollisionDirty )
-		{
-			_residentCollisionDirty = false;
-			RebuildCollisionQueue();
-		}
-		if ( _collisionCellQueue.Count > 0 ) ProcessCollisionQueue();
+		Collisions.Tick();
 		// Independent of the sweep above: recompute when the camera moved far enough, then apply a
 		// bounded number of queued shadow flag changes. No-op when the gate is off.
 		if ( _cpuRenderClusters != 0 ) UpdateShadowGate( anchor, pvsCellChanged );
-		// A collision model that failed to load during the loading pass is retried by the
-		// runtime pass; publish readiness once every expected collider exists.
-		if ( KeepAllCollisions && !ResidentCollisionsReady && _failedProps == 0 && _colliderFailures == 0
-			&& _collidersCreated + _collisionFilteredProps == _collidableProps )
-		{
-			ResidentCollisionsReady = true;
-			Titanfall2Log.Info( $"Titanfall 2 resident prop collision became ready after the loading pass: "
-				+ $"{_collidersCreated}/{_collidableProps} colliders ({MapPath})." );
-		}
 		if ( !_completionLogged )
 		{
 			LogCompletion();

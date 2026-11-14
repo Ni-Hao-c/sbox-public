@@ -216,7 +216,7 @@ sealed class Titanfall2BrushModelSource( ITitanfall2AssetSource source, ITitanfa
 	}
 }
 
-sealed class Titanfall2BrushModelLoader( Titanfall2BrushModelSource source, int index ) : ResourceLoader<Titanfall2Mount>, ITitanfall2SceneResource
+sealed class Titanfall2BrushModelLoader( Titanfall2BrushModelSource source, int index ) : Titanfall2ResourceLoader, ITitanfall2SceneResource
 {
 	Material[] _materials;
 	(uint Contents, Model Model)[] _collisionGroups;
@@ -230,7 +230,7 @@ sealed class Titanfall2BrushModelLoader( Titanfall2BrushModelSource source, int 
 
 	public bool ReleaseSceneResource()
 	{
-		var released = ReleaseCachedResult() | (_collisionGroups is not null);
+		var released = ReleaseLoaderResult() | (_collisionGroups is not null);
 		_materials = null;
 		_collisionGroups = null;
 		return released;

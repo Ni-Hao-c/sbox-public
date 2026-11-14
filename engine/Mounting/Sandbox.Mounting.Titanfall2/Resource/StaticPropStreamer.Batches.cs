@@ -26,6 +26,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 		MountedInstanceBatch result = batch.Probes.Any( static probe => probe.Metadata.x > 0 )
 			? new Titanfall2ProbeInstanceBatch( Scene.SceneWorld, model, batch.GetOrBuildTransformArray(), batch.Probes.ToArray(), BakedSkyColor, options, _localLights )
 			: new Titanfall2PlainInstanceBatch( Scene.SceneWorld, model, batch.GetOrBuildTransformArray(), options );
+		_renderResources.Track( result );
 		// Production opaque/cutout variants return depth normals before reading probes.
 		// Leave arbitrary forward-only diagnostic/custom batch shaders on the full path.
 		if ( result is Titanfall2ProbeInstanceBatch probes ) probes.SkipDepthProbeBindings = true;
@@ -66,6 +67,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 							pendingBatch.Model,
 							pendingBatch.Transforms[index] );
 						fallback.Flags.IsStatic = true;
+						_renderResources.Track( fallback );
 						var probeColor = pendingBatch.ProbeColors[index];
 						fallback.ColorTint = new Color( probeColor.x, probeColor.y, probeColor.z, 1f );
 						pendingBatch.Probes[index].Apply( fallback, BakedSkyColor );
@@ -113,18 +115,14 @@ public sealed partial class Titanfall2StaticPropStreamer
 		=> Titanfall2StreamingSettings.PropShadows && radius >= ShadowMinimumRadius;
 
 	/// <summary>
-	/// Releases the native batches owned by one cluster. This is the only place a batch is
-	/// deleted, so a batch shared by several cells can never be deleted twice, nor while a
-	/// member cell still points at it.
+	/// Clears borrowed batch/instance references for one cluster. The render owner deletes
+	/// native objects after all clusters are detached; collision lifetime is independent.
 	/// </summary>
 	void DestroyClusterInstances( PropCluster cluster )
 	{
 		foreach ( var pendingBatch in cluster.Batches.Values )
 		{
 			_shadowCastingProps = Math.Max( 0, _shadowCastingProps - pendingBatch.ShadowedInstanceCount );
-			pendingBatch.RenderBatch?.Delete();
-			foreach ( var fallback in pendingBatch.FallbackObjects )
-				fallback?.Delete();
 		}
 		cluster.Batches.Clear();
 
@@ -145,8 +143,7 @@ public sealed partial class Titanfall2StaticPropStreamer
 			if ( instance.RenderingEnabled ) _renderingProps = Math.Max( 0, _renderingProps - 1 );
 			if ( !instance.IsBatched && instance.CastShadows )
 				_shadowCastingProps = Math.Max( 0, _shadowCastingProps - 1 );
-			instance.RenderObject?.Delete();
-			if ( instance.CollisionObject.IsValid() && !instance.CollisionObject.IsDestroyed ) instance.CollisionObject.Destroy();
+			Collisions.Release( instance );
 		}
 		_liveProps = Math.Max( 0, _liveProps - cell.Instances.Count );
 		cell.Instances.Clear();

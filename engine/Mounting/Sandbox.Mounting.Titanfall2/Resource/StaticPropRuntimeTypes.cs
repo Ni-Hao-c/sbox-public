@@ -1,3 +1,4 @@
+using static Titanfall2StaticPropSceneData;
 using Sandbox.Mounting.PerfKit;
 using Titanfall2;
 
@@ -8,27 +9,6 @@ using Titanfall2;
 /// </summary>
 public sealed partial class Titanfall2StaticPropStreamer
 {
-	readonly record struct StreamedProp(
-		string ModelPath,
-		Vector3 Position,
-		Angles Rotation,
-		float Scale,
-		bool Collidable,
-		Vector3 ProbeColor,
-		Titanfall2ProbeData Probe,
-		Titanfall2BspReader.VisibilityCellMask PvsCells,
-		int SourceIndex,
-		byte SolidType,
-		uint ReservedCollisionData,
-		uint CollisionFlagsRemove )
-	{
-		/// <summary>Dense, stable ID in the compiled scene; independent of BSP SourceIndex.</summary>
-		public int InstanceId { get; init; }
-		public int Skin { get; init; }
-		/// <summary>Original fade distance (sprp value, else MDL default); 0 means it never fades.</summary>
-		public float FadeDistance { get; init; }
-	}
-
 	sealed class PropInstance(
 		StreamedProp source,
 		SceneObject renderObject,
